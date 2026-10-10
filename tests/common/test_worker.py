@@ -31,6 +31,7 @@ import random
 import subprocess
 import sys
 import textwrap
+import threading
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -48,6 +49,7 @@ from common.config import Settings, get_settings
 from common.errors import Cancelled
 from common.queue import Job, PostgresQueue
 from common.worker import (
+    _MAX_PLAUSIBLE_DURATION_SEC,
     EXIT_HUNG_HANDLER,
     JobContext,
     Worker,
@@ -1035,6 +1037,168 @@ def test_a_queue_without_fail_job_still_exits(tmp_path: Path) -> None:
     worker.run(max_iterations=1)
 
     assert codes == [EXIT_HUNG_HANDLER]
+
+
+class _InstrumentedLock:
+    """A real lock that reports when an acquire has to wait for another thread."""
+
+    def __init__(self, on_contended: Callable[[], None]) -> None:
+        self._lock = threading.Lock()
+        self._on_contended = on_contended
+
+    def acquire(self) -> bool:
+        if not self._lock.acquire(blocking=False):
+            self._on_contended()
+            self._lock.acquire()
+        return True
+
+    def release(self) -> None:
+        self._lock.release()
+
+    def __enter__(self) -> None:
+        self.acquire()
+
+    def __exit__(self, *_exc: object) -> None:
+        self.release()
+
+
+class _ThreadingWithInstrumentedLock:
+    """Stands in for ``threading`` inside ``common.worker`` only."""
+
+    def __init__(self, on_contended: Callable[[], None]) -> None:
+        self._on_contended = on_contended
+
+    def Lock(self) -> _InstrumentedLock:  # mirrors threading.Lock
+        return _InstrumentedLock(self._on_contended)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(threading, name)
+
+
+def test_the_handler_returning_waits_for_a_limit_that_is_already_being_acted_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Forces the race the watchdog lock arbitrates, deterministically.
+
+    The timer thread takes the lock, passes the "already finished?" check and
+    stops inside ``fail_job``. The handler then returns on the main thread and
+    calls ``finish()``. With the lock, ``finish()`` has to wait for the timer
+    thread (contention), so the timer thread wins and the job is reported hung
+    exactly once. Without it ``finish()`` runs straight through, flips the flag
+    and cancels the timer while the timer thread is mid-report: the job is
+    both "finished" and "hung".
+    """
+    progress = threading.Event()  # finish() contended for the lock, or ran past it
+    contended = threading.Event()
+    timer_thread_inside = threading.Event()
+
+    def _on_contended() -> None:
+        contended.set()
+        progress.set()
+
+    monkeypatch.setattr("common.worker.threading", _ThreadingWithInstrumentedLock(_on_contended))
+
+    class BlockingQueue(FailRecordingQueue):
+        def fail_job(self, job: Job, worker: str, exc: BaseException) -> None:
+            timer_thread_inside.set()  # the lock is held and the flag was already checked
+            assert progress.wait(timeout=30), "finish() never reached the lock or the cancel"
+            super().fail_job(job, worker, exc)
+
+    queue = BlockingQueue([make_job()])
+    timers = FakeTimerFactory()
+    codes: list[int] = []
+    threads: list[threading.Thread] = []
+
+    def handler(job: Job, ctx: JobContext) -> None:
+        handle = _limit_timer(timers, 500)
+        real_cancel = handle.cancel
+
+        def cancel() -> None:
+            real_cancel()
+            progress.set()
+
+        handle.cancel = cancel  # type: ignore[method-assign]
+        thread = threading.Thread(target=handle.fire)
+        threads.append(thread)
+        thread.start()
+        assert timer_thread_inside.wait(timeout=30)
+
+    worker = make_worker(
+        queue,
+        handler,
+        liveness_path=tmp_path / "hb",
+        timer_factory=timers,
+        runtime_limit_sec=lambda _j: 500,
+        exit_codes=codes,
+    )
+    worker.run(max_iterations=1)
+    threads[0].join(timeout=30)
+
+    assert contended.is_set(), "finish() did not have to wait for the timer thread: no lock arbitrates"
+    assert codes == [EXIT_HUNG_HANDLER]
+    assert len(queue.failed) == 1
+
+
+def test_a_worker_built_without_settings_runs_unlimited_when_no_environment_is_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    get_settings.cache_clear()
+    queue = FailRecordingQueue([make_job(kind="ingest")])
+    timers = FakeTimerFactory()
+    codes: list[int] = []
+    seen: list[int] = []
+
+    worker = Worker(
+        "w1",
+        ["ingest"],
+        lambda job, ctx: seen.append(job.id),
+        queue,
+        liveness_path=tmp_path / "hb",
+        heartbeat_sec=60,
+        shutdown_grace_sec=20,
+        heartbeat_queue_factory=lambda: queue,
+        sleep=lambda _s: None,
+        timer_factory=timers,
+        exit_process=codes.append,
+        install_signal_handlers=False,
+    )
+    with structlog.testing.capture_logs() as logs:
+        worker.run(max_iterations=1)
+
+    assert len(seen) == 1
+    assert [interval for interval, _ in timers.scheduled] == [60]  # no limit timer
+    assert codes == []
+    assert any(e["event"] == "worker.runtime_limit_settings_unavailable" for e in logs)
+
+
+@pytest.mark.parametrize(
+    "duration",
+    [10**400, 3 * 10**9 + 1, 10**12, float("inf"), float("nan"), 1e308],
+)
+def test_an_absurd_transcribe_duration_gets_no_limit_instead_of_crashing_or_never_firing(
+    duration: float,
+) -> None:
+    with structlog.testing.capture_logs() as logs:
+        limit = default_runtime_limit_sec(
+            _settings(), make_job(kind="transcribe", payload={"duration_sec": duration})
+        )
+
+    assert limit is None
+    assert any(e["event"] == "worker.runtime_limit_duration_unusable" for e in logs)
+
+
+def test_the_largest_accepted_transcribe_duration_still_fits_in_a_timer() -> None:
+    limit = default_runtime_limit_sec(
+        _settings(), make_job(kind="transcribe", payload={"duration_sec": _MAX_PLAUSIBLE_DURATION_SEC})
+    )
+    assert limit is not None
+    assert limit < threading.TIMEOUT_MAX
+    timer = threading.Timer(limit, lambda: None)  # must be constructible and startable
+    timer.daemon = True
+    timer.start()
+    timer.cancel()
+    timer.join()
 
 
 def _settings(**overrides: Any) -> Settings:

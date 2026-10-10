@@ -276,7 +276,18 @@ def test_the_language_is_omitted_from_the_transcribe_payload_when_unknown(
 
     rig.run(NO_CAPTIONS_ID)
 
-    assert "language" not in rig.jobs("transcribe")[0][3]
+    assert rig.jobs("transcribe")[0][3] == {"duration_sec": meta.duration_sec}
+
+
+def test_the_duration_is_omitted_from_the_transcribe_payload_when_unknown(
+    conn: psycopg.Connection[Any],
+) -> None:
+    meta = replace(fixture_meta("no_captions", NO_CAPTIONS_ID), duration_sec=None)
+    rig = Rig(conn, FakeMetadata(meta), FakeSubtitles())
+
+    rig.run(NO_CAPTIONS_ID)
+
+    assert "duration_sec" not in rig.jobs("transcribe")[0][3]
 
 
 def test_prefer_whisper_skips_manual_subtitles_and_never_downloads_any(

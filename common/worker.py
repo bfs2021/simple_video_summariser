@@ -74,6 +74,11 @@ EXIT_HUNG_HANDLER = 70
 #: load, audio decode and the final write all happen outside the audio loop.
 _TRANSCRIBE_OVERHEAD_SEC = 600.0
 
+#: Longest audio duration (one year) a transcribe limit is derived from. Above
+#: this the value is nonsense, and the limit would exceed what a timer thread
+#: can wait, so such a job gets no limit instead.
+_MAX_PLAUSIBLE_DURATION_SEC = 365 * 24 * 3600
+
 
 class RuntimeLimitExceeded(ToolFailureError):
     """A handler ran past its kind's maximum wall-clock runtime (#66).
@@ -97,7 +102,13 @@ def default_runtime_limit_sec(settings: Settings, job: Job) -> float | None:
         return float(settings.ANALYZE_MAX_RUNTIME_SEC)
     if job.kind == "transcribe":
         duration = job.payload.get("duration_sec")
-        if isinstance(duration, bool) or not isinstance(duration, (int, float)) or duration <= 0:
+        if isinstance(duration, bool) or not isinstance(duration, (int, float)):
+            return None
+        if not 0 < duration <= _MAX_PLAUSIBLE_DURATION_SEC:
+            # Also catches nan/inf and ints too big for a float. An absurd
+            # value must not crash the claim or push the timer past what a
+            # threading.Timer can wait (which would silently never fire).
+            _log.warning("worker.runtime_limit_duration_unusable", job_id=job.id)
             return None
         return float(duration) * settings.TRANSCRIBE_MAX_RTF + _TRANSCRIBE_OVERHEAD_SEC
     return None
@@ -215,7 +226,20 @@ class Worker:
         if runtime_limit_sec is None:
 
             def runtime_limit_sec(job: Job) -> float | None:
-                return default_runtime_limit_sec(_resolved_settings(), job)
+                # Resolved per job, not at construction, and defensively: a
+                # Worker built without settings (and without an environment)
+                # must still work; it just runs without a limit, loudly.
+                try:
+                    resolved = _resolved_settings()
+                except Exception as exc:  # noqa: BLE001 - config errors must not fail the job
+                    _log.error(
+                        "worker.runtime_limit_settings_unavailable",
+                        worker=name,
+                        job_id=job.id,
+                        error=type(exc).__name__,
+                    )
+                    return None
+                return default_runtime_limit_sec(resolved, job)
 
         self._runtime_limit_sec = runtime_limit_sec
         self._exit_process = exit_process
