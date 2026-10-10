@@ -51,6 +51,10 @@ extend-select = ["I", "UP", "B", "TID251"]
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "os.environ".msg = "Read settings via common.config.get_settings()"
 "os.getenv".msg = "Read settings via common.config.get_settings()"
+"os.environb".msg = "Read settings via common.config.get_settings()"
+"os.getenvb".msg = "Read settings via common.config.get_settings()"
+"os.putenv".msg = "Read settings via common.config.get_settings()"
+"os.unsetenv".msg = "Read settings via common.config.get_settings()"
 
 [tool.ruff.lint.per-file-ignores]
 "common/config.py" = ["TID251"]

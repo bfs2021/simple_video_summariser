@@ -5,8 +5,10 @@ Every test builds ``Settings(...)`` directly or sets variables with
 the developer's shell environment never leaks in.
 """
 
+import json
 import subprocess
 import sys
+import traceback
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -611,32 +613,131 @@ def test_repr_and_str_hide_the_api_key_and_database_password(
         assert DB_PASSWORD not in rendered
 
 
-def test_validation_errors_do_not_echo_secrets(
+# Letters and digits only, so JSON escaping cannot hide a match.
+SECRET_PASSWORD = "Pw9xQ2mLk7TzR4vB"
+SECRET_DSN = f"postgresql://u:{SECRET_PASSWORD}@h/db"
+SECRET_KEY = "skant9Zq3Wm8Lp2Xc7Vb5Nr1"
+PLACEHOLDER = "<redacted>"
+
+
+def _leak_surfaces(exc: BaseException) -> dict[str, str]:
+    assert isinstance(exc, ValidationError)
+    return {
+        "str": str(exc),
+        "repr": repr(exc),
+        "json": exc.json(),
+        "errors": repr(exc.errors()),
+        "traceback": "".join(traceback.format_exception(exc)),
+    }
+
+
+def _assert_no_secret_anywhere(exc: BaseException) -> None:
+    for name, text in _leak_surfaces(exc).items():
+        for secret in (SECRET_PASSWORD, SECRET_DSN, SECRET_KEY):
+            assert secret not in text, f"{secret!r} leaked via {name}"
+
+
+def _fail(monkeypatch: pytest.MonkeyPatch, **env: str) -> ValidationError:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", SECRET_KEY)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    with pytest.raises(ValidationError) as exc_info:
+        get_settings()
+    return exc_info.value
+
+
+def test_overlap_not_below_chunk_does_not_leak_secrets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A startup failure is logged; it must not carry the key or DB password.
-    monkeypatch.setenv("DATABASE_URL", DB_URL_WITH_SECRET)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", API_KEY)
-    monkeypatch.setenv("CHUNK_SEC", "60")
+    exc = _fail(monkeypatch, DATABASE_URL=SECRET_DSN, CHUNK_SEC="900", OVERLAP_SEC="900")
+
+    _assert_no_secret_anywhere(exc)
+    [error] = exc.errors()
+    assert error["loc"] == ("OVERLAP_SEC",)
+    assert "OVERLAP_SEC (900) must be less than CHUNK_SEC (900)" in error["msg"]
+
+
+def test_reap_below_two_heartbeats_does_not_leak_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exc = _fail(
+        monkeypatch, DATABASE_URL=SECRET_DSN, HEARTBEAT_SEC="60", REAP_AFTER_SEC="119"
+    )
+
+    _assert_no_secret_anywhere(exc)
+    [error] = exc.errors()
+    assert error["loc"] == ("REAP_AFTER_SEC",)
+    assert "REAP_AFTER_SEC (119) must be at least 2 * HEARTBEAT_SEC (120)" in error["msg"]
+
+
+def test_missing_database_url_does_not_leak_the_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exc = _fail(monkeypatch)
+
+    _assert_no_secret_anywhere(exc)
+    [error] = exc.errors()
+    assert error["loc"] == ("DATABASE_URL",)
+    assert error["type"] == "missing"
+
+
+def test_two_errors_at_once_do_not_leak_and_are_both_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exc = _fail(
+        monkeypatch,
+        DATABASE_URL=SECRET_DSN,
+        SUMMARIZER="openai",
+        CHUNK_SEC="900",
+        OVERLAP_SEC="900",
+    )
+
+    _assert_no_secret_anywhere(exc)
+    by_loc = {e["loc"]: e for e in exc.errors()}
+    assert set(by_loc) == {("SUMMARIZER",), ("OVERLAP_SEC",)}
+    assert "ollama" in by_loc[("SUMMARIZER",)]["msg"]
+    assert "anthropic" in by_loc[("SUMMARIZER",)]["msg"]
+    assert by_loc[("SUMMARIZER",)]["type"] == "literal_error"
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"DATABASE_URL": SECRET_DSN, "CHUNK_SEC": "900", "OVERLAP_SEC": "900"},
+        {"DATABASE_URL": SECRET_DSN, "HEARTBEAT_SEC": "60", "REAP_AFTER_SEC": "119"},
+        {"DATABASE_URL": SECRET_DSN, "SUMMARIZER": "openai"},
+        {},
+    ],
+)
+def test_every_error_input_is_the_same_fixed_placeholder(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, str]
+) -> None:
+    exc = _fail(monkeypatch, **env)
+
+    assert exc.errors()
+    assert [e["input"] for e in exc.errors()] == [PLACEHOLDER] * len(exc.errors())
+    assert [e["input"] for e in json.loads(exc.json())] == [PLACEHOLDER] * len(exc.errors())
+
+
+def test_raised_error_does_not_chain_to_the_unsanitised_original(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exc = _fail(monkeypatch, DATABASE_URL=SECRET_DSN, CHUNK_SEC="900", OVERLAP_SEC="900")
+
+    seen: list[BaseException] = []
+    link: BaseException | None = exc
+    while link is not None and link not in seen:
+        seen.append(link)
+        link = link.__cause__ or link.__context__
+    assert seen == [exc]
+
+
+def test_failed_get_settings_is_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fail(monkeypatch, DATABASE_URL=SECRET_DSN, CHUNK_SEC="900", OVERLAP_SEC="900")
+
     monkeypatch.setenv("OVERLAP_SEC", "60")
 
-    with pytest.raises(ValidationError) as exc_info:
-        get_settings()
-
-    message = str(exc_info.value)
-    assert API_KEY not in message
-    assert DB_PASSWORD not in message
-
-
-def test_missing_database_url_error_does_not_echo_the_api_key(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("ANTHROPIC_API_KEY", API_KEY)
-
-    with pytest.raises(ValidationError) as exc_info:
-        get_settings()
-
-    assert API_KEY not in str(exc_info.value)
+    assert isinstance(get_settings(), Settings)
 
 
 # --- sources ------------------------------------------------------------------
@@ -673,18 +774,25 @@ def test_lowercase_variable_names_are_ignored(
 # --- lint rule: only common/config.py reads the environment -------------------
 
 ENV_READS = [
-    "import os\nprint(os.environ['X'])\n",
-    "import os\nprint(os.getenv('X'))\n",
-    "from os import environ\nprint(environ)\n",
-    "from os import getenv\nprint(getenv('X'))\n",
+    "import os\n\nprint(os.environ['X'])\n",
+    "import os\n\nprint(os.getenv('X'))\n",
+    "from os import environ\n\nprint(environ)\n",
+    "from os import getenv\n\nprint(getenv('X'))\n",
+    "import os\n\nprint(os.environb[b'X'])\n",
+    "import os\n\nprint(os.getenvb(b'X'))\n",
+    "import os\n\nos.putenv('X', '1')\n",
+    "import os\n\nos.unsetenv('X')\n",
+    "from os import putenv\n\nputenv('X', '1')\n",
 ]
 
 
-def _ruff(source: str, as_path: str) -> subprocess.CompletedProcess[str]:
+def _ruff(
+    source: str, as_path: str, *flags: str
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
-            sys.executable, "-m", "ruff", "check", "--no-cache",
-            "--select", "TID251", "--stdin-filename", as_path, "-",
+            sys.executable, "-m", "ruff", "check", "--no-cache", *flags,
+            "--stdin-filename", as_path, "-",
         ],
         input=source,
         capture_output=True,
@@ -705,7 +813,7 @@ def _ruff(source: str, as_path: str) -> subprocess.CompletedProcess[str]:
     ],
 )
 def test_ruff_flags_environment_reads_outside_config(source: str, as_path: str) -> None:
-    result = _ruff(source, as_path)
+    result = _ruff(source, as_path, "--select", "TID251")
 
     assert result.returncode == 1, result.stdout + result.stderr
     assert "TID251" in result.stdout
@@ -713,6 +821,35 @@ def test_ruff_flags_environment_reads_outside_config(source: str, as_path: str) 
 
 @pytest.mark.parametrize("source", ENV_READS)
 def test_ruff_allows_environment_reads_in_config(source: str) -> None:
+    result = _ruff(source, "common/config.py", "--select", "TID251")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+# The project's own config (no --select), so dropping TID251 from extend-select,
+# deleting a banned-api entry or widening the per-file ignore fails here.
+
+_OUTSIDE_CONFIG_PATHS = [
+    "tests/common/test_probe.py",
+    "services/api/main.py",
+    "adapters/x.py",
+    "common/y.py",
+]
+
+
+@pytest.mark.parametrize("source", ENV_READS)
+@pytest.mark.parametrize("as_path", _OUTSIDE_CONFIG_PATHS)
+def test_project_config_flags_environment_reads_outside_config(
+    source: str, as_path: str
+) -> None:
+    result = _ruff(source, as_path)
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "TID251" in result.stdout
+
+
+@pytest.mark.parametrize("source", ENV_READS)
+def test_project_config_allows_environment_reads_in_config(source: str) -> None:
     result = _ruff(source, "common/config.py")
 
     assert result.returncode == 0, result.stdout + result.stderr

@@ -29,8 +29,9 @@ from pydantic import (
     PositiveFloat,
     PositiveInt,
     SecretStr,
+    ValidationError,
+    ValidationInfo,
     field_validator,
-    model_validator,
 )
 from pydantic_settings import (
     BaseSettings,
@@ -163,30 +164,66 @@ class Settings(BaseSettings):
     def _upper_log_level(cls, value: Any) -> Any:
         return value.upper() if isinstance(value, str) else value
 
-    @model_validator(mode="after")
-    def _overlap_shorter_than_chunk(self) -> Settings:
-        if self.OVERLAP_SEC >= self.CHUNK_SEC:
+    # Cross-field rules are field validators, not model validators, so the
+    # error carries the field's own ``loc`` and is reported next to any other
+    # field error (an "after" model validator is skipped when a field fails).
+    # CHUNK_SEC and HEARTBEAT_SEC are declared first, so ``info.data`` has
+    # them unless they were themselves invalid, which is reported separately.
+    @field_validator("OVERLAP_SEC")
+    @classmethod
+    def _overlap_shorter_than_chunk(cls, value: int, info: ValidationInfo) -> int:
+        chunk = info.data.get("CHUNK_SEC")
+        if chunk is not None and value >= chunk:
             raise ValueError(
-                f"OVERLAP_SEC ({self.OVERLAP_SEC}) must be less than "
-                f"CHUNK_SEC ({self.CHUNK_SEC})"
+                f"OVERLAP_SEC ({value}) must be less than CHUNK_SEC ({chunk})"
             )
-        return self
+        return value
 
-    @model_validator(mode="after")
-    def _reap_after_covers_two_heartbeats(self) -> Settings:
+    @field_validator("REAP_AFTER_SEC")
+    @classmethod
+    def _reap_after_covers_two_heartbeats(cls, value: int, info: ValidationInfo) -> int:
         # A healthy job that misses a single heartbeat must not be reaped.
-        if self.REAP_AFTER_SEC < 2 * self.HEARTBEAT_SEC:
+        heartbeat = info.data.get("HEARTBEAT_SEC")
+        if heartbeat is not None and value < 2 * heartbeat:
             raise ValueError(
-                f"REAP_AFTER_SEC ({self.REAP_AFTER_SEC}) must be at least "
-                f"2 * HEARTBEAT_SEC ({2 * self.HEARTBEAT_SEC})"
+                f"REAP_AFTER_SEC ({value}) must be at least 2 * HEARTBEAT_SEC ({2 * heartbeat})"
             )
-        return self
+        return value
+
+
+ERROR_INPUT_PLACEHOLDER = "<redacted>"
+
+
+def _sanitised(exc: ValidationError) -> ValidationError:
+    """Copy of ``exc`` whose every ``input`` is a fixed placeholder.
+
+    ``hide_input_in_errors`` only hides inputs in ``str``/``repr``; for
+    missing-field errors ``errors()`` and ``json()`` still carry the whole
+    dict of settings values, DSN and API key included.
+    """
+    line_errors: list[Any] = [
+        {
+            "type": e["type"],
+            "loc": e["loc"],
+            "input": ERROR_INPUT_PLACEHOLDER,
+            **({"ctx": e["ctx"]} if "ctx" in e else {}),
+        }
+        for e in exc.errors(include_url=False)
+    ]
+    return ValidationError.from_exception_data(exc.title, line_errors, hide_input=True)
 
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Build and validate settings from the environment, once per process.
 
-    Raises ``pydantic.ValidationError`` naming each bad variable.
+    Raises ``pydantic.ValidationError`` naming each bad variable. Its inputs
+    are replaced by a placeholder and it is raised outside the ``except``
+    block, so neither it nor its chain can reach a secret. A failure is not
+    cached.
     """
-    return Settings()  # type: ignore[call-arg]  # DATABASE_URL comes from env
+    try:
+        return Settings()  # type: ignore[call-arg]  # DATABASE_URL comes from env
+    except ValidationError as exc:
+        sanitised = _sanitised(exc)
+    raise sanitised
