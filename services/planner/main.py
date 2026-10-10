@@ -43,7 +43,7 @@ import argparse
 import sys
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 import psycopg
 import structlog
@@ -55,6 +55,7 @@ from common.config import Settings, get_settings
 from common.db import connect
 from common.logging import configure_logging
 from common.queue import PostgresQueue
+from common.repo import planner_runs
 from services.planner.alerts import send_dead_letter_alerts
 from services.planner.poll import poll_channels
 from services.planner.reaper import reap_stale_jobs
@@ -119,6 +120,61 @@ class PostgresAdvisoryLocks:
             conn.autocommit = True
             self._conn = conn
         return self._conn
+
+
+class PostgresRunRecorder:
+    """Writes ``planner_task_runs`` on its own lazily opened autocommit connection.
+
+    A failed write drops the connection (the next write reconnects) and
+    re-raises; the scheduler logs ``planner.record_failed`` and carries on.
+    """
+
+    def __init__(self, connect: Connect) -> None:
+        self._connect = connect
+        self._conn: psycopg.Connection[Any] | None = None
+
+    def task_started(self, name: str, *, interval_sec: float, at: datetime) -> None:
+        self._write(lambda c: planner_runs.record_started(c, name, interval_sec=interval_sec, at=at))
+
+    def task_finished(
+        self,
+        name: str,
+        *,
+        interval_sec: float,
+        at: datetime,
+        outcome: Literal["ok", "failed"],
+        error: str | None,
+        count: int | None,
+    ) -> None:
+        self._write(
+            lambda c: planner_runs.record_finished(
+                c, name, interval_sec=interval_sec, at=at, outcome=outcome, error=error, count=count
+            )
+        )
+
+    def task_skipped_locked(self, name: str, *, interval_sec: float, at: datetime) -> None:
+        self._write(
+            lambda c: planner_runs.record_skipped_locked(c, name, interval_sec=interval_sec, at=at)
+        )
+
+    def close(self) -> None:
+        conn, self._conn = self._conn, None
+        if conn is not None:
+            try:
+                conn.close()
+            except psycopg.Error:
+                pass
+
+    def _write(self, work: Callable[[psycopg.Connection[Any]], None]) -> None:
+        try:
+            if self._conn is None:
+                conn = self._connect()
+                conn.autocommit = True
+                self._conn = conn
+            work(self._conn)
+        except psycopg.Error:
+            self.close()
+            raise
 
 
 def build_registry(settings: Settings, connect: Connect) -> list[Task]:
@@ -187,7 +243,11 @@ def build_registry(settings: Settings, connect: Connect) -> list[Task]:
 
 
 def build_scheduler(settings: Settings) -> Scheduler:
-    return Scheduler(build_registry(settings, connect), PostgresAdvisoryLocks(connect))
+    return Scheduler(
+        build_registry(settings, connect),
+        PostgresAdvisoryLocks(connect),
+        recorder=PostgresRunRecorder(connect),
+    )
 
 
 def main(

@@ -20,6 +20,10 @@ callables must not think about:
   is logged and answered with a doubling backoff (capped), after which the
   provider reconnects. The loop never crash-loops the container (mirrors
   ``common.worker.Worker``, #13).
+- **Run records.** An injected ``RunRecorder`` is told when a task starts,
+  finishes (ok or failed) or is skipped because its lock is held (#98), with
+  timestamps from an injected wall clock. A recorder that raises is logged
+  (``planner.record_failed``) and otherwise ignored.
 - **Liveness.** The liveness file is touched on every loop iteration and idle
   waits are cut into slices of at most ``MAX_SLEEP_SLICE_SEC``.
 - **Shutdown.** SIGTERM/SIGINT call ``request_shutdown()``: a task in flight
@@ -36,6 +40,7 @@ import signal
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from types import FrameType
 from typing import Literal, Protocol
@@ -80,6 +85,65 @@ class LockProvider(Protocol):
         ...
 
 
+#: Longest ``last_error`` text a recorder is given (issue #98).
+MAX_RECORDED_ERROR_CHARS = 500
+
+
+class RunRecorder(Protocol):
+    """Where the last run of each task is remembered (``planner_task_runs``, #98).
+
+    Any method may raise; the scheduler logs ``planner.record_failed`` and
+    carries on, so a recorder never needs to guard itself.
+    """
+
+    def task_started(self, name: str, *, interval_sec: float, at: datetime) -> None:
+        """The lock was acquired and ``fn()`` is about to run."""
+        ...
+
+    def task_finished(
+        self,
+        name: str,
+        *,
+        interval_sec: float,
+        at: datetime,
+        outcome: Literal["ok", "failed"],
+        error: str | None,
+        count: int | None,
+    ) -> None:
+        """``fn()`` returned (``ok``, ``count`` = its value) or raised (``failed``)."""
+        ...
+
+    def task_skipped_locked(self, name: str, *, interval_sec: float, at: datetime) -> None:
+        """Another planner held the lock; nothing ran."""
+        ...
+
+
+class NoopRecorder:
+    """The default: records nothing."""
+
+    def task_started(self, name: str, *, interval_sec: float, at: datetime) -> None:
+        pass
+
+    def task_finished(
+        self,
+        name: str,
+        *,
+        interval_sec: float,
+        at: datetime,
+        outcome: Literal["ok", "failed"],
+        error: str | None,
+        count: int | None,
+    ) -> None:
+        pass
+
+    def task_skipped_locked(self, name: str, *, interval_sec: float, at: datetime) -> None:
+        pass
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
 class _DatabaseUnavailable(Exception):
     """Internal: the lock provider could not reach the database."""
 
@@ -95,8 +159,12 @@ class Scheduler:
         liveness_path: Path = Path("/tmp/heartbeat"),
         max_db_backoff_sec: float = _DEFAULT_MAX_DB_BACKOFF_SEC,
         install_signal_handlers: bool = True,
+        recorder: RunRecorder | None = None,
+        wall_clock: Callable[[], datetime] = _utc_now,
     ) -> None:
         self._tasks = list(tasks)
+        self._recorder: RunRecorder = recorder if recorder is not None else NoopRecorder()
+        self._wall_clock = wall_clock
         self._locks = locks
         self._clock = clock
         # A plain flag, not threading.Event: a signal handler runs on the main
@@ -236,15 +304,29 @@ class Scheduler:
                 "planner task skipped, lock is held: another planner may be running",
                 task=task.name,
             )
+            self._safely_record(
+                task,
+                lambda: self._recorder.task_skipped_locked(
+                    task.name, interval_sec=task.interval_sec, at=self._wall_clock()
+                ),
+            )
             self._log_run(task, started, "skipped_locked", None)
             return "skipped_locked"
 
+        self._safely_record(
+            task,
+            lambda: self._recorder.task_started(
+                task.name, interval_sec=task.interval_sec, at=self._wall_clock()
+            ),
+        )
         outcome: Outcome = "ok"
         result: int | None = None
+        error: str | None = None
         try:
             result = task.fn()
         except Exception as exc:  # noqa: BLE001 - a failing task must not stop the others
             outcome = "failed"
+            error = f"{type(exc).__name__}: {exc}"[:MAX_RECORDED_ERROR_CHARS]
             _log.error(
                 "planner.task_failed",
                 task=task.name,
@@ -253,8 +335,29 @@ class Scheduler:
             )
         finally:
             self._release(task)
+        self._safely_record(
+            task,
+            lambda: self._recorder.task_finished(
+                task.name,
+                interval_sec=task.interval_sec,
+                at=self._wall_clock(),
+                outcome="failed" if error is not None else "ok",
+                error=error,
+                count=result,
+            ),
+        )
         self._log_run(task, started, outcome, result)
         return outcome
+
+    def _safely_record(self, task: Task, write: Callable[[], None]) -> None:
+        try:
+            write()
+        except Exception as exc:  # noqa: BLE001 - recording must never break the planner
+            _log.error(
+                "planner.record_failed",
+                task=task.name,
+                error_class=type(exc).__name__,
+            )
 
     def _release(self, task: Task) -> None:
         try:

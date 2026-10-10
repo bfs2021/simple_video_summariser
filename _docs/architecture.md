@@ -512,6 +512,25 @@ CREATE INDEX jobs_claim_idx ON jobs (kind, priority DESC, run_after)
     WHERE state = 'pending';
 CREATE INDEX jobs_reap_idx ON jobs (heartbeat_at) WHERE state = 'running';
 CREATE INDEX jobs_dead_idx ON jobs (created_at DESC) WHERE state = 'dead';
+
+-- ============ planner ============
+
+-- One row per periodic planner task, overwritten in place (#98). Written only
+-- by the planner; nothing deletes rows, so a task removed from the registry
+-- keeps its last row. A stalled planner shows as last_started_at /
+-- last_finished_at that stop moving; a killed run as last_started_at >
+-- last_finished_at (or last_finished_at NULL).
+CREATE TABLE planner_task_runs (
+    task_name              TEXT PRIMARY KEY,
+    interval_sec           DOUBLE PRECISION NOT NULL,  -- Task.interval_sec at the last write
+    last_started_at        TIMESTAMPTZ,                -- lock acquired, before fn() runs
+    last_finished_at       TIMESTAMPTZ,
+    last_outcome           TEXT CHECK (last_outcome IN ('ok', 'failed')),
+    last_error             TEXT,                       -- "<Class>: <message>", <= 500 chars, no traceback
+    last_count             INTEGER,                    -- value fn() returned; NULL on failure or None
+    last_ok_at             TIMESTAMPTZ,                -- finish time of the last ok run
+    last_skipped_locked_at TIMESTAMPTZ                 -- another planner held the lock; touches no other column
+);
 ```
 
 ### v2 tables (declared, not created in v1)
