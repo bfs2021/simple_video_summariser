@@ -320,6 +320,8 @@ def make_analyze_handler(
         tally = _Tally()
 
         ctx.check_cancelled()
+        total_chunks = len(chunks)
+        ctx.progress("analyze", 0, total_chunks, phase="roster")
         try:
             roster = summarizer.derive_roster(meta, opening_text(segments))
             tally.add(summarizer)
@@ -337,8 +339,9 @@ def make_analyze_handler(
         claims: list[Claim] = []
         quotes: list[Quote] = []
         coerced = 0
-        for chunk in sorted(chunks, key=lambda c: c.seq):
+        for number, chunk in enumerate(sorted(chunks, key=lambda c: c.seq), start=1):
             ctx.check_cancelled()
+            ctx.progress("analyze", number, total_chunks, phase="chunk", chunk=number)
             partial = summarizer.analyze_chunk(timestamped_chunk(chunk, segments), roster, meta)
             tally.add(summarizer)
             partials.append(partial)
@@ -351,6 +354,7 @@ def make_analyze_handler(
             coerced += chunk_coerced
 
         ctx.check_cancelled()
+        ctx.progress("analyze", total_chunks, total_chunks, phase="reduce")
         tldr = summarizer.reduce(partials, meta).strip()
         tally.add(summarizer)
         if not tldr:

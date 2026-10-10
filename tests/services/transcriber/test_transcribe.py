@@ -6,6 +6,7 @@ network or model. Checks that need no database live in ``test_transcribe_unit.py
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
 from pathlib import Path
@@ -29,7 +30,7 @@ from common.models import AudioRef, Chunk, Segment, TranscriptResult
 from common.queue import Job, PostgresQueue
 from common.repo.media import delete_media as real_delete_media
 from common.repo.transcripts import save_transcript
-from services.transcriber.transcribe import make_transcribe_handler
+from services.transcriber.transcribe import HEARTBEAT_SEC, make_transcribe_handler
 from tests.services.transcriber.fakes import make_ctx, make_job, make_settings
 
 pytestmark = pytest.mark.integration
@@ -151,6 +152,7 @@ class Rig:
         transcriber: FakeTranscriber | None = None,
         chunker: Callable[..., list[Chunk]] = chunk_segments,
         with_video: bool = True,
+        clock: Callable[[], float] = time.monotonic,
         **settings: Any,
     ) -> None:
         self.conn = conn
@@ -168,6 +170,7 @@ class Rig:
             transcriber=self.transcriber,
             chunker=chunker,
             settings=self.settings,
+            clock=clock,
         )
         self.ctx, self.logs = make_ctx()
         if with_video:
@@ -479,6 +482,30 @@ def test_a_thousand_progress_calls_produce_at_most_eleven_progress_log_lines(
 
     lines = [r for r in rig.logs.records("info") if "progress" in str(r.get("event"))]
     assert 1 < len(lines) <= 11
+
+
+def test_the_handler_reports_a_quiet_stretch_using_its_injected_clock(
+    make_rig: Callable[..., Rig],
+) -> None:
+    now = [0.0]
+
+    def tick(done: float) -> None:
+        now[0] += HEARTBEAT_SEC
+
+    class Ticking(FakeTranscriber):
+        def transcribe(self, audio: AudioRef, **kwargs: Any) -> TranscriptResult:
+            on_progress = kwargs["on_progress"]
+            for done in (1.0, 2.0, 3.0):
+                tick(done)
+                on_progress(done)
+            return result()
+
+    rig = make_rig(audio=FakeAudio(duration=1000.0), transcriber=Ticking(), clock=lambda: now[0])
+
+    rig.run()
+
+    lines = [r for r in rig.logs.records("info") if r.get("event") == "transcribe progress"]
+    assert [r["done_sec"] for r in lines] == [1.0, 2.0, 3.0]  # step 0, then two heartbeats
 
 
 def test_the_handler_never_heartbeats(make_rig: Callable[..., Rig]) -> None:

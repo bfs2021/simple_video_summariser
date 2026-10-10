@@ -13,10 +13,12 @@ from common.models import ChunkAnalysis
 from common.queue import PostgresQueue
 from services.cli.inprocess import InProcessQueue
 from services.cli.main import main
+from services.cli.progress import ProgressPrinter
 from tests.services.analyzer.fakes import FakeSummarizer
 from tests.services.cli.fakes import (
     MANUAL_ID,
     NO_CAPTIONS_ID,
+    FakeTranscriber,
     manual_rig,
     no_captions_rig,
     with_video_id,
@@ -203,3 +205,84 @@ def test_an_id_that_starts_with_a_dash_runs_after_double_dash(
     assert rig.metadata.calls == [dash_id]
     assert isinstance(rig.metadata, FakeMetadata)
     assert count(head_dsn, "analyses", f"video_id = '{dash_id}'") == 1
+
+
+# ------------------------------------------------------- progress (issue #96)
+
+
+class ProgressingTranscriber(FakeTranscriber):
+    """Reports the audio position the way the Whisper adapter does."""
+
+    def transcribe(self, audio: Any, *, language: Any = None, on_progress: Any = None) -> Any:
+        for done in (10.0, 60.0, 120.0):
+            on_progress(done)
+        return super().transcribe(audio, language=language, on_progress=on_progress)
+
+
+def plain_lines(err: str) -> list[str]:
+    """The progress lines on stderr, i.e. the non-JSON-log lines starting with a stage tag."""
+    return [
+        line
+        for line in err.splitlines()
+        if line.startswith(("[transcribe] ", "[analyze] ")) and "started" not in line
+        and "finished" not in line
+    ]
+
+
+def test_a_full_run_prints_transcribe_and_analyze_progress_on_stderr_only(
+    head_dsn: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rig = no_captions_rig(head_dsn, tmp_path, transcriber=ProgressingTranscriber())
+
+    assert main(["run", NO_CAPTIONS_ID], deps=rig.deps) == 0
+
+    out, err = capsys.readouterr()
+    lines = plain_lines(err)
+    assert [re.sub(r" - elapsed .*", "", line) for line in lines] == [
+        "[transcribe] 0:10 / 2:00 audio (8%)",
+        "[transcribe] 1:00 / 2:00 audio (50%)",
+        "[transcribe] 2:00 / 2:00 audio (100%)",
+        "[analyze] roster",
+        "[analyze] chunk 1/1",
+        "[analyze] reduce",
+    ]
+    assert "[transcribe]" not in out and "[analyze]" not in out and "audio (" not in out
+    assert "progress" not in err  # not also a JSON log record
+    assert "\r" not in err and "\x1b" not in err
+
+
+def test_a_video_with_subtitles_prints_no_transcription_progress(
+    head_dsn: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    rig = manual_rig(head_dsn, tmp_path)
+
+    assert main(["run", MANUAL_ID], deps=rig.deps) == 0
+
+    _, err = capsys.readouterr()
+    assert not [line for line in plain_lines(err) if line.startswith("[transcribe]")]
+    assert "[analyze] roster" in err
+
+
+def test_a_closed_stderr_pipe_does_not_change_the_exit_code(
+    head_dsn: str, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rig = manual_rig(head_dsn, tmp_path)
+    real = ProgressPrinter.__call__
+
+    class Closed:
+        def write(self, text: str) -> int:
+            raise BrokenPipeError
+
+        def flush(self) -> None:
+            raise BrokenPipeError
+
+    def broken(self: ProgressPrinter, *args: Any, **kwargs: Any) -> None:
+        self._stream = lambda: Closed()  # type: ignore[assignment, return-value]
+        real(self, *args, **kwargs)
+
+    monkeypatch.setattr(ProgressPrinter, "__call__", broken)
+
+    assert main(["run", MANUAL_ID], deps=rig.deps) == 0
+
+    out, _ = capsys.readouterr()
+    assert "Do schools kill creativity?" in out

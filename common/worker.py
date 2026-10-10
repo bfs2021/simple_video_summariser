@@ -44,7 +44,7 @@ import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import FrameType
-from typing import Protocol
+from typing import Any, Protocol
 
 import structlog
 
@@ -147,17 +147,58 @@ def _default_reconnect() -> JobQueue:
     return PostgresQueue(connect())
 
 
-class JobContext:
-    """Passed to every handler call. Deliberately narrow (issue #13):
+class ProgressHook(Protocol):
+    """Where a handler's progress events go (issue #96).
 
-    ``cancelled``, ``check_cancelled()`` and a bound ``logger`` are the
-    *only* things a handler can reach - it cannot see the queue, the
+    ``stage`` names the long step (``"transcribe"``, ``"analyze"``), ``done`` and
+    ``total`` say how far it is, ``fields`` carry anything else the stage reports.
+    """
+
+    def __call__(self, stage: str, done: float, total: float, **fields: Any) -> None: ...
+
+
+class JobContext:
+    """Passed to every handler call. Deliberately narrow (issue #13, #96):
+
+    ``cancelled``, ``check_cancelled()``, ``progress()`` and a bound ``logger``
+    are the *only* things a handler can reach - it cannot see the queue, the
     connection, or anything else about the worker running it.
     """
 
-    def __init__(self, logger: structlog.typing.FilteringBoundLogger) -> None:
+    def __init__(
+        self,
+        logger: structlog.typing.FilteringBoundLogger,
+        progress: ProgressHook | None = None,
+    ) -> None:
         self.logger = logger
         self._cancel_event = threading.Event()
+        self._progress_hook = progress
+        self._progress_failure_logged = False
+
+    def progress(self, stage: str, done: float, total: float, **fields: Any) -> None:
+        """Report progress inside a long stage.
+
+        Without a hook (the workers) this is one structured ``info`` log line with
+        the job's bound context. With a hook (the CLI) the hook replaces the log
+        line. A failing hook never fails the job: an ``Exception`` from it is
+        logged once per job at ``warning`` and swallowed. ``Cancelled`` and
+        anything that is not an ``Exception`` (``KeyboardInterrupt``,
+        ``SystemExit``) propagate.
+        """
+        hook = self._progress_hook
+        if hook is None:
+            self.logger.info(f"{stage} progress", stage=stage, done=done, total=total, **fields)
+            return
+        try:
+            hook(stage, done, total, **fields)
+        except Cancelled:
+            raise
+        except Exception:
+            if not self._progress_failure_logged:
+                self._progress_failure_logged = True
+                self.logger.warning(
+                    "progress hook failed; the job carries on", exc_info=True
+                )
 
     @property
     def cancelled(self) -> bool:

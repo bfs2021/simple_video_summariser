@@ -60,11 +60,12 @@ from common.queue import PRIORITY_INTERACTIVE, Job
 from common.repo.analyses import latest_analysis
 from common.repo.transcripts import get_best_transcript, get_chunks, get_transcript
 from common.repo.videos import get_video_meta
-from common.worker import JobContext
+from common.worker import JobContext, ProgressHook
 from common.youtube_refs import parse_video_ref
 from services.analyzer.handler import make_analyze_handler
 from services.cli.inprocess import InProcessQueue
 from services.cli.output import format_result, sanitize_text
+from services.cli.progress import ProgressPrinter
 from services.transcriber.ingest import SubtitleSource, make_ingest_handler
 from services.transcriber.transcribe import make_transcribe_handler
 
@@ -194,6 +195,7 @@ def run_queue(
     *,
     on_start: Callable[[Job], None] | None = None,
     on_finish: Callable[[Job], None] | None = None,
+    progress: ProgressHook | None = None,
     max_jobs: int = MAX_JOBS,
 ) -> list[str]:
     """Run queued jobs FIFO until the queue is empty; returns the kinds run, in order.
@@ -224,7 +226,9 @@ def run_queue(
                 with bound_context(
                     job_id=job.id, video_id=job.video_id, kind=job.kind, attempt=job.attempts
                 ):
-                    handlers[job.kind](job, JobContext(structlog.get_logger("worker")))
+                    handlers[job.kind](
+                        job, JobContext(structlog.get_logger("worker"), progress)
+                    )
                 if on_finish is not None:
                     on_finish(job)
             except Exception as exc:  # every failure is reported by stage
@@ -456,7 +460,10 @@ def _run(video_id: str, deps: Deps | None, *, verbose: bool) -> int:
         queue = InProcessQueue()
         queue.enqueue("ingest", video_id, priority=PRIORITY)
 
+        printer = ProgressPrinter()
+
         def started(job: Job) -> None:
+            printer.begin()
             _say(f"[{job.kind}] started")
 
         def finished(job: Job) -> None:
@@ -469,6 +476,7 @@ def _run(video_id: str, deps: Deps | None, *, verbose: bool) -> int:
                 video_id,
                 on_start=started,
                 on_finish=finished,
+                progress=printer,
             )
         except PipelineError as err:
             if isinstance(err.cause, psycopg.errors.UndefinedTable):

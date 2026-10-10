@@ -40,6 +40,7 @@ from common.models import (
 from common.repo.analyses import latest_analysis
 from common.repo.transcripts import get_chunks, save_chunks, save_transcript
 from common.repo.videos import upsert_video
+from common.worker import JobContext
 from services.analyzer import handler as handler_module
 from services.analyzer.handler import (
     dedupe,
@@ -1138,3 +1139,129 @@ def test_the_connection_is_closed_after_the_job(
 
     assert opened
     assert all(c.closed for c in opened)
+
+
+# ------------------------------------------------------- progress (issue #96)
+
+
+def progress_rig(
+    rig_factory: Callable[..., Rig], summarizer: FakeSummarizer, **kwargs: Any
+) -> tuple[Rig, list[str]]:
+    """A rig whose ctx records each progress event and each summarizer call in order."""
+    events: list[str] = []
+    summarizer.on_call = lambda kind: events.append(f"call {kind}")
+    rig = rig_factory(summarizer, **kwargs)
+
+    def hook(stage: str, done: float, total: float, **fields: Any) -> None:
+        assert stage == "analyze"
+        phase = fields["phase"]
+        events.append(f"{phase} {int(done)}/{int(total)}" if phase == "chunk" else str(phase))
+
+    rig.ctx = JobContext(rig.ctx.logger, hook)
+    return rig, events
+
+
+@integration
+def test_each_llm_call_is_announced_just_before_it_starts(
+    rig_factory: Callable[..., Rig],
+) -> None:
+    rig, events = progress_rig(rig_factory, FakeSummarizer(roster=ROSTER))
+
+    rig.run()
+
+    assert events == [
+        "roster",
+        "call roster",
+        "chunk 1/2",
+        "call chunk",
+        "chunk 2/2",
+        "call chunk",
+        "reduce",
+        "call reduce",
+    ]
+
+
+@integration
+def test_an_invalid_roster_still_announces_roster_and_the_chunk_lines_follow(
+    rig_factory: Callable[..., Rig],
+) -> None:
+    summarizer = FakeSummarizer(fail_on={"roster": LLMInvalidOutputError("bad json")})
+    rig, events = progress_rig(rig_factory, summarizer)
+
+    rig.run()
+
+    assert [e for e in events if not e.startswith("call")] == [
+        "roster",
+        "chunk 1/2",
+        "chunk 2/2",
+        "reduce",
+    ]
+
+
+@integration
+def test_a_single_chunk_transcript_announces_chunk_1_of_1(
+    rig_factory: Callable[..., Rig],
+) -> None:
+    rig, events = progress_rig(rig_factory, FakeSummarizer(), segments={"whisper": (S0, S1)})
+
+    rig.run()
+
+    assert [e for e in events if not e.startswith("call")] == [
+        "roster",
+        "chunk 1/1",
+        "reduce",
+    ]
+
+
+@integration
+@pytest.mark.parametrize("segments", [(), (Segment(0, 1, "   "),)])
+def test_a_transcript_without_chunks_announces_nothing(
+    rig_factory: Callable[..., Rig], segments: tuple[Segment, ...]
+) -> None:
+    rig, events = progress_rig(rig_factory, FakeSummarizer(), segments={"whisper": segments})
+
+    rig.run()
+
+    assert events == []
+
+
+@integration
+def test_an_already_analyzed_video_announces_nothing(rig_factory: Callable[..., Rig]) -> None:
+    rig, events = progress_rig(rig_factory, FakeSummarizer())
+    rig.run()
+    events.clear()
+
+    rig.run()
+
+    assert events == []
+
+
+@integration
+def test_chunk_lines_match_chunk_calls_one_for_one(
+    rig_factory: Callable[..., Rig],
+) -> None:
+    # Announced per handler-level call, so a retry inside the summarizer adds no line.
+    summarizer = FakeSummarizer()
+    rig, events = progress_rig(rig_factory, summarizer, segments={"whisper": (S0, S1)})
+
+    rig.run()
+
+    assert sum(e.startswith("chunk") for e in events) == len(summarizer.kinds) - 2
+
+
+@integration
+def test_the_worker_default_logs_one_structured_line_per_llm_call(
+    rig_factory: Callable[..., Rig],
+) -> None:
+    rig = rig_factory(FakeSummarizer())
+
+    rig.run()
+
+    lines = [r for r in rig.logs.records("info") if r["event"] == "analyze progress"]
+    assert [(r["phase"], r["done"], r["total"]) for r in lines] == [
+        ("roster", 0, 2),
+        ("chunk", 1, 2),
+        ("chunk", 2, 2),
+        ("reduce", 2, 2),
+    ]
+    assert all(r["stage"] == "analyze" for r in lines)

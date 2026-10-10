@@ -23,6 +23,7 @@ The attempt cap is the queue's business (#11), not the handler's.
 from __future__ import annotations
 
 import math
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,8 @@ from services.transcriber.persist import (
 )
 
 _PROGRESS_STEPS = 10
+#: Wall seconds after which a quiet transcription prints another line (issue #96).
+HEARTBEAT_SEC = 30.0
 
 
 def _validate(job: Job) -> str:
@@ -56,32 +59,51 @@ def _validate(job: Job) -> str:
     return job.video_id
 
 
-def progress_reporter(ctx: JobContext, duration_sec: float) -> Callable[[float], None]:
-    """The ``on_progress`` callback: a cancellation check, plus a log line per 10%.
+def progress_reporter(
+    ctx: JobContext, duration_sec: float, *, clock: Callable[[], float] = time.monotonic
+) -> Callable[[float], None]:
+    """The ``on_progress`` callback: a cancellation check, plus ``ctx.progress`` lines.
 
-    ``check_cancelled`` runs on every call. At most ``_PROGRESS_STEPS + 1`` lines
-    are logged however often it is called; a non-positive ``duration_sec`` logs one.
+    ``check_cancelled`` runs on every call, before anything is reported. A line is
+    reported when progress crosses each 10% step, and also when ``HEARTBEAT_SEC`` of
+    wall time have passed since the last line and the audio position advanced: at most
+    ``_PROGRESS_STEPS + 1 + elapsed / HEARTBEAT_SEC`` lines, one per call at most.
+    With an unknown or non-positive ``duration_sec`` only the time rule applies.
     """
+    known = math.isfinite(duration_sec) and duration_sec > 0
     last_step = -1
+    last_done = 0.0
+    last_line_at = clock()
 
     def on_progress(done_sec: float) -> None:
-        nonlocal last_step
+        nonlocal last_step, last_done, last_line_at
         ctx.check_cancelled()
         if not math.isfinite(done_sec):
             return
-        if duration_sec > 0:
+        now = clock()
+        step = -1
+        if known:
             fraction = min(max(done_sec / duration_sec, 0.0), 1.0)
             step = int(fraction * _PROGRESS_STEPS)
-        else:
-            step = 0
-        if step > last_step:
-            last_step = step
-            ctx.logger.info(
-                "transcribe progress",
+        crossed = known and step > last_step
+        waited = done_sec > last_done and now - last_line_at >= HEARTBEAT_SEC
+        if not (crossed or waited):
+            return
+        last_step = max(last_step, step)
+        last_done = done_sec
+        last_line_at = now
+        if known:
+            percent = int(fraction * 100 + 1e-9)
+            ctx.progress(
+                "transcribe",
+                done_sec,
+                duration_sec,
                 done_sec=round(done_sec, 1),
                 duration_sec=round(duration_sec, 1),
-                percent=step * (100 // _PROGRESS_STEPS),
+                percent=percent,
             )
+        else:
+            ctx.progress("transcribe", done_sec, 0.0, done_sec=round(done_sec, 1))
 
     return on_progress
 
@@ -118,6 +140,7 @@ def make_transcribe_handler(
     transcriber: Transcriber,
     chunker: Chunker,
     settings: Settings,
+    clock: Callable[[], float] = time.monotonic,
 ) -> Callable[[Job, JobContext], None]:
     """Build the handler. ``connect`` opens one connection per job, closed when it ends."""
     strategy = chunk_strategy(settings.CHUNK_SEC, settings.OVERLAP_SEC)
@@ -160,7 +183,7 @@ def make_transcribe_handler(
         result = transcriber.transcribe(
             audio,
             language=_language(job, ctx),
-            on_progress=progress_reporter(ctx, audio.duration_sec),
+            on_progress=progress_reporter(ctx, audio.duration_sec, clock=clock),
         )
 
         save_transcript_with_chunks(
