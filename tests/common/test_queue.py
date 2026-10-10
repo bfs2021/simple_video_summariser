@@ -682,6 +682,21 @@ def test_heartbeat_returns_false_for_a_job_that_is_not_running(
 
 
 # ---------------------------------------------------------------------------
+# close
+# ---------------------------------------------------------------------------
+
+
+def test_close_closes_the_underlying_connection(
+    queue: PostgresQueue, conn: psycopg.Connection[Any]
+) -> None:
+    assert not conn.closed
+
+    queue.close()
+
+    assert conn.closed
+
+
+# ---------------------------------------------------------------------------
 # reap_stale
 # ---------------------------------------------------------------------------
 

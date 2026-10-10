@@ -44,6 +44,7 @@ import structlog
 from alembic import command
 from alembic.config import Config
 from psycopg.rows import dict_row
+from structlog.testing import capture_logs
 
 from common.config import Settings, get_settings
 from common.errors import Cancelled
@@ -102,6 +103,8 @@ class FakeQueue:
         self.outcomes: list[tuple[Job, str]] = []
         self.heartbeat_calls: list[tuple[int, str]] = []
         self.heartbeat_result: bool | Callable[[], bool] | Exception = True
+        self.close_calls = 0
+        self.close_raises: Exception | None = None
 
     @contextmanager
     def claim(self, kinds: Sequence[str], *, worker: str) -> Iterator[Job | None]:
@@ -134,6 +137,11 @@ class FakeQueue:
         if callable(result):
             return result()
         return result
+
+    def close(self) -> None:
+        self.close_calls += 1
+        if self.close_raises is not None:
+            raise self.close_raises
 
     def enqueue(
         self,
@@ -182,6 +190,7 @@ def make_worker(
     handler: Callable[[Job, JobContext], None],
     *,
     heartbeat_queue: FakeQueue | None = None,
+    heartbeat_queue_factory: Callable[[], FakeQueue] | None = None,
     liveness_path: Path,
     poll_sec: float = 5,
     heartbeat_sec: float = 60,
@@ -193,6 +202,10 @@ def make_worker(
     runtime_limit_sec: Callable[[Job], float | None] = lambda _job: None,
     exit_codes: list[int] | None = None,
 ) -> Worker:
+    if heartbeat_queue_factory is None:
+        heartbeat_queue_factory = (
+            (lambda: heartbeat_queue) if heartbeat_queue is not None else (lambda: queue)
+        )
     return Worker(
         "w1",
         ["ingest"],
@@ -202,7 +215,7 @@ def make_worker(
         liveness_path=liveness_path,
         heartbeat_sec=heartbeat_sec,
         shutdown_grace_sec=shutdown_grace_sec,
-        heartbeat_queue_factory=(lambda: heartbeat_queue) if heartbeat_queue is not None else (lambda: queue),
+        heartbeat_queue_factory=heartbeat_queue_factory,
         sleep=sleep if sleep is not None else (lambda _s: None),
         rng=rng if rng is not None else random.Random(0),
         timer_factory=timer_factory if timer_factory is not None else FakeTimerFactory(),
@@ -488,6 +501,385 @@ def test_heartbeat_failure_is_logged_and_retried_next_tick(tmp_path: Path) -> No
 
     assert tick_count == 2
     assert len(queue.heartbeat_calls) == 2
+
+
+def test_heartbeat_failure_discards_the_queue_and_reconnects_via_the_factory(tmp_path: Path) -> None:
+    """Issue #106: a raising ``heartbeat()`` call must not be retried forever
+    on the same (now broken) connection. The next tick gets a fresh queue
+    from ``heartbeat_queue_factory`` and the old one is closed."""
+    job = make_job(id=20)
+    queue = FakeQueue([job])
+    queue_a = FakeQueue()
+    queue_b = FakeQueue()
+    queues = [queue_a, queue_b]
+    factory_calls: list[int] = []
+
+    def factory() -> FakeQueue:
+        factory_calls.append(1)
+        return queues[len(factory_calls) - 1]
+
+    timer_factory = FakeTimerFactory()
+
+    def handler(job: Job, ctx: JobContext) -> None:
+        queue_a.heartbeat_result = ConnectionError("dead")
+        timer_factory.last.fire()  # tick 1: on A, fails
+        queue_b.heartbeat_result = True
+        timer_factory.last.fire()  # tick 2: gets B fresh from the factory, succeeds
+        assert not ctx.cancelled
+
+    worker = make_worker(
+        queue,
+        handler,
+        heartbeat_queue_factory=factory,
+        liveness_path=tmp_path / "hb",
+        timer_factory=timer_factory,
+    )
+    worker.run(max_iterations=1)
+
+    assert len(factory_calls) == 2
+    assert queue_a.heartbeat_calls == [(20, "w1")]
+    assert queue_b.heartbeat_calls == [(20, "w1")]
+    assert queue_a.close_calls == 1
+
+
+def test_heartbeat_reconnect_failure_is_logged_and_next_tick_retries_the_factory(
+    tmp_path: Path,
+) -> None:
+    """Issue #106: if the factory itself raises while reconnecting (the
+    database is still down), that tick logs a distinct event, still touches
+    liveness and still schedules the next tick - which tries the factory
+    again."""
+    liveness = tmp_path / "hb"
+    job = make_job(id=21)
+    queue = FakeQueue([job])
+    queue_a = FakeQueue()
+    queue_c = FakeQueue()
+    factory_calls = 0
+
+    def factory() -> FakeQueue:
+        nonlocal factory_calls
+        factory_calls += 1
+        if factory_calls == 1:
+            return queue_a
+        if factory_calls == 2:
+            raise ConnectionError("still down")
+        return queue_c
+
+    timer_factory = FakeTimerFactory()
+
+    def handler(job: Job, ctx: JobContext) -> None:
+        queue_a.heartbeat_result = ConnectionError("dead")
+        timer_factory.last.fire()  # tick 1: on A (factory call 1), fails
+
+        liveness.unlink()
+        with capture_logs() as logs:
+            timer_factory.last.fire()  # tick 2: factory call 2 raises
+        assert liveness.exists()
+        reconnect_failed = [log for log in logs if log["event"] == "worker.heartbeat_reconnect_failed"]
+        assert len(reconnect_failed) == 1
+        assert reconnect_failed[0]["worker"] == "w1"
+        assert reconnect_failed[0]["job_id"] == 21
+        assert "error" in reconnect_failed[0]
+
+        queue_c.heartbeat_result = True
+        timer_factory.last.fire()  # tick 3: factory call 3 succeeds, uses C
+        assert not ctx.cancelled
+
+    worker = make_worker(
+        queue,
+        handler,
+        heartbeat_queue_factory=factory,
+        liveness_path=liveness,
+        timer_factory=timer_factory,
+    )
+    worker.run(max_iterations=1)
+
+    assert factory_calls == 3
+    assert queue_a.heartbeat_calls == [(21, "w1")]
+    assert queue_c.heartbeat_calls == [(21, "w1")]
+
+
+def test_heartbeat_reaped_does_not_call_the_factory_again(tmp_path: Path) -> None:
+    """Issue #106: 'reaped' (``heartbeat()`` returns ``False``) is unchanged
+    from #13 - the queue is not discarded and the factory is not consulted
+    again."""
+    job = make_job(id=22)
+    queue = FakeQueue([job])
+    factory_calls = 0
+
+    def factory() -> FakeQueue:
+        nonlocal factory_calls
+        factory_calls += 1
+        return queue
+
+    timer_factory = FakeTimerFactory()
+
+    def handler(job: Job, ctx: JobContext) -> None:
+        queue.heartbeat_result = False
+        timer_factory.last.fire()
+        assert ctx.cancelled
+
+    worker = make_worker(
+        queue,
+        handler,
+        heartbeat_queue_factory=factory,
+        liveness_path=tmp_path / "hb",
+        timer_factory=timer_factory,
+    )
+    worker.run(max_iterations=1)
+
+    assert factory_calls == 1
+    assert queue.heartbeat_calls == [(22, "w1")]
+    assert queue.close_calls == 0  # reaped is not a connection failure
+
+
+def test_heartbeat_queue_close_raising_still_discards_it_and_reconnects(tmp_path: Path) -> None:
+    """Issue #106: ``close()`` on the broken queue is best-effort - if it
+    raises, the queue is still thrown away and the next tick still gets a
+    fresh one."""
+    job = make_job(id=23)
+    queue = FakeQueue([job])
+    queue_a = FakeQueue()
+    queue_a.close_raises = RuntimeError("already dead")
+    queue_b = FakeQueue()
+    queues = [queue_a, queue_b]
+    factory_calls: list[int] = []
+
+    def factory() -> FakeQueue:
+        factory_calls.append(1)
+        return queues[len(factory_calls) - 1]
+
+    timer_factory = FakeTimerFactory()
+
+    def handler(job: Job, ctx: JobContext) -> None:
+        queue_a.heartbeat_result = ConnectionError("dead")
+        timer_factory.last.fire()  # tick 1: fails, close() raises too
+        queue_b.heartbeat_result = True
+        timer_factory.last.fire()  # tick 2: still reconnects fine
+        assert not ctx.cancelled
+
+    worker = make_worker(
+        queue,
+        handler,
+        heartbeat_queue_factory=factory,
+        liveness_path=tmp_path / "hb",
+        timer_factory=timer_factory,
+    )
+    worker.run(max_iterations=1)
+
+    assert len(factory_calls) == 2
+    assert queue_a.close_calls == 1
+    assert queue_b.heartbeat_calls == [(23, "w1")]
+
+
+def test_successful_heartbeat_reuses_the_same_queue_across_jobs_without_extra_factory_calls(
+    tmp_path: Path,
+) -> None:
+    """Issue #106: when nothing has failed, the heartbeat queue is created
+    once per process and reused across jobs - no extra factory call at the
+    start of job B."""
+    job_a = make_job(id=30)
+    job_b = make_job(id=31)
+    queue = FakeQueue([job_a, job_b])
+    hb_queue = FakeQueue()
+    factory_calls = 0
+
+    def factory() -> FakeQueue:
+        nonlocal factory_calls
+        factory_calls += 1
+        return hb_queue
+
+    timer_factory = FakeTimerFactory()
+
+    def handler(job: Job, ctx: JobContext) -> None:
+        timer_factory.last.fire()
+
+    worker = make_worker(
+        queue,
+        handler,
+        heartbeat_queue_factory=factory,
+        liveness_path=tmp_path / "hb",
+        timer_factory=timer_factory,
+    )
+    worker.run(max_iterations=2)
+
+    assert factory_calls == 1
+    assert hb_queue.heartbeat_calls == [(30, "w1"), (31, "w1")]
+
+
+def test_queue_recreated_during_job_a_carries_over_to_job_b_without_an_extra_factory_call(
+    tmp_path: Path,
+) -> None:
+    """Issue #106: a queue re-created mid-job-A is the one job B uses."""
+    job_a = make_job(id=32)
+    job_b = make_job(id=33)
+    queue = FakeQueue([job_a, job_b])
+    queue_a = FakeQueue()
+    queue_b = FakeQueue()
+    queues = [queue_a, queue_b]
+    factory_calls: list[int] = []
+
+    def factory() -> FakeQueue:
+        factory_calls.append(1)
+        return queues[len(factory_calls) - 1]
+
+    timer_factory = FakeTimerFactory()
+    job_b_heartbeat_queue: list[FakeQueue] = []
+
+    def handler(job: Job, ctx: JobContext) -> None:
+        if job.id == 32:
+            queue_a.heartbeat_result = ConnectionError("dead")
+            timer_factory.last.fire()  # fails, discards A
+            queue_b.heartbeat_result = True
+            timer_factory.last.fire()  # reconnects to B (factory call 2)
+        else:
+            timer_factory.last.fire()  # job B's tick: must reuse B, no factory call
+            job_b_heartbeat_queue.append(queue_b)
+
+    worker = make_worker(
+        queue,
+        handler,
+        heartbeat_queue_factory=factory,
+        liveness_path=tmp_path / "hb",
+        timer_factory=timer_factory,
+    )
+    worker.run(max_iterations=2)
+
+    assert len(factory_calls) == 2
+    assert queue_b.heartbeat_calls == [(32, "w1"), (33, "w1")]
+
+
+def test_stop_after_a_failed_tick_leaves_no_queue_and_next_job_reconnects_on_first_tick(
+    tmp_path: Path,
+) -> None:
+    """Issue #106: if a job ends (``stop()``) after a failed tick and before
+    the next one, the next job's first tick creates the fresh queue - and no
+    heartbeat/factory call happens after ``stop()`` returns."""
+    job_a = make_job(id=40)
+    job_b = make_job(id=41)
+    queue = FakeQueue([job_a, job_b])
+    queue_a = FakeQueue()
+    queue_b = FakeQueue()
+    queues = [queue_a, queue_b]
+    factory_calls: list[int] = []
+
+    def factory() -> FakeQueue:
+        factory_calls.append(1)
+        return queues[len(factory_calls) - 1]
+
+    timer_factory = FakeTimerFactory()
+
+    def handler(job: Job, ctx: JobContext) -> None:
+        if job.id == 40:
+            queue_a.heartbeat_result = ConnectionError("dead")
+            timer_factory.last.fire()  # tick fails, queue discarded; job ends here
+        else:
+            queue_b.heartbeat_result = True
+            timer_factory.last.fire()  # job B's first tick: reconnects via factory
+
+    worker = make_worker(
+        queue,
+        handler,
+        heartbeat_queue_factory=factory,
+        liveness_path=tmp_path / "hb",
+        timer_factory=timer_factory,
+    )
+    worker.run(max_iterations=2)
+
+    # Job A's only tick failed and discarded its queue; job B's first tick is
+    # the one and only reconnect - not a leftover call from job A, and
+    # nothing after that reconnect calls heartbeat again for job A.
+    assert len(factory_calls) == 2
+    assert queue_a.heartbeat_calls == [(40, "w1")]
+    assert queue_b.heartbeat_calls == [(41, "w1")]
+
+
+def test_a_job_that_starts_while_the_heartbeat_database_is_down_after_a_failed_tick_still_runs(
+    tmp_path: Path,
+) -> None:
+    """Issue #106 (with #32's eager creation kept): once a tick has discarded
+    the queue, starting the next job must not call the factory eagerly - a
+    still-down database would otherwise raise out of job start. The first tick
+    of that job does the reconnect and logs ``worker.heartbeat_reconnect_failed``."""
+    job_a = make_job(id=60)
+    job_b = make_job(id=61)
+    queue = FakeQueue([job_a, job_b])
+    queue_a = FakeQueue()
+    queue_b = FakeQueue()
+    factory_calls = 0
+
+    def factory() -> FakeQueue:
+        nonlocal factory_calls
+        factory_calls += 1
+        if factory_calls == 1:
+            return queue_a
+        if factory_calls == 2:
+            raise ConnectionError("still down")
+        return queue_b
+
+    timer_factory = FakeTimerFactory()
+    ran: list[int] = []
+    logs_b: list[Any] = []
+
+    def handler(job: Job, ctx: JobContext) -> None:
+        ran.append(job.id)
+        if job.id == 60:
+            queue_a.heartbeat_result = ConnectionError("dead")
+            timer_factory.last.fire()  # fails, discards A
+        else:
+            assert factory_calls == 1  # job start did not call the factory
+            with capture_logs() as logs:
+                timer_factory.last.fire()  # factory call 2 raises
+            logs_b.extend(logs)
+            timer_factory.last.fire()  # factory call 3 succeeds
+
+    worker = make_worker(
+        queue,
+        handler,
+        heartbeat_queue_factory=factory,
+        liveness_path=tmp_path / "hb",
+        timer_factory=timer_factory,
+    )
+    worker.run(max_iterations=2)
+
+    assert ran == [60, 61]
+    assert [log["event"] for log in logs_b] == ["worker.heartbeat_reconnect_failed"]
+    assert factory_calls == 3
+    assert queue_b.heartbeat_calls == [(61, "w1")]
+
+
+def test_claim_reconnect_never_touches_the_heartbeat_queue(tmp_path: Path) -> None:
+    """Issue #106: the claim loop's reconnect and the heartbeat reconnect
+    stay on separate connections in both directions."""
+    job = make_job(id=50)
+    queue = FakeQueue([ConnectionError("claim db down")])
+    hb_queue = FakeQueue()
+    fresh_claim_queue = FakeQueue([job])
+    hb_factory_calls = 0
+
+    def hb_factory() -> FakeQueue:
+        nonlocal hb_factory_calls
+        hb_factory_calls += 1
+        return hb_queue
+
+    timer_factory = FakeTimerFactory()
+
+    def handler(job: Job, ctx: JobContext) -> None:
+        timer_factory.last.fire()
+
+    worker = make_worker(
+        queue,
+        handler,
+        heartbeat_queue_factory=hb_factory,
+        liveness_path=tmp_path / "hb",
+        timer_factory=timer_factory,
+        reconnect=lambda: fresh_claim_queue,
+        sleep=lambda _s: None,
+    )
+    worker.run(max_iterations=2)
+
+    assert hb_factory_calls == 1
+    assert hb_queue.heartbeat_calls == [(50, "w1")]
 
 
 def test_liveness_file_touched_on_heartbeat_tick(tmp_path: Path) -> None:
@@ -1300,3 +1692,68 @@ def test_a_hung_job_is_failed_with_a_runtime_limit_message_and_dead_letters_at_m
     # The handler returns normally after the (fake) exit, which must not
     # overwrite the recorded outcome: the claim UPDATE is guarded by locked_by.
     assert (row["finished_at"] is not None) == (expected_state == "dead")
+
+
+@pytest.mark.integration
+def test_a_terminated_heartbeat_connection_is_replaced_and_heartbeats_resume(
+    claim_queue: PostgresQueue,
+    claim_conn: psycopg.Connection[Any],
+    head_dsn: str,
+    tmp_path: Path,
+) -> None:
+    """Issue #106: kill the heartbeat backend mid-handler; the next tick fails,
+    the one after reconnects on a different backend and moves ``heartbeat_at``."""
+    job_id = claim_queue.enqueue("ingest", "v1")
+    assert job_id is not None
+    opened: list[psycopg.Connection[Any]] = []
+
+    def factory() -> PostgresQueue:
+        connection = psycopg.connect(head_dsn, autocommit=True)
+        opened.append(connection)
+        return PostgresQueue(connection, settings=_pg_settings())
+
+    timer_factory = FakeTimerFactory()
+    seen: dict[str, Any] = {}
+
+    def handler(job: Job, ctx: JobContext) -> None:
+        with claim_conn.cursor() as cur:
+            cur.execute(
+                "UPDATE jobs SET heartbeat_at = now() - interval '1 hour' WHERE id = %s",
+                (job_id,),
+            )
+        seen["stale_heartbeat_at"] = _row(claim_conn, job_id)["heartbeat_at"]
+        assert len(opened) == 1  # created eagerly at job start (#32)
+        dead_pid = opened[0].info.backend_pid
+        with claim_conn.cursor() as cur:
+            cur.execute("SELECT pg_terminate_backend(%s)", (dead_pid,))
+        timer_factory.last.fire()  # tick 1: fails on the dead connection
+        seen["after_failed_tick"] = _row(claim_conn, job_id)["heartbeat_at"]
+        timer_factory.last.fire()  # tick 2: fresh connection
+        seen["after_recovery"] = _row(claim_conn, job_id)["heartbeat_at"]
+        seen["dead_pid"] = dead_pid
+
+    try:
+        worker = Worker(
+            "w1",
+            ["ingest"],
+            handler,
+            claim_queue,
+            liveness_path=tmp_path / "hb",
+            heartbeat_sec=60,
+            shutdown_grace_sec=20,
+            heartbeat_queue_factory=factory,
+            timer_factory=timer_factory,
+            sleep=lambda _s: None,
+            runtime_limit_sec=lambda _job: None,
+            install_signal_handlers=False,
+        )
+        worker.run(max_iterations=1)
+
+        assert len(opened) == 2
+        assert opened[1].info.backend_pid != seen["dead_pid"]
+        assert seen["after_failed_tick"] == seen["stale_heartbeat_at"]
+        assert seen["after_recovery"] > seen["stale_heartbeat_at"]
+        assert opened[0].closed
+    finally:
+        for connection in opened:
+            connection.close()

@@ -218,6 +218,15 @@ class PostgresQueue:
         self._settings = settings if settings is not None else get_settings()
         self._rng = rng if rng is not None else random.Random()
 
+    def close(self) -> None:
+        """Close the underlying connection.
+
+        Not part of the ``JobQueue`` Protocol (issue #106): only a caller that
+        holds a ``PostgresQueue`` - the worker discarding a broken heartbeat
+        connection - uses it.
+        """
+        self._conn.close()
+
     # -- enqueue -----------------------------------------------------------
 
     def enqueue(

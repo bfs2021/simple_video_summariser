@@ -246,6 +246,9 @@ class Worker:
 
         self._heartbeat_queue_factory = heartbeat_queue_factory
         self._heartbeat_queue: JobQueue | None = None
+        # Set once a failed tick has discarded the heartbeat queue. Only
+        # consulted while the queue is None; see ``_start_heartbeat`` (#106).
+        self._heartbeat_discarded = False
         self._reconnect = reconnect
         self._max_db_backoff_sec = max_db_backoff_sec
 
@@ -382,6 +385,28 @@ class Worker:
                 self._heartbeat_queue = PostgresQueue(connect())
         return self._heartbeat_queue
 
+    def _discard_heartbeat_queue(self) -> None:
+        """Throw away the cached heartbeat queue after a failed tick.
+
+        Best-effort ``close()`` (issue #106): ``JobQueue`` has no ``close``,
+        so it is looked up dynamically; if it raises, the queue is still
+        discarded - the point is to release the dead connection, not to
+        guarantee it.
+        """
+        queue = self._heartbeat_queue
+        self._heartbeat_queue = None
+        self._heartbeat_discarded = True
+        close = getattr(queue, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception as exc:  # noqa: BLE001 - already discarded, just log
+                _log.error(
+                    "worker.heartbeat_queue_close_failed",
+                    worker=self._name,
+                    error=str(exc),
+                )
+
     def _start_heartbeat(self, job: Job, ctx: JobContext) -> Callable[[], None]:
         """Start ticking ``queue.heartbeat`` every ``HEARTBEAT_SEC``.
 
@@ -390,7 +415,13 @@ class Worker:
         heartbeat is sent after it returns (issue #13 AC: "No heartbeat is
         sent after the job's outcome is written").
         """
-        hb_queue = self._get_heartbeat_queue()
+        # Created eagerly while healthy (issue #32 pins this: the first job
+        # opens the connection before its handler runs). After a failed tick
+        # discarded the queue it is NOT created here: the database may still
+        # be down, and raising out of job start would fail a job over a
+        # heartbeat-only problem. The tick reconnects instead (issue #106).
+        if not self._heartbeat_discarded:
+            self._get_heartbeat_queue()
         stop_flag = threading.Event()
         tick_lock = threading.Lock()
         handle_box: dict[str, TimerHandle] = {}
@@ -402,28 +433,44 @@ class Worker:
                     return
                 # The process and handler are alive whatever the database
                 # says, so the §11.5 liveness file is touched on every tick,
-                # including ones whose heartbeat call fails or reports the
-                # job reaped (a long DB outage must not look wedged).
+                # including ones whose heartbeat call fails, whose reconnect
+                # fails, or that report the job reaped (a long DB outage must
+                # not look wedged).
                 self._touch_liveness()
+                # issue #106: fetched at tick time, not captured when the job
+                # started, so a queue re-created by an earlier tick (or job)
+                # is picked up; at most one factory call and one heartbeat()
+                # call per tick.
                 try:
-                    ok = hb_queue.heartbeat(job.id, self._name)
+                    hb_queue = self._get_heartbeat_queue()
                 except Exception as exc:  # noqa: BLE001 - retried on the next tick
                     _log.error(
-                        "worker.heartbeat_failed",
+                        "worker.heartbeat_reconnect_failed",
                         worker=self._name,
                         job_id=job.id,
                         error=str(exc),
                     )
                 else:
-                    if not ok:
-                        ctx._cancel()
-                        _log.warning(
-                            "worker.heartbeat_reaped",
+                    try:
+                        ok = hb_queue.heartbeat(job.id, self._name)
+                    except Exception as exc:  # noqa: BLE001 - retried on the next tick
+                        _log.error(
+                            "worker.heartbeat_failed",
                             worker=self._name,
                             job_id=job.id,
+                            error=str(exc),
                         )
-                        stop_flag.set()
-                        return
+                        self._discard_heartbeat_queue()
+                    else:
+                        if not ok:
+                            ctx._cancel()
+                            _log.warning(
+                                "worker.heartbeat_reaped",
+                                worker=self._name,
+                                job_id=job.id,
+                            )
+                            stop_flag.set()
+                            return
                 if not stop_flag.is_set():
                     handle_box["handle"] = self._timer_factory(self._heartbeat_sec, _tick_in_context)
 
