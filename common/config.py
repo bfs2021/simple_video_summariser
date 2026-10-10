@@ -98,6 +98,9 @@ class Settings(BaseSettings):
 
     # Becomes a directory name under prompts/, so it must be a plain slug.
     PROMPT_VERSION: str = Field(default="v1", pattern=r"^[a-z0-9_-]+$")
+    # Cumulative per-PROMPT_VERSION cap on re-analysis sweep jobs while
+    # SUMMARIZER=anthropic (#99); 0 enqueues nothing. Ignored for ollama.
+    SWEEP_MAX_JOBS_ANTHROPIC: NonNegativeInt = 100
 
     CHUNK_SEC: PositiveInt = 900
     OVERLAP_SEC: NonNegativeInt = 60

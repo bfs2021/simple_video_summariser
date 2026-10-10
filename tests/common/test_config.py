@@ -163,6 +163,7 @@ def test_every_architecture_variable_is_a_field_except_transcriber_cpus() -> Non
         "INGEST_MAX_RUNTIME_SEC", "ANALYZE_MAX_RUNTIME_SEC", "TRANSCRIBE_MAX_RTF",
         "ALERT_WEBHOOK_URL", "ALERT_WEBHOOK_FORMAT", "ALERT_MIN_INTERVAL_SEC",
         "UPCOMING_MAX_WAIT_DAYS", "RECONCILE_INTERVAL_SEC", "AUDIO_MIN_FREE_GB", "AUDIO_MIN_FREE_PCT",
+        "SWEEP_MAX_JOBS_ANTHROPIC",
     }  # fmt: skip
 
     assert set(Settings.model_fields) == expected

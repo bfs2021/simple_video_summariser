@@ -40,6 +40,12 @@ or 1 (any task raised), so an operator can trigger a sweep by hand::
 
     docker compose run --rm planner python -m services.planner.main --once
 
+``--sweep-dry-run`` (not combinable with ``--once``) prints what the re-analysis
+sweep would enqueue for the current settings and exits, running no task, taking
+no lock and writing nothing (#99)::
+
+    docker compose run --rm planner python -m services.planner.main --sweep-dry-run
+
 The planner never runs migrations (AGENTS.md).
 """
 
@@ -71,6 +77,7 @@ def _install_early_handlers() -> None:
 _install_early_handlers()
 
 import argparse
+import logging
 import time
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
@@ -98,7 +105,11 @@ from services.planner.reconcile import RECONCILE_LIST_TIMEOUT_SEC, reconcile_cha
 from services.planner.retention import enforce_audio_retention, max_bytes_from_gb
 from services.planner.scheduler import Scheduler, Task
 from services.planner.stale_analyze import resolve_stale_analyze_jobs
-from services.planner.sweep import run_reanalysis_sweep
+from services.planner.sweep import (
+    SweepPlan,
+    plan_reanalysis_sweep,
+    run_reanalysis_sweep,
+)
 
 _log = structlog.get_logger(__name__)
 
@@ -281,6 +292,7 @@ def build_registry(settings: Settings, connect: Connect) -> list[Task]:
             PostgresQueue(conn, settings=settings),
             prompt_version=settings.PROMPT_VERSION,
             summarizer_name=settings.SUMMARIZER,
+            max_jobs_anthropic=settings.SWEEP_MAX_JOBS_ANTHROPIC,
         )
 
     def poll(conn: psycopg.Connection[Any]) -> int:
@@ -342,6 +354,51 @@ def build_scheduler(settings: Settings) -> Scheduler:
     )
 
 
+def format_sweep_plan(plan: SweepPlan) -> str:
+    """One human-readable line for ``--sweep-dry-run``."""
+    return (
+        f"prompt_version={plan.prompt_version} summarizer={plan.summarizer} "
+        f"candidates={plan.candidates} already_enqueued={plan.already_enqueued} "
+        f"cap={'none' if plan.cap is None else plan.cap} "
+        f"would_enqueue_this_run={plan.would_enqueue_this_run} "
+        f"would_remain_after_cap={plan.would_remain_after_cap}"
+    )
+
+
+def _sweep_dry_run(settings: Settings) -> int:
+    """Report the sweep's plan without locks, other tasks or writes (#99)."""
+    configure_logging(settings, stream=sys.stderr)  # stdout carries only the summary line
+    try:
+        conn = connect()
+        try:
+            plan = plan_reanalysis_sweep(
+                conn,
+                prompt_version=settings.PROMPT_VERSION,
+                summarizer_name=settings.SUMMARIZER,
+                max_jobs_anthropic=settings.SWEEP_MAX_JOBS_ANTHROPIC,
+            )
+        finally:
+            conn.close()
+    except psycopg.Error as exc:
+        first_line = (str(exc).splitlines() or [""])[0]
+        print(f"planner: sweep dry run failed: {type(exc).__name__}: {first_line}", file=sys.stderr)
+        return 1
+    logging.getLogger("services.planner.sweep").info(
+        "planner.reanalysis_sweep.dry_run",
+        extra={
+            "prompt_version": plan.prompt_version,
+            "summarizer": plan.summarizer,
+            "candidates": plan.candidates,
+            "already_enqueued": plan.already_enqueued,
+            "cap": plan.cap,
+            "would_enqueue_this_run": plan.would_enqueue_this_run,
+            "would_remain_after_cap": plan.would_remain_after_cap,
+        },
+    )
+    print(format_sweep_plan(plan))
+    return 0
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -365,10 +422,16 @@ def _run(
         prog="python -m services.planner.main",
         description="Run the planner's periodic tasks (exactly one replica).",
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--once",
         action="store_true",
         help="run every task once in registry order and exit (1 if any task raised)",
+    )
+    mode.add_argument(
+        "--sweep-dry-run",
+        action="store_true",
+        help="print what the re-analysis sweep would enqueue now and exit; writes nothing",
     )
     args = parser.parse_args(argv)
     if latch.requested:
@@ -382,6 +445,9 @@ def _run(
     configure_logging(settings)
     if latch.requested:
         return 0
+
+    if args.sweep_dry_run:
+        return _sweep_dry_run(settings)
 
     scheduler = scheduler_factory(settings)
     latch.attach(scheduler.request_shutdown)

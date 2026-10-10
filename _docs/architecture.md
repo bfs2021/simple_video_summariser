@@ -883,6 +883,7 @@ than reading `os.environ` directly.
 | `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` | — / `claude-haiku-4-5` | analyzer (D6: API key only) |
 | `ANTHROPIC_BATCH` | `1` | use Batch API — 50% cost (16.8) |
 | `PROMPT_VERSION` | `v1` | analyzer, planner |
+| `SWEEP_MAX_JOBS_ANTHROPIC` | `100` | planner: cumulative per-`PROMPT_VERSION` count of re-analysis sweep jobs allowed while `SUMMARIZER=anthropic` (`0` = none); ignored for ollama (#99) |
 | `CHUNK_SEC` | `900` | transcriber, analyzer |
 | `OVERLAP_SEC` | `60` | transcriber, analyzer |
 | `WHISPER_MODEL` | `large-v3` | transcriber |
@@ -1465,6 +1466,9 @@ docker compose run --rm migrate
 
 # re-analysis sweep after a prompt change (C4)
 PROMPT_VERSION=v2 docker compose up -d planner analyzer transcriber
+
+# preview that sweep first: prints what it would enqueue and changes nothing (#99)
+docker compose run --rm planner python -m services.planner.main --sweep-dry-run
 
 # inspect the queue without psql
 curl -s localhost:8080/api/healthz | jq
