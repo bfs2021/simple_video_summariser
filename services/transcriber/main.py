@@ -32,18 +32,40 @@ built at all.
 
 from __future__ import annotations
 
-import argparse
 import os
 import signal
-import socket
 import sys
+
+# Handlers first (issue #108): when run as ``python -m``, a SIGTERM/SIGINT that
+# arrives while the heavy imports below are still loading sets a flag instead
+# of killing the process, and ``main()`` then exits 0. Only ``signal``, ``sys``
+# and ``os`` may be imported above this point. Importing the module (as tests
+# do) installs nothing.
+_early_stop = False
+
+
+def _early_on_signal(signum: int, frame: object) -> None:
+    global _early_stop
+    _early_stop = True
+
+
+def _install_early_handlers() -> None:
+    if __name__ != "__main__":
+        return  # imported, not run: leave the process's signals alone
+    signal.signal(signal.SIGTERM, _early_on_signal)
+    signal.signal(signal.SIGINT, _early_on_signal)
+
+
+_install_early_handlers()
+
+import argparse
+import socket
 import tempfile
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import closing
 from pathlib import Path
-from types import FrameType
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -69,6 +91,7 @@ from common.models import (
     TranscriptResult,
 )
 from common.queue import Job, JobQueue, PostgresQueue
+from common.shutdown import SignalLatch
 from common.worker import JobContext, Worker
 from services.transcriber.ingest import SubtitleSource, make_ingest_handler
 from services.transcriber.persist import Chunker
@@ -365,11 +388,29 @@ def main(
     transcriber_factory: Callable[[], Transcriber] | None = None,
     queue_factory: Callable[[], JobQueue] | None = None,
 ) -> int:
+    latch = SignalLatch.start(lambda: _early_stop)  # first: see ``common.shutdown`` (#108)
+    try:
+        return _run(argv, latch, handlers, transcriber_factory, queue_factory)
+    finally:
+        latch.restore()
+
+
+def _run(
+    argv: Sequence[str] | None,
+    latch: SignalLatch,
+    handlers: Mapping[str, Handler] | None,
+    transcriber_factory: Callable[[], Transcriber] | None,
+    queue_factory: Callable[[], JobQueue] | None,
+) -> int:
+    if latch.requested:
+        return 0
     parser = argparse.ArgumentParser(
         prog="python -m services.transcriber.main",
         description="Run a transcriber worker: claims ingest and transcribe jobs.",
     )
     parser.parse_args(argv)
+    if latch.requested:
+        return 0
 
     try:
         settings = get_settings()
@@ -377,6 +418,8 @@ def main(
         print(_invalid_settings_line(exc), file=sys.stderr)
         return _EXIT_BAD_CONFIG
     configure_logging(settings)
+    if latch.requested:
+        return 0
 
     try:
         check_cookie_file(settings.YTDLP_COOKIE_FILE)
@@ -394,6 +437,8 @@ def main(
             error=str(exc),
         )
         return _EXIT_BAD_CONFIG
+    if latch.requested:
+        return 0
 
     if handlers is None:
         factory = (
@@ -402,6 +447,8 @@ def main(
             else default_transcriber_factory(settings)
         )
         handlers = build_handlers(settings, transcriber=LazyTranscriber(factory), connect=default_connect)
+    if latch.requested:
+        return 0
     name = worker_name()
     _log.info(
         "transcriber.started",
@@ -419,15 +466,13 @@ def main(
     )
     stop = threading.Event()
     running: list[Worker] = []
+    latch.attach(stop.set)
 
-    def on_signal(signum: int, frame: FrameType | None) -> None:
-        stop.set()
+    def request_worker_shutdown() -> None:
         for worker in running:
             worker.request_shutdown()
 
-    previous = {
-        sig: signal.signal(sig, on_signal) for sig in (signal.SIGTERM, signal.SIGINT)
-    }
+    latch.attach(request_worker_shutdown)
     try:
         queue = open_queue_with_backoff(pool.open_main, stop, redact=_redactor(settings))
         if queue is None:
@@ -439,8 +484,6 @@ def main(
         worker.run()
         return 0
     finally:
-        for sig, handler in previous.items():
-            signal.signal(sig, handler)
         pool.close_all()
 
 

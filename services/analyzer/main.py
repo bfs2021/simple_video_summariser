@@ -34,9 +34,33 @@ runs in the backend image, which has no Whisper (architecture.md 11.1).
 from __future__ import annotations
 
 import os
+import signal
+import sys
+
+# Handlers first (issue #108): when run as ``python -m``, a SIGTERM/SIGINT that
+# arrives while the heavy imports below are still loading sets a flag instead
+# of killing the process, and ``main()`` then exits 0. Only ``signal``, ``sys``
+# and ``os`` may be imported above this point. Importing the module (as tests
+# do) installs nothing.
+_early_stop = False
+
+
+def _early_on_signal(signum: int, frame: object) -> None:
+    global _early_stop
+    _early_stop = True
+
+
+def _install_early_handlers() -> None:
+    if __name__ != "__main__":
+        return  # imported, not run: leave the process's signals alone
+    signal.signal(signal.SIGTERM, _early_on_signal)
+    signal.signal(signal.SIGINT, _early_on_signal)
+
+
+_install_early_handlers()
+
 import re
 import socket
-import sys
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager, suppress
 from datetime import UTC, datetime, timedelta
@@ -53,6 +77,7 @@ from common.db import connect as default_connect
 from common.errors import BugError, Defer
 from common.logging import configure_logging
 from common.queue import Job, JobQueue, PostgresQueue, analyze_dedupe_key
+from common.shutdown import SignalLatch
 from common.worker import JobContext, Worker
 from services.analyzer.handler import make_analyze_handler
 
@@ -210,7 +235,39 @@ def main(
     ``connect``, the summarizer and handler factories, extra ``Worker``
     options (``poll_sec``, ``sleep``, ``liveness_path`` ...), a bound on the
     claim loop and the HTTP round-trip of the Ollama startup probe.
+
+    A SIGTERM/SIGINT received while starting up (see ``common.shutdown``, #108)
+    makes this return 0 at the next startup step, without claiming a job.
     """
+    latch = SignalLatch.start(lambda: _early_stop)  # first, before anything else
+    try:
+        return _run(
+            latch,
+            settings=settings,
+            connect=connect,
+            summarizer_factory=summarizer_factory,
+            handler_factory=handler_factory,
+            worker_options=worker_options,
+            max_iterations=max_iterations,
+            probe_transport=probe_transport,
+        )
+    finally:
+        latch.restore()
+
+
+def _run(
+    latch: SignalLatch,
+    *,
+    settings: Settings | None,
+    connect: Connect | None,
+    summarizer_factory: Callable[[Settings], Any],
+    handler_factory: HandlerFactory,
+    worker_options: Mapping[str, Any] | None,
+    max_iterations: int | None,
+    probe_transport: GetTransport | None,
+) -> int:
+    if latch.requested:
+        return 0
     if settings is None:
         try:
             settings = get_settings()
@@ -222,12 +279,17 @@ def main(
             _log.error("analyzer.invalid_settings", variables=variables, problems=problems)
             return EXIT_CONFIG
     configure_logging(settings)
+    if latch.requested:
+        return 0
 
     try:
         summarizer = summarizer_factory(settings)
     except Exception as exc:  # noqa: BLE001 - any failure to build is a startup failure
         _log.error("analyzer.invalid_config", error=str(exc))
         return EXIT_CONFIG
+
+    if latch.requested:
+        return 0
 
     name = worker_name()
     fields: dict[str, Any] = {
@@ -241,8 +303,10 @@ def main(
     if settings.SUMMARIZER == "anthropic":
         fields["anthropic_batch"] = settings.ANTHROPIC_BATCH
     _log.info("analyzer.started", **fields)
-    if settings.SUMMARIZER == "ollama":
+    if settings.SUMMARIZER == "ollama" and not latch.requested:
         _report_ollama(settings, probe_transport or urllib_get_transport)
+    if latch.requested:
+        return 0
 
     open_connection = connect if connect is not None else default_connect
     handler = build_job_handler(
@@ -264,7 +328,11 @@ def main(
         reconnect=claim_queue.reset,
         **(worker_options or {}),
     )
+    # Late-bound: resolved when a signal arrives, not when attached.
+    latch.attach(lambda: worker.request_shutdown())
     try:
+        if latch.requested:
+            return 0
         worker.run(max_iterations=max_iterations)
     finally:
         claim_queue.close()

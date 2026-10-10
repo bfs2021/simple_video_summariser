@@ -39,8 +39,32 @@ The planner never runs migrations (AGENTS.md).
 
 from __future__ import annotations
 
-import argparse
+import signal
 import sys
+
+# Handlers first (issue #108): when run as ``python -m``, a SIGTERM/SIGINT that
+# arrives while the heavy imports below are still loading sets a flag instead
+# of killing the process, and ``main()`` then exits 0. Only ``signal`` and
+# ``sys`` may be imported above this point. Importing the module (as tests do)
+# installs nothing.
+_early_stop = False
+
+
+def _early_on_signal(signum: int, frame: object) -> None:
+    global _early_stop
+    _early_stop = True
+
+
+def _install_early_handlers() -> None:
+    if __name__ != "__main__":
+        return  # imported, not run: leave the process's signals alone
+    signal.signal(signal.SIGTERM, _early_on_signal)
+    signal.signal(signal.SIGINT, _early_on_signal)
+
+
+_install_early_handlers()
+
+import argparse
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -56,6 +80,7 @@ from common.db import connect
 from common.logging import configure_logging
 from common.queue import PostgresQueue
 from common.repo import planner_runs
+from common.shutdown import SignalLatch
 from services.planner.alerts import send_dead_letter_alerts
 from services.planner.poll import poll_channels
 from services.planner.reaper import reap_stale_jobs
@@ -255,6 +280,20 @@ def main(
     *,
     scheduler_factory: Callable[[Settings], Scheduler] = build_scheduler,
 ) -> int:
+    latch = SignalLatch.start(lambda: _early_stop)  # first: see ``common.shutdown`` (#108)
+    try:
+        return _run(argv, scheduler_factory, latch)
+    finally:
+        latch.restore()
+
+
+def _run(
+    argv: Sequence[str] | None,
+    scheduler_factory: Callable[[Settings], Scheduler],
+    latch: SignalLatch,
+) -> int:
+    if latch.requested:
+        return 0
     parser = argparse.ArgumentParser(
         prog="python -m services.planner.main",
         description="Run the planner's periodic tasks (exactly one replica).",
@@ -265,6 +304,8 @@ def main(
         help="run every task once in registry order and exit (1 if any task raised)",
     )
     args = parser.parse_args(argv)
+    if latch.requested:
+        return 0
 
     try:
         settings = get_settings()
@@ -272,8 +313,13 @@ def main(
         print(f"planner: invalid settings:\n{exc}", file=sys.stderr)
         return 1
     configure_logging(settings)
+    if latch.requested:
+        return 0
 
     scheduler = scheduler_factory(settings)
+    latch.attach(scheduler.request_shutdown)
+    if latch.requested:
+        return 0
     if args.once:
         return 0 if scheduler.run_once() else 1
     scheduler.run()
