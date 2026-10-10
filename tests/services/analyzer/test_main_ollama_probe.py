@@ -81,7 +81,7 @@ def test_ready_logs_one_info_line_and_the_worker_runs(
     assert transport.calls == [("http://oh:1/api/tags", PROBE_TIMEOUT_SEC)]
     [line] = probe_lines(capsys)
     assert (line["event"], line["level"]) == ("analyzer.ollama_ready", "info")
-    assert (line["host"], line["model"]) == ("http://oh:1/", MODEL)
+    assert (line["host"], line["model"]) == ("http://oh:1", MODEL)
 
 
 @pytest.mark.parametrize("response", [tags("other:1b"), tags()])
@@ -245,3 +245,25 @@ def test_the_probe_needs_no_database_connection(
     )
 
     assert order[0] == "probe"
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "http://bob#S3CR3T-tok@oh:11434",
+        "http://bob/S3CR3T-tok:x@oh:11434",
+        "http://oh:11434/S3CR3T-tok",
+        "http://bob:p@S3CR3T-tok@oh:11434",
+    ],
+)
+def test_non_userinfo_secrets_in_ollama_host_never_reach_a_log_line_or_stderr(
+    host: str, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    settings = make_settings(OLLAMA_MODEL=MODEL, OLLAMA_HOST=host)
+
+    for result in (tags(MODEL), tags(), ConnectionError(f"cannot reach {host}/api/tags")):
+        code, _ = run(tmp_path, ProbeTransport(result), settings)
+        assert code == 0
+
+    output = capsys.readouterr()
+    assert "S3CR3T-tok" not in output.out + output.err

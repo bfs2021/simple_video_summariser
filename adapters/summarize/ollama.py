@@ -14,13 +14,14 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any, Literal
-from urllib.parse import unquote, urlsplit, urlunsplit
+from urllib.parse import unquote, urlsplit
 
 from adapters.summarize.prompt_loader import (
     PromptSet,
@@ -87,24 +88,51 @@ def urllib_transport(url: str, body: bytes, timeout: float) -> HttpResponse:
 #: is sized for generation (900 s); a startup check must not hold the worker up.
 PROBE_TIMEOUT_SEC = 5.0
 
+#: Wall-clock bound on the whole probe (DNS, connect, headers, body). The timeout
+#: above is per socket operation, so a server dribbling bytes could hold startup
+#: for minutes; ``probe_ollama`` gives up at this deadline whatever the transport does.
+PROBE_DEADLINE_SEC = 10.0
+
 #: ``transport(url, timeout_sec)`` for the probe's GET. Raises on no response.
 type GetTransport = Callable[[str, float], HttpResponse]
 
 
+def _read_by_deadline(response: Any, deadline: float) -> bytes:
+    """Read at most ``MAX_RESPONSE_BYTES + 1`` bytes; ``TimeoutError`` once ``deadline``
+    (a ``time.monotonic()`` value) has passed. A socket timeout alone is per operation,
+    so a server dribbling one byte at a time would never trip it."""
+    limit = MAX_RESPONSE_BYTES + 1
+    chunks: list[bytes] = []
+    size = 0
+    while size < limit:
+        if time.monotonic() >= deadline:
+            raise TimeoutError("response body not complete before the probe deadline")
+        chunk = response.read1(min(65536, limit - size))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        size += len(chunk)
+    return b"".join(chunks)
+
+
 def urllib_get_transport(url: str, timeout: float) -> HttpResponse:
-    """GET ``url``. HTTP error statuses are returned, not raised."""
+    """GET ``url``. HTTP error statuses are returned, not raised.
+
+    ``timeout`` bounds each socket operation and, as a total, the body read.
+    """
+    deadline = time.monotonic() + timeout
     request = urllib.request.Request(url, method="GET", headers={"Accept": "application/json"})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return HttpResponse(response.status, response.read(MAX_RESPONSE_BYTES + 1))
+            return HttpResponse(response.status, _read_by_deadline(response, deadline))
     except urllib.error.HTTPError as err:
         with err:
-            return HttpResponse(err.code, err.read(MAX_RESPONSE_BYTES + 1))
+            return HttpResponse(err.code, _read_by_deadline(err, deadline))
 
 
 @dataclass(frozen=True, slots=True)
 class OllamaProbe:
-    """What ``probe_ollama`` found. ``host`` has no credentials; ``error`` is set
+    """What ``probe_ollama`` found. ``host`` is ``public_host(...)``; ``error`` is set
     only for ``unreachable``."""
 
     outcome: Literal["ready", "model_missing", "unreachable"]
@@ -114,28 +142,49 @@ class OllamaProbe:
 
 
 def public_host(host: str) -> str:
-    """``host`` without any ``user:password@`` userinfo, safe to log."""
+    """``scheme://hostname[:port]`` rebuilt from the parsed ``host``, safe to log.
+
+    Only those three components are emitted; userinfo, path, params, query and
+    fragment never are, wherever a secret was put. ``<invalid OLLAMA_HOST>`` when
+    the value does not parse to an http(s) URL with a host and a valid port.
+    """
+    invalid = "<invalid OLLAMA_HOST>"
     try:
         parts = urlsplit(host)
-        if "@" not in parts.netloc:
-            return host
-        return urlunsplit(parts._replace(netloc=parts.netloc.rpartition("@")[2]))
+        name = parts.hostname
+        port = parts.port
     except ValueError:
-        return "<invalid OLLAMA_HOST>"
+        return invalid
+    if parts.scheme not in ("http", "https") or not name:
+        return invalid
+    shown = f"[{name}]" if ":" in name else name
+    return f"{parts.scheme}://{shown}" + (f":{port}" if port is not None else "")
 
 
 def _secrets_of(host: str) -> list[str]:
+    """Everything in ``host`` that ``public_host`` does not show, longest first.
+
+    Used to cut those pieces out of free text (an exception message, a response
+    body) that echoes the URL. Whole components are taken as they are; their
+    delimiter-split words (4+ characters) too, in case only part of one is echoed.
+    """
     try:
         parts = urlsplit(host)
         userinfo = parts.netloc.rpartition("@")[0] if "@" in parts.netloc else ""
-        pieces = [userinfo, parts.username or "", parts.password or ""]
+        pieces = [userinfo, parts.path, parts.query, parts.fragment, parts.username or ""]
+        pieces.append(parts.password or "")
+        safe = {parts.hostname or "", str(parts.port or "")}
     except ValueError:
         return []
+    pieces = [piece.strip("/") for piece in pieces]
     pieces += [unquote(piece) for piece in pieces]
-    return sorted({piece for piece in pieces if piece}, key=len, reverse=True)
+    for piece in list(pieces):
+        pieces += [w for w in re.split(r"[@:/?#;&=]+", piece) if len(w) >= 4]
+    return sorted({p for p in pieces if p and p not in safe}, key=len, reverse=True)
 
 
 def _scrub(text: str, host: str) -> str:
+    text = text.replace(host.rstrip("/"), public_host(host))
     for secret in _secrets_of(host):
         text = text.replace(secret, "***")
     return text
@@ -159,29 +208,62 @@ def _lists_model(models: list[Any], model: str) -> bool:
     return False
 
 
+def _get_within(
+    transport: GetTransport, url: str, deadline_sec: float
+) -> HttpResponse | BaseException:
+    """``transport(url, PROBE_TIMEOUT_SEC)`` on a daemon thread, abandoned at ``deadline_sec``.
+
+    Returns the response, or the exception raised (a ``TimeoutError`` at the deadline).
+    A transport stuck in DNS or a slow read cannot be interrupted, so it is left to
+    finish on its own; the thread is a daemon and never keeps the process alive.
+    """
+    outcome: list[HttpResponse | BaseException] = []
+
+    def run() -> None:
+        try:
+            outcome.append(transport(url, PROBE_TIMEOUT_SEC))
+        except BaseException as err:  # noqa: BLE001 - handed to the caller, not lost
+            outcome.append(err)
+
+    thread = threading.Thread(target=run, name="ollama-probe", daemon=True)
+    thread.start()
+    thread.join(deadline_sec)
+    if not outcome:
+        return TimeoutError(f"no complete answer within the {deadline_sec:g} s probe deadline")
+    return outcome[0]
+
+
 def probe_ollama(
-    host: str, model: str, *, transport: GetTransport = urllib_get_transport
+    host: str,
+    model: str,
+    *,
+    transport: GetTransport = urllib_get_transport,
+    deadline_sec: float = PROBE_DEADLINE_SEC,
 ) -> OllamaProbe:
     """Ask Ollama once whether it is up and ``model`` is pulled (#84).
 
-    One ``GET <host>/api/tags`` with ``PROBE_TIMEOUT_SEC``; nothing else is
-    requested and nothing is raised: every failure becomes ``unreachable``.
+    One ``GET <host>/api/tags``, each socket operation limited to
+    ``PROBE_TIMEOUT_SEC`` and the whole probe to ``deadline_sec``; nothing else
+    is requested and nothing is raised: every failure becomes ``unreachable``.
     The reply is untrusted. Model names match exactly, except that a missing
-    tag means ``latest``, as in Ollama.
+    tag means ``latest``, as in Ollama. ``host`` in the result is
+    ``public_host(host)``: scheme, hostname and port only.
     """
     shown = public_host(host)
 
     def unreachable(reason: str) -> OllamaProbe:
         return OllamaProbe("unreachable", shown, model, _scrub(reason, host))
 
-    try:
-        response = transport(host.rstrip("/") + "/api/tags", PROBE_TIMEOUT_SEC)
-    except Exception as err:  # noqa: BLE001 - any transport failure means "not reachable"
-        return unreachable(f"{type(err).__name__}: {err}")
+    result = _get_within(transport, host.rstrip("/") + "/api/tags", deadline_sec)
+    if isinstance(result, BaseException):
+        if not isinstance(result, Exception):
+            raise result
+        return unreachable(f"{type(result).__name__}: {result}")
+    response = result
 
     quoted = response.body[: _MAX_UNAVAILABLE_BODY_CHARS * 4].decode("utf-8", "replace")
     quoted = quoted[:_MAX_UNAVAILABLE_BODY_CHARS]
-    if not 200 <= response.status < 300:
+    if response.status != 200:
         return unreachable(f"HTTP {response.status}" + (f": {quoted}" if quoted else ""))
     if len(response.body) > MAX_RESPONSE_BYTES:
         return unreachable(f"response is larger than {MAX_RESPONSE_BYTES} bytes")
