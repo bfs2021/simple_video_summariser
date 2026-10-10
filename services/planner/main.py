@@ -1,12 +1,14 @@
 """Planner service entrypoint (issue #38; architecture.md §1, §11.1).
 
-``python -m services.planner.main`` runs the five periodic maintenance tasks
+``python -m services.planner.main`` runs the six periodic maintenance tasks
 in one long-lived process, each on its own interval:
 
 ============================  =====================  =============================
 task                          interval               what it does
 ============================  =====================  =============================
 ``reap``                      ``REAP_INTERVAL_SEC``  hand back jobs of dead workers
+``auto_caption_fallback``     ``POLL_INTERVAL_SEC``  re-enqueue ingest for a video whose
+                                                     transcribe job dead-lettered (#92)
 ``audio_retention``           ``POLL_INTERVAL_SEC``  expire / cap / clean audio
 ``reanalysis_sweep``          ``POLL_INTERVAL_SEC``  enqueue analyses for a new prompt
 ``poll_channels``             ``POLL_INTERVAL_SEC``  discover new videos from RSS
@@ -82,6 +84,7 @@ from common.queue import PostgresQueue
 from common.repo import planner_runs
 from common.shutdown import SignalLatch
 from services.planner.alerts import send_dead_letter_alerts
+from services.planner.fallback import run_auto_caption_fallback_sweep
 from services.planner.poll import poll_channels
 from services.planner.reaper import reap_stale_jobs
 from services.planner.retention import enforce_audio_retention, max_bytes_from_gb
@@ -100,6 +103,7 @@ LOCK_KEYS: dict[str, tuple[int, int]] = {
     "reanalysis_sweep": (LOCK_NAMESPACE, 3),
     "poll_channels": (LOCK_NAMESPACE, 4),
     "dead_letter_alerts": (LOCK_NAMESPACE, 5),
+    "auto_caption_fallback": (LOCK_NAMESPACE, 6),
 }
 
 Connect = Callable[[], psycopg.Connection[Any]]
@@ -218,6 +222,11 @@ def build_registry(settings: Settings, connect: Connect) -> list[Task]:
     def reap(conn: psycopg.Connection[Any]) -> int:
         return reap_stale_jobs(PostgresQueue(conn, settings=settings), settings)
 
+    def auto_caption_fallback(conn: psycopg.Connection[Any]) -> int:
+        return run_auto_caption_fallback_sweep(
+            conn, PostgresQueue(conn, settings=settings), settings=settings
+        )
+
     def audio_retention(conn: psycopg.Connection[Any]) -> int:
         report = enforce_audio_retention(
             conn,
@@ -256,6 +265,7 @@ def build_registry(settings: Settings, connect: Connect) -> list[Task]:
 
     return [
         Task("reap", settings.REAP_INTERVAL_SEC, with_conn(reap)),
+        Task("auto_caption_fallback", settings.POLL_INTERVAL_SEC, with_conn(auto_caption_fallback)),
         Task("audio_retention", settings.POLL_INTERVAL_SEC, with_conn(audio_retention)),
         Task("reanalysis_sweep", settings.POLL_INTERVAL_SEC, with_conn(reanalysis_sweep)),
         Task("poll_channels", settings.POLL_INTERVAL_SEC, with_conn(poll)),

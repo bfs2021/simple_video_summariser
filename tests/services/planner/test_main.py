@@ -13,11 +13,19 @@ import pytest
 
 from common.config import Settings, get_settings
 from services.planner import main as planner_main
+from services.planner.retention import RetentionReport
 from services.planner.scheduler import Scheduler, Task
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DB_URL = "postgresql://u:p@h/db"
-TASK_NAMES = ["reap", "audio_retention", "reanalysis_sweep", "poll_channels", "dead_letter_alerts"]
+TASK_NAMES = [
+    "reap",
+    "auto_caption_fallback",
+    "audio_retention",
+    "reanalysis_sweep",
+    "poll_channels",
+    "dead_letter_alerts",
+]
 
 
 def _settings(**values: Any) -> Settings:
@@ -42,6 +50,7 @@ def test_reap_uses_its_own_interval_and_the_others_use_the_poll_interval() -> No
 
     assert {t.name: t.interval_sec for t in tasks} == {
         "reap": 7,
+        "auto_caption_fallback": 99,
         "audio_retention": 99,
         "reanalysis_sweep": 99,
         "poll_channels": 99,
@@ -54,6 +63,7 @@ def test_default_intervals_are_one_minute_and_one_hour() -> None:
 
     assert {t.name: t.interval_sec for t in tasks} == {
         "reap": 60,
+        "auto_caption_fallback": 3600,
         "audio_retention": 3600,
         "reanalysis_sweep": 3600,
         "poll_channels": 3600,
@@ -75,6 +85,36 @@ def test_alert_task_with_a_channel_opens_a_connection() -> None:
         tasks["dead_letter_alerts"].fn()
 
 
+class _FakeConn:
+    def close(self) -> None:
+        pass
+
+
+def test_audio_retention_passes_the_settings_and_counts_evicted_for_space(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_retention(conn: Any, audio_dir: Any, **kwargs: Any) -> RetentionReport:
+        seen["audio_dir"] = audio_dir
+        seen.update(kwargs)
+        return RetentionReport(
+            expired_deleted=1, evicted=2, orphans_deleted=4, bytes_freed=0, bytes_retained=0,
+            skipped_running=0, errors=0, evicted_for_space=8, free_bytes=None,
+        )
+
+    monkeypatch.setattr(planner_main, "enforce_audio_retention", fake_retention)
+    settings = _settings(AUDIO_MAX_GB=3, AUDIO_MIN_FREE_GB=1.5, AUDIO_MIN_FREE_PCT=7)
+    tasks = {t.name: t for t in planner_main.build_registry(settings, lambda: _FakeConn())}  # type: ignore[arg-type,return-value]
+
+    count = tasks["audio_retention"].fn()
+
+    assert seen["min_free_gb"] == 1.5
+    assert seen["min_free_pct"] == 7
+    assert seen["max_bytes"] == 3_000_000_000
+    assert count == 1 + 2 + 4 + 8
+
+
 def test_every_task_has_one_fixed_distinct_integer_lock_key() -> None:
     keys = planner_main.LOCK_KEYS
 
@@ -84,6 +124,13 @@ def test_every_task_has_one_fixed_distinct_integer_lock_key() -> None:
         assert isinstance(namespace, int) and isinstance(task_id, int)
         assert -(2**31) <= namespace < 2**31
         assert -(2**31) <= task_id < 2**31
+
+
+def test_auto_caption_fallback_runs_right_after_reap_with_its_own_fixed_lock_key() -> None:
+    names = [t.name for t in planner_main.build_registry(_settings(), _no_connect)]
+
+    assert names.index("auto_caption_fallback") == names.index("reap") + 1
+    assert planner_main.LOCK_KEYS["auto_caption_fallback"] == (planner_main.LOCK_NAMESPACE, 6)
 
 
 def test_the_module_documents_the_single_replica_constraint() -> None:

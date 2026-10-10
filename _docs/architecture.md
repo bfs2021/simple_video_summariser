@@ -575,6 +575,8 @@ reason in `last_error`; `videos.unavailable` is left alone.
 `transcribe`. Auto-captions are used only when `AUTO_CAPTION_FALLBACK=1` and
 transcription has already dead-lettered — a degraded result beats none, and
 `transcripts.source` records the degradation so §13's comparison can measure it.
+The planner's `auto_caption_fallback` sweep (#92) is what triggers it: it
+enqueues one `ingest` for a video whose newest `transcribe` job is `dead`.
 
 ### 7.2 `transcribe`
 
@@ -873,7 +875,7 @@ than reading `os.environ` directly.
 | `WHISPER_COMPUTE` | `int8` | transcriber |
 | `WHISPER_THREADS` | `0` (auto) | transcriber |
 | `PREFER_WHISPER` | `0` | transcriber |
-| `AUTO_CAPTION_FALLBACK` | `1` | transcriber |
+| `AUTO_CAPTION_FALLBACK` | `1` | transcriber, planner |
 | `AUDIO_KEEP` / `AUDIO_TTL_DAYS` / `AUDIO_MAX_GB` | `1` / `30` / `20` | transcriber, planner |
 | `POLL_INTERVAL_SEC` | `3600` | planner |
 | `UPCOMING_MAX_WAIT_DAYS` | `14` | transcriber: ingest reschedules a premiere or live stream until it is available, and dead-letters it this many days after discovery (#65) |
