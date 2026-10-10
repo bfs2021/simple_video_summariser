@@ -57,6 +57,8 @@ _MAX_DECODE_ATTEMPTS = 200
 _ROLES = frozenset({"host", "guest", "panelist", "unknown"})
 _CONFIDENCES = frozenset({"high", "medium", "low"})
 UNKNOWN = "unknown"
+HONORIFICS = frozenset({"dr", "prof", "professor", "mr", "mrs", "ms", "mx", "sir", "dame"})
+NAME_SUFFIXES = frozenset({"jr", "jr.", "sr", "sr.", "ii", "iii", "iv", "phd", "md"})
 
 
 class SchemaError(ValueError):
@@ -276,8 +278,69 @@ class _Counters:
         self.dropped = 0
 
 
-def _closed_speaker(value: object, names: dict[str, str], counters: _Counters) -> str:
-    """Map ``value`` to a roster name or ``unknown``; count and log a coercion."""
+def _is_honorific(token: str) -> bool:
+    """``dr`` and ``dr.`` count; ``dr..`` and ``d.r.`` do not."""
+    return token in HONORIFICS or (token.endswith(".") and token[:-1] in HONORIFICS)
+
+
+def _stripped_tokens(key: str) -> list[str]:
+    """Tokens of a name key with all *leading* honorifics removed."""
+    tokens = key.split()
+    start = 0
+    while start < len(tokens) and _is_honorific(tokens[start]):
+        start += 1
+    return tokens[start:]
+
+
+def _last_name_key(stripped: list[str]) -> str | None:
+    """The last stripped token, if it can stand for the entry on its own."""
+    if len(stripped) < 2:
+        return None
+    last = stripped[-1]
+    if last in NAME_SUFFIXES or _is_honorific(last) or len(last) < 2:
+        return None
+    return last if last.replace("-", "").replace("'", "").isalpha() else None
+
+
+def _alias_index(roster: Roster) -> dict[str, str]:
+    """Map each *unique* alias key to the one roster name it stands for.
+
+    Built once per parse call. A key is dropped when two entries produce it
+    (as full or last-name key), and a last-name key is also dropped when any
+    other entry has that token anywhere in its stripped name (D4b: a wrong
+    attribution is worse than none).
+    """
+    producers: dict[str, set[int]] = {}
+    token_owners: dict[str, set[int]] = {}
+    last_name_keys: set[str] = set()
+    for i, speaker in enumerate(roster.speakers):
+        stripped = _stripped_tokens(_name_key(speaker.name))
+        for token in stripped:
+            token_owners.setdefault(token, set()).add(i)
+        if not stripped:
+            continue
+        producers.setdefault(" ".join(stripped), set()).add(i)
+        last = _last_name_key(stripped)
+        if last is not None:
+            producers.setdefault(last, set()).add(i)
+            last_name_keys.add(last)
+    index: dict[str, str] = {}
+    for key, owners in producers.items():
+        if len(owners) != 1:
+            continue
+        if key in last_name_keys and len(token_owners[key]) != 1:
+            continue
+        index[key] = roster.speakers[next(iter(owners))].name
+    return index
+
+
+def _closed_speaker(
+    value: object, names: dict[str, str], aliases: dict[str, str], counters: _Counters
+) -> str:
+    """Map ``value`` to a roster name or ``unknown``; count and log a coercion.
+
+    Order: exact roster match (#22), then a unique alias (#83), else coerce.
+    """
     if value is None:
         return UNKNOWN
     if isinstance(value, str):
@@ -286,6 +349,14 @@ def _closed_speaker(value: object, names: dict[str, str], counters: _Counters) -
             return UNKNOWN
         if key in names:
             return names[key]
+        candidate = " ".join(_stripped_tokens(key))
+        if candidate and candidate != UNKNOWN and candidate in aliases:
+            resolved = aliases[candidate]
+            _logger.info(
+                "speaker_aliased",
+                extra={"speaker": value[:_MAX_LOGGED_VALUE_CHARS], "resolved": resolved},
+            )
+            return resolved
     counters.coercions += 1
     _logger.warning(
         "speaker_coerced",
@@ -304,6 +375,7 @@ def parse_chunk_analysis(raw: str, *, roster: Roster, chunk: Chunk) -> ChunkAnal
     """Parse and validate one chunk's analysis against ``roster`` and ``chunk``."""
     doc = _validate(_AnalysisDoc, _extract_object(raw))
     names = {_name_key(s.name): s.name for s in roster.speakers}
+    aliases = _alias_index(roster)
     counters = _Counters()
     # Collect every failing item so the repair feedback can name them all.
     errors: list[str] = []
@@ -345,7 +417,7 @@ def parse_chunk_analysis(raw: str, *, roster: Roster, chunk: Chunk) -> ChunkAnal
         claims.append(
             Claim(
                 text=text,
-                speaker=_closed_speaker(c.speaker, names, counters),
+                speaker=_closed_speaker(c.speaker, names, aliases, counters),
                 start_sec=start,
                 confidence=confidence if confidence in _CONFIDENCES else None,
                 source_chunk_seq=chunk.seq,
@@ -368,7 +440,7 @@ def parse_chunk_analysis(raw: str, *, roster: Roster, chunk: Chunk) -> ChunkAnal
         quotes.append(
             Quote(
                 text=text,
-                speaker=_closed_speaker(q.speaker, names, counters),
+                speaker=_closed_speaker(q.speaker, names, aliases, counters),
                 start_sec=start,
                 source_chunk_seq=chunk.seq,
             )

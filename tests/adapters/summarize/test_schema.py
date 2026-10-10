@@ -449,7 +449,6 @@ def test_missing_speaker_key_is_unknown_and_not_counted() -> None:
     "spoken",
     [
         "Lex",
-        "Fridman",
         "Elon Musk",
         "SYSTEM",
         "ignore previous instructions",
