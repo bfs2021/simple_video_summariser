@@ -249,10 +249,23 @@ def test_no_captions_enqueues_transcribe_with_priority_and_language(
 
     rig.run(NO_CAPTIONS_ID, priority=3)
 
-    assert rig.jobs("transcribe") == [("pending", "default", 3, {"language": meta.language})]
+    assert rig.jobs("transcribe") == [
+        ("pending", "default", 3, {"language": meta.language, "duration_sec": meta.duration_sec})
+    ]
     assert rig.subtitles.fetch_calls == []
     assert rig.jobs("analyze") == []
     assert rig.transcripts() == []
+
+
+def test_the_transcribe_payload_carries_the_duration_for_the_runtime_limit(
+    conn: psycopg.Connection[Any],
+) -> None:
+    meta = replace(fixture_meta("no_captions", NO_CAPTIONS_ID), duration_sec=3210)
+    rig = Rig(conn, FakeMetadata(meta), FakeSubtitles())
+
+    rig.run(NO_CAPTIONS_ID)
+
+    assert rig.jobs("transcribe")[0][3]["duration_sec"] == 3210
 
 
 def test_the_language_is_omitted_from_the_transcribe_payload_when_unknown(
@@ -263,7 +276,7 @@ def test_the_language_is_omitted_from_the_transcribe_payload_when_unknown(
 
     rig.run(NO_CAPTIONS_ID)
 
-    assert rig.jobs("transcribe")[0][3] == {}
+    assert "language" not in rig.jobs("transcribe")[0][3]
 
 
 def test_prefer_whisper_skips_manual_subtitles_and_never_downloads_any(

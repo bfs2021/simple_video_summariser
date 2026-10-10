@@ -36,6 +36,7 @@ the signal handler is actually installed.
 from __future__ import annotations
 
 import contextvars
+import os
 import random
 import signal
 import threading
@@ -48,7 +49,7 @@ from typing import Protocol
 import structlog
 
 from common.config import Settings, get_settings
-from common.errors import Cancelled
+from common.errors import Cancelled, ToolFailureError
 from common.logging import bound_context
 from common.queue import Job, JobQueue
 
@@ -64,6 +65,42 @@ _INITIAL_DB_BACKOFF_SEC = 1.0
 
 #: Default cap for the database-unreachable backoff (issue #13 AC).
 _DEFAULT_MAX_DB_BACKOFF_SEC = 60.0
+
+
+#: Process exit status of a worker that killed itself over a hung handler (#66).
+EXIT_HUNG_HANDLER = 70
+
+#: Fixed allowance added to ``duration x RTF`` for the transcribe limit: model
+#: load, audio decode and the final write all happen outside the audio loop.
+_TRANSCRIBE_OVERHEAD_SEC = 600.0
+
+
+class RuntimeLimitExceeded(ToolFailureError):
+    """A handler ran past its kind's maximum wall-clock runtime (#66).
+
+    A ``ToolFailureError`` so it retries like a stuck tool (at most three
+    attempts, alerting) and a job that always hangs ends up dead-lettered.
+    """
+
+
+def default_runtime_limit_sec(settings: Settings, job: Job) -> float | None:
+    """Maximum runtime for ``job`` in seconds; ``None`` means no limit (#66).
+
+    ``ingest`` and ``analyze`` use a fixed per-kind setting. ``transcribe``
+    is ``payload["duration_sec"] x TRANSCRIBE_MAX_RTF`` plus a fixed
+    allowance; with no usable duration there is no basis for a limit, so none
+    is applied rather than risk killing a healthy long transcription.
+    """
+    if job.kind == "ingest":
+        return float(settings.INGEST_MAX_RUNTIME_SEC)
+    if job.kind == "analyze":
+        return float(settings.ANALYZE_MAX_RUNTIME_SEC)
+    if job.kind == "transcribe":
+        duration = job.payload.get("duration_sec")
+        if isinstance(duration, bool) or not isinstance(duration, (int, float)) or duration <= 0:
+            return None
+        return float(duration) * settings.TRANSCRIBE_MAX_RTF + _TRANSCRIBE_OVERHEAD_SEC
+    return None
 
 
 class TimerHandle(Protocol):
@@ -152,6 +189,8 @@ class Worker:
         sleep: Callable[[float], None] = time.sleep,
         rng: random.Random | None = None,
         timer_factory: TimerFactory = _default_timer_factory,
+        runtime_limit_sec: Callable[[Job], float | None] | None = None,
+        exit_process: Callable[[int], None] = os._exit,
         install_signal_handlers: bool = True,
     ) -> None:
         self._name = name
@@ -172,6 +211,14 @@ class Worker:
             if shutdown_grace_sec is not None
             else float(_resolved_settings().WORKER_SHUTDOWN_GRACE_SEC)
         )
+
+        if runtime_limit_sec is None:
+
+            def runtime_limit_sec(job: Job) -> float | None:
+                return default_runtime_limit_sec(_resolved_settings(), job)
+
+        self._runtime_limit_sec = runtime_limit_sec
+        self._exit_process = exit_process
 
         self._heartbeat_queue_factory = heartbeat_queue_factory
         self._heartbeat_queue: JobQueue | None = None
@@ -273,9 +320,11 @@ class Worker:
                 # rather than abandoning it silently.
                 self._arm_grace(ctx)
             stop_heartbeat = self._start_heartbeat(job, ctx)
+            finish_watchdog = self._start_runtime_watchdog(job, stop_heartbeat)
             try:
                 self._handler(job, ctx)
             finally:
+                finish_watchdog()
                 stop_heartbeat()
                 self._disarm_grace()
                 self._set_current_ctx(None)
@@ -369,6 +418,80 @@ class Worker:
                 pass
 
         return stop
+
+    # -- runtime limit (#66) ---------------------------------------------------
+
+    def _start_runtime_watchdog(
+        self, job: Job, stop_heartbeat: Callable[[], None]
+    ) -> Callable[[], None]:
+        """Arm a one-shot timer at the job's runtime limit; returns ``finish()``.
+
+        Neither the job heartbeat nor the liveness file notices a handler that
+        is wedged (the heartbeat thread keeps both fresh), so this is the only
+        thing that does. When it fires the worker stops heartbeating, records
+        the attempt as failed (so a job that always hangs dead-letters), logs
+        at ERROR and exits the process: Python cannot kill a thread, and the
+        container restart plus the reaper (#35) recover anything left over.
+
+        ``finish()`` disarms it. A single lock decides the race between the
+        handler returning and the timer firing: whichever takes it first wins,
+        so a job that finished is never reported as hung.
+        """
+        limit = self._runtime_limit_sec(job)
+        if limit is None:
+            return lambda: None
+        lock = threading.Lock()
+        finished = False
+        captured_context = contextvars.copy_context()
+
+        def _on_limit() -> None:
+            with lock:
+                if finished:
+                    return
+                self._handler_hung(job, limit, stop_heartbeat)
+
+        def _on_limit_in_context() -> None:
+            captured_context.run(_on_limit)
+
+        handle = self._timer_factory(limit, _on_limit_in_context)
+
+        def finish() -> None:
+            nonlocal finished
+            with lock:
+                finished = True
+            handle.cancel()
+
+        return finish
+
+    def _handler_hung(self, job: Job, limit: float, stop_heartbeat: Callable[[], None]) -> None:
+        stop_heartbeat()
+        exc = RuntimeLimitExceeded(
+            f"job exceeded its runtime limit of {limit:g} s (kind={job.kind}, "
+            f"attempt={job.attempts}); the worker is exiting"
+        )
+        _log.error(
+            "worker.runtime_limit_exceeded",
+            worker=self._name,
+            job_id=job.id,
+            video_id=job.video_id,
+            kind=job.kind,
+            attempt=job.attempts,
+            limit_sec=limit,
+        )
+        try:
+            queue = self._get_heartbeat_queue()
+            fail_job = getattr(queue, "fail_job", None)
+            if fail_job is None:
+                raise RuntimeError("queue cannot record a failed attempt")
+            fail_job(job, self._name, exc)
+        except Exception as err:  # noqa: BLE001 - exit regardless; the reaper recovers the job
+            _log.error(
+                "worker.runtime_limit_record_failed",
+                worker=self._name,
+                job_id=job.id,
+                error=str(err),
+            )
+        self._exit_process(EXIT_HUNG_HANDLER)
 
     # -- shutdown / grace period --------------------------------------------
 

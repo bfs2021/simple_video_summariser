@@ -47,7 +47,12 @@ from psycopg.rows import dict_row
 from common.config import Settings, get_settings
 from common.errors import Cancelled
 from common.queue import Job, PostgresQueue
-from common.worker import JobContext, Worker
+from common.worker import (
+    EXIT_HUNG_HANDLER,
+    JobContext,
+    Worker,
+    default_runtime_limit_sec,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -183,6 +188,8 @@ def make_worker(
     rng: random.Random | None = None,
     timer_factory: FakeTimerFactory | None = None,
     reconnect: Callable[[], FakeQueue] | None = None,
+    runtime_limit_sec: Callable[[Job], float | None] = lambda _job: None,
+    exit_codes: list[int] | None = None,
 ) -> Worker:
     return Worker(
         "w1",
@@ -198,6 +205,8 @@ def make_worker(
         rng=rng if rng is not None else random.Random(0),
         timer_factory=timer_factory if timer_factory is not None else FakeTimerFactory(),
         reconnect=reconnect if reconnect is not None else (lambda: queue),
+        runtime_limit_sec=runtime_limit_sec,
+        exit_process=exit_codes.append if exit_codes is not None else (lambda _code: None),
         install_signal_handlers=False,
     )
 
@@ -759,6 +768,8 @@ def make_pg_worker(
     *,
     liveness_path: Path,
     timer_factory: FakeTimerFactory,
+    runtime_limit_sec: Callable[[Job], float | None] = lambda _job: None,
+    exit_codes: list[int] | None = None,
 ) -> Worker:
     return Worker(
         "w1",
@@ -771,6 +782,8 @@ def make_pg_worker(
         heartbeat_queue_factory=lambda: heartbeat_queue,
         timer_factory=timer_factory,
         sleep=lambda _s: None,
+        runtime_limit_sec=runtime_limit_sec,
+        exit_process=exit_codes.append if exit_codes is not None else (lambda _code: None),
         install_signal_handlers=False,
     )
 
@@ -862,3 +875,264 @@ def test_heartbeat_returns_false_once_the_job_is_genuinely_reaped(
     worker.run(max_iterations=1)
 
     assert cancelled_seen == [True]
+
+
+# ---------------------------------------------------------------------------
+# Runtime limit (issue #66). The limit is a one-shot timer through the injected
+# timer_factory, so a test "waits" for it by firing the handle by hand.
+# ---------------------------------------------------------------------------
+
+
+class FailRecordingQueue(FakeQueue):
+    def __init__(self, script: Sequence[Job | BaseException | None] = ()) -> None:
+        super().__init__(script)
+        self.failed: list[tuple[Job, str, BaseException]] = []
+        self.fail_error: Exception | None = None
+
+    def fail_job(self, job: Job, worker: str, exc: BaseException) -> None:
+        if self.fail_error is not None:
+            raise self.fail_error
+        self.failed.append((job, worker, exc))
+
+
+def _limit_timer(factory: FakeTimerFactory, limit: float) -> FakeTimerHandle:
+    matches = [h for interval, h in factory.scheduled if interval == limit]
+    assert len(matches) == 1, f"expected one timer at {limit}s, got {factory.scheduled}"
+    return matches[0]
+
+
+def test_a_job_past_its_limit_stops_heartbeating_records_a_failed_attempt_and_exits_nonzero(
+    tmp_path: Path,
+) -> None:
+    job = make_job(id=9, video_id="vid", kind="ingest", attempts=2)
+    queue = FailRecordingQueue([job])
+    timers = FakeTimerFactory()
+    codes: list[int] = []
+
+    def handler(job: Job, ctx: JobContext) -> None:
+        _limit_timer(timers, 777).fire()
+
+    worker = make_worker(
+        queue,
+        handler,
+        liveness_path=tmp_path / "hb",
+        timer_factory=timers,
+        runtime_limit_sec=lambda _job: 777,
+        exit_codes=codes,
+    )
+    with structlog.testing.capture_logs() as logs:
+        worker.run(max_iterations=1)
+
+    assert codes == [EXIT_HUNG_HANDLER]
+    assert EXIT_HUNG_HANDLER > 0
+    assert len(queue.failed) == 1
+    failed_job, failed_by, exc = queue.failed[0]
+    assert (failed_job.id, failed_by) == (9, "w1")
+    assert "exceeded its runtime limit of 777" in str(exc)
+    error_logs = [e for e in logs if e["log_level"] == "error" and e["event"] == "worker.runtime_limit_exceeded"]
+    assert len(error_logs) == 1
+    assert error_logs[0]["job_id"] == 9
+    assert error_logs[0]["video_id"] == "vid"
+    assert error_logs[0]["kind"] == "ingest"
+    assert error_logs[0]["attempt"] == 2
+
+
+def test_the_heartbeat_is_stopped_before_the_limit_is_acted_on(tmp_path: Path) -> None:
+    queue = FailRecordingQueue([make_job()])
+    timers = FakeTimerFactory()
+
+    def handler(job: Job, ctx: JobContext) -> None:
+        heartbeat_timer = timers.scheduled[0][1]
+        _limit_timer(timers, 500).fire()
+        assert heartbeat_timer.cancelled is True
+        # A tick that was already queued must not send a heartbeat any more.
+        heartbeat_timer.fire()
+
+    worker = make_worker(
+        queue, handler, liveness_path=tmp_path / "hb", timer_factory=timers, runtime_limit_sec=lambda _j: 500
+    )
+    worker.run(max_iterations=1)
+
+    assert queue.heartbeat_calls == []
+
+
+def test_a_job_that_finishes_in_time_disarms_the_limit(tmp_path: Path) -> None:
+    queue = FailRecordingQueue([make_job()])
+    timers = FakeTimerFactory()
+    codes: list[int] = []
+
+    worker = make_worker(
+        queue,
+        lambda job, ctx: None,
+        liveness_path=tmp_path / "hb",
+        timer_factory=timers,
+        runtime_limit_sec=lambda _j: 500,
+        exit_codes=codes,
+    )
+    worker.run(max_iterations=1)
+
+    handle = _limit_timer(timers, 500)
+    assert handle.cancelled is True
+    # Even if the timer thread was already past its cancel check, the finished
+    # job must not be reported as hung.
+    handle.fire()
+    assert codes == []
+    assert queue.failed == []
+
+
+def test_no_limit_means_no_timer_and_no_exit(tmp_path: Path) -> None:
+    queue = FailRecordingQueue([make_job()])
+    timers = FakeTimerFactory()
+
+    worker = make_worker(
+        queue, lambda job, ctx: None, liveness_path=tmp_path / "hb", timer_factory=timers
+    )
+    worker.run(max_iterations=1)
+
+    assert [interval for interval, _ in timers.scheduled] == [60]  # the heartbeat only
+
+
+def test_the_worker_still_exits_when_recording_the_failure_raises(tmp_path: Path) -> None:
+    queue = FailRecordingQueue([make_job()])
+    queue.fail_error = RuntimeError("database gone")
+    timers = FakeTimerFactory()
+    codes: list[int] = []
+
+    def handler(job: Job, ctx: JobContext) -> None:
+        _limit_timer(timers, 500).fire()
+
+    worker = make_worker(
+        queue,
+        handler,
+        liveness_path=tmp_path / "hb",
+        timer_factory=timers,
+        runtime_limit_sec=lambda _j: 500,
+        exit_codes=codes,
+    )
+    with structlog.testing.capture_logs() as logs:
+        worker.run(max_iterations=1)
+
+    assert codes == [EXIT_HUNG_HANDLER]
+    assert any(e["event"] == "worker.runtime_limit_record_failed" for e in logs)
+
+
+def test_a_queue_without_fail_job_still_exits(tmp_path: Path) -> None:
+    queue = FakeQueue([make_job()])
+    timers = FakeTimerFactory()
+    codes: list[int] = []
+
+    def handler(job: Job, ctx: JobContext) -> None:
+        _limit_timer(timers, 500).fire()
+
+    worker = make_worker(
+        queue,
+        handler,
+        liveness_path=tmp_path / "hb",
+        timer_factory=timers,
+        runtime_limit_sec=lambda _j: 500,
+        exit_codes=codes,
+    )
+    worker.run(max_iterations=1)
+
+    assert codes == [EXIT_HUNG_HANDLER]
+
+
+def _settings(**overrides: Any) -> Settings:
+    return Settings(DATABASE_URL="postgresql://u:p@h/db", **overrides)  # type: ignore[arg-type]
+
+
+def test_default_limits_are_ingest_10_minutes_and_analyze_1_hour() -> None:
+    settings = _settings()
+    assert default_runtime_limit_sec(settings, make_job(kind="ingest")) == 600
+    assert default_runtime_limit_sec(settings, make_job(kind="analyze")) == 3600
+
+
+def test_the_per_kind_limits_are_configurable() -> None:
+    settings = _settings(INGEST_MAX_RUNTIME_SEC=30, ANALYZE_MAX_RUNTIME_SEC=40)
+    assert default_runtime_limit_sec(settings, make_job(kind="ingest")) == 30
+    assert default_runtime_limit_sec(settings, make_job(kind="analyze")) == 40
+
+
+def test_the_transcribe_limit_is_the_audio_duration_times_the_rtf_ceiling_plus_overhead() -> None:
+    settings = _settings(TRANSCRIBE_MAX_RTF=2.0)
+    job = make_job(kind="transcribe", payload={"duration_sec": 1000})
+    limit = default_runtime_limit_sec(settings, job)
+    assert limit is not None
+    assert limit > 2000
+    assert limit - 2000 < 3600  # a fixed allowance, not another multiple
+
+
+def test_a_healthy_nine_hour_transcription_is_not_killed_at_a_realistic_speed() -> None:
+    settings = _settings()  # default RTF ceiling
+    nine_hours = 9 * 3600
+    job = make_job(kind="transcribe", payload={"duration_sec": nine_hours})
+    limit = default_runtime_limit_sec(settings, job)
+    assert limit is not None
+    healthy_rtf = 1.0  # as slow as real time
+    assert nine_hours * healthy_rtf < limit
+
+
+def test_the_transcribe_limit_scales_with_the_duration() -> None:
+    settings = _settings()
+    short = default_runtime_limit_sec(settings, make_job(kind="transcribe", payload={"duration_sec": 600}))
+    long = default_runtime_limit_sec(settings, make_job(kind="transcribe", payload={"duration_sec": 36000}))
+    assert short is not None and long is not None
+    assert long > short
+
+
+@pytest.mark.parametrize("payload", [{}, {"duration_sec": None}, {"duration_sec": 0}, {"duration_sec": "x"}, {"duration_sec": True}])
+def test_a_transcribe_job_without_a_usable_duration_has_no_limit(payload: dict[str, Any]) -> None:
+    assert default_runtime_limit_sec(_settings(), make_job(kind="transcribe", payload=payload)) is None
+
+
+@pytest.mark.parametrize("name", ["INGEST_MAX_RUNTIME_SEC", "ANALYZE_MAX_RUNTIME_SEC", "TRANSCRIBE_MAX_RTF"])
+@pytest.mark.parametrize("bad", ["0", "-1"])
+def test_a_non_positive_limit_setting_is_rejected(name: str, bad: str) -> None:
+    with pytest.raises(ValueError):
+        Settings(DATABASE_URL="postgresql://u:p@h/db", **{name: bad})  # type: ignore[arg-type]
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("attempts_before", "expected_state"),
+    [(0, "pending"), (1, "pending"), (2, "dead")],
+)
+def test_a_hung_job_is_failed_with_a_runtime_limit_message_and_dead_letters_at_max(
+    claim_queue: PostgresQueue,
+    heartbeat_queue: PostgresQueue,
+    claim_conn: psycopg.Connection[Any],
+    tmp_path: Path,
+    attempts_before: int,
+    expected_state: str,
+) -> None:
+    job_id = claim_queue.enqueue("ingest", "v1")
+    assert job_id is not None
+    with claim_conn.cursor() as cur:
+        cur.execute("UPDATE jobs SET attempts = %s WHERE id = %s", (attempts_before, job_id))
+    timers = FakeTimerFactory()
+    codes: list[int] = []
+
+    def handler(job: Job, ctx: JobContext) -> None:
+        _limit_timer(timers, 321).fire()
+
+    worker = make_pg_worker(
+        claim_queue,
+        heartbeat_queue,
+        handler,
+        liveness_path=tmp_path / "hb",
+        timer_factory=timers,
+        runtime_limit_sec=lambda _j: 321,
+        exit_codes=codes,
+    )
+    worker.run(max_iterations=1)
+
+    row = _row(claim_conn, job_id)
+    assert codes == [EXIT_HUNG_HANDLER]
+    assert row["state"] == expected_state
+    assert row["attempts"] == attempts_before + 1  # the attempt is spent, not refunded
+    assert row["locked_by"] is None
+    assert "exceeded its runtime limit of 321" in row["last_error"]
+    assert row["error_class"] == "TOOL_FAILURE"
+    # The handler returns normally after the (fake) exit, which must not
+    # overwrite the recorded outcome: the claim UPDATE is guarded by locked_by.
+    assert (row["finished_at"] is not None) == (expected_state == "dead")

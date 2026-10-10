@@ -840,6 +840,7 @@ than reading `os.environ` directly.
 | `POLL_INTERVAL_SEC` | `3600` | planner |
 | `HEARTBEAT_SEC` / `REAP_AFTER_SEC` | `60` / `300` | workers, planner |
 | `MAX_ATTEMPTS_TRANSCRIBE` | `2` | transcriber |
+| `INGEST_MAX_RUNTIME_SEC` / `ANALYZE_MAX_RUNTIME_SEC` / `TRANSCRIBE_MAX_RTF` | `600` / `3600` / `3.0` | workers (§11.5) |
 | `TRANSCRIBER_CPUS` | `3.0` | compose |
 | `LOG_LEVEL` / `LOG_FORMAT` | `INFO` / `json` | all |
 
@@ -1338,6 +1339,16 @@ healthcheck asserts it is under 180 s old. This is distinct from the *job*
 heartbeat in C2 — that one detects a dead worker holding a job; this one tells
 Docker to restart a wedged process. Both are needed; neither substitutes for
 the other.
+
+**Hung handlers (#66).** Because the heartbeat thread keeps both of those fresh
+while the main thread is wedged, each job also has a maximum wall-clock runtime:
+`INGEST_MAX_RUNTIME_SEC` (600), `ANALYZE_MAX_RUNTIME_SEC` (3600), and for
+`transcribe` the audio duration (`payload.duration_sec`, set by ingest) ×
+`TRANSCRIBE_MAX_RTF` (3.0) plus a fixed 600 s allowance; a transcribe job with
+no duration has no limit. Past the limit the worker stops heartbeating, records
+the attempt as failed (`TOOL_FAILURE`, `last_error` says it exceeded its runtime
+limit, so a job that always hangs dead-letters), logs at ERROR and exits with
+status 70 so Docker restarts it.
 
 **Network segmentation.** `internal: true` means the database and `migrate`
 have no route off the compose bridge. The workers also sit on `egress`.

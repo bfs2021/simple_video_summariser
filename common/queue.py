@@ -313,6 +313,18 @@ class PostgresQueue:
             row = cur.fetchone()
         return _job_from_row(row) if row is not None else None
 
+    def fail_job(self, job: Job, worker: str, exc: BaseException) -> None:
+        """Record ``exc`` as a failed attempt of a job this worker holds (#66).
+
+        The same outcome ``claim`` gives a handler that raised ``exc``: retry
+        with backoff, or dead-letter at max attempts. For a caller outside
+        the handler's own ``with queue.claim(...)`` block, namely the worker's
+        runtime-limit watchdog, which acts while the handler is still wedged.
+        Guarded by ``locked_by`` like every other outcome, so a job already
+        reaped and reclaimed is left alone.
+        """
+        self._fail(job, worker, exc)
+
     def _fail(self, job: Job, worker: str, exc: BaseException) -> None:
         error_class = classify(exc)
         pol = policy(error_class)

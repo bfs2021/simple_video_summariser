@@ -118,6 +118,12 @@ class Settings(BaseSettings):
     REAP_INTERVAL_SEC: PositiveInt = 60
     MAX_ATTEMPTS_TRANSCRIBE: PositiveInt = 2
     WORKER_SHUTDOWN_GRACE_SEC: PositiveInt = 20
+    # Per-kind maximum job runtime (#66). A handler past it is treated as
+    # hung and the worker exits. transcribe is audio duration x the RTF
+    # ceiling (real-time factor: processing time / audio time).
+    INGEST_MAX_RUNTIME_SEC: PositiveInt = 600
+    ANALYZE_MAX_RUNTIME_SEC: PositiveInt = 3600
+    TRANSCRIBE_MAX_RTF: PositiveFloat = 3.0
 
     LOG_LEVEL: LogLevel = "INFO"
     LOG_FORMAT: Literal["json", "console"] = "json"
