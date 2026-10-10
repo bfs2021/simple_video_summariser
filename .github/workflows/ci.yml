@@ -1,0 +1,114 @@
+# CI (task #61). Every step is the command documented in AGENTS.md ->
+# Commands, so a red step is reproduced on the host by running that command
+# in WSL. No secrets: no test needs an API key.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Install runtime and dev dependencies
+        run: pip install -r requirements.backend.txt -e ".[dev]"
+      - name: ruff check .
+        run: ruff check .
+      - name: mypy .
+        run: mypy .
+      - name: pytest -m "not integration"
+        run: pytest -m "not integration"
+      # testcontainers starts postgres:18-alpine on the runner's Docker. The
+      # `image` tests are excluded here: they run in the `images` job.
+      - name: pytest -m "integration and not image"
+        run: pytest -m "integration and not image"
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+      - name: npm ci
+        run: npm ci
+      - name: npm run --if-present gen:api:check
+        run: npm run --if-present gen:api:check
+      - name: npm run --if-present lint
+        run: npm run --if-present lint
+      - name: npm test
+        run: npm test
+      - name: npm run build
+        run: npm run build
+      - name: npm audit --audit-level=high
+        run: npm audit --audit-level=high
+
+  images:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Install runtime and dev dependencies
+        run: pip install -r requirements.backend.txt -e ".[dev]"
+      # Builds ytdigest-backend:latest before the whisper image (which is
+      # FROM that tag), then the frontend image, and runs their runtime checks.
+      - name: pytest -m image
+        run: pytest -m image
+
+  # Browser-level suite (#177). Gated: it does nothing until web/package.json
+  # has a `test:e2e` script, so it needs no workflow change when #177 lands.
+  # `npm ci` never downloads a browser (web/.npmrc, PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD).
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: web
+    env:
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Detect the browser suite (#177)
+        id: gate
+        run: |
+          if grep -q '"test:e2e"' package.json; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "No test:e2e script in web/package.json yet (#177); skipping."
+          fi
+      - if: steps.gate.outputs.enabled == 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+      - if: steps.gate.outputs.enabled == 'true'
+        name: npm ci
+        run: npm ci
+      - if: steps.gate.outputs.enabled == 'true'
+        name: npx playwright install --with-deps chromium
+        run: npx playwright install --with-deps chromium
+      - if: steps.gate.outputs.enabled == 'true'
+        name: npm run test:e2e
+        run: npm run test:e2e
