@@ -17,3 +17,6 @@ node_modules/
 
 # Frontend build output (task #47)
 web/dist/
+
+# Bake-off reports, transcripts and references (issue #76)
+data/bakeoff/

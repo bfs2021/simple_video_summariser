@@ -38,7 +38,7 @@ addopts = ["--strict-markers"]
 markers = [
     "integration: needs a real Postgres (Docker Desktop running); deselect with -m \"not integration\"",
     "whisper: needs faster-whisper installed (pip install -r requirements.whisper.txt); deselected by default, select with -m whisper",
-    "image: builds the backend, whisper and frontend container images (minutes, downloads from PyPI, Debian and the npm registry); needs Docker Desktop; deselected by default, select with -m image",
+    "image: builds the backend, whisper, frontend and bake-off container images (minutes, downloads from PyPI, Debian, the npm registry and Hugging Face); needs Docker Desktop; deselected by default, select with -m image",
 ]
 
 [tool.ruff]

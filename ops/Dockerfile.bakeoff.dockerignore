@@ -1,0 +1,5 @@
+# Per-Dockerfile ignore file (issue #76): used instead of the root
+# .dockerignore, which stays unchanged and still excludes scripts/. The
+# bake-off image takes exactly one file from the repo.
+*
+!scripts/phase0/bakeoff.py

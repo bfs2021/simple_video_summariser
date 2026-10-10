@@ -83,7 +83,11 @@ VIDEO_ID_RE = re.compile(r"[A-Za-z0-9_-]{11}")
 # (AGENTS.md -> Rules). These never move into requirements.backend.txt or
 # requirements.whisper.txt: faster-whisper gets pinned there by #20, and
 # Parakeet only if it wins the bake-off.
-FASTER_WHISPER_PIP_SPECS = ["faster-whisper==1.2.1", "numpy==2.5.3"]
+# av is faster-whisper's own dependency (declared only as ``av>=11``): av 19
+# dropped the ``metadata_errors`` argument faster-whisper 1.2.1 passes to
+# ``av.open``, so every transcription crashed. 18.1.0 is what #3's host venv
+# resolved (issue #76).
+FASTER_WHISPER_PIP_SPECS = ["faster-whisper==1.2.1", "av==18.1.0", "numpy==2.5.3"]
 SHERPA_ONNX_PIP_SPECS = ["sherpa-onnx==1.12.40", "numpy==2.5.3"]
 
 PARAKEET_MODEL_REPO = "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8"
@@ -94,6 +98,21 @@ PARAKEET_MODEL_FILES = (
     "tokens.txt",
 )
 PARAKEET_FEATURE_DIM = 128
+
+# Container support (issue #76). The image sets these; on a host with none of
+# them set every default below is exactly what it was before.
+ENV_ENGINES_VENV = "BAKEOFF_ENGINES_VENV"
+ENV_CACHE_DIR = "BAKEOFF_CACHE_DIR"
+ENV_OUT_DIR = "BAKEOFF_OUT_DIR"  # parent of the per-clip run directories
+# Set in the image, where the engine venv is built once and is read-only: a
+# run then never pip-installs (or upgrades) anything.
+ENV_PREINSTALLED = "BAKEOFF_ENGINES_PREINSTALLED"
+INSTALL_ENGINES_FLAG = "--install-engines"
+
+
+def env_path(name: str, default: Path) -> Path:
+    value = os.environ.get(name)  # noqa: TID251 - standalone script, not app code
+    return Path(value) if value else default
 
 
 # --- engine catalogue --------------------------------------------------------------
@@ -245,6 +264,38 @@ def read_system_info() -> SystemInfo:
     return SystemInfo(cpu_model=cpu_model, core_count=os.cpu_count() or 0, ram_gb=ram_gb)
 
 
+CGROUP_CPU_MAX = Path("/sys/fs/cgroup/cpu.max")
+CGROUP_MEMORY_MAX = Path("/sys/fs/cgroup/memory.max")
+
+
+def in_container() -> bool:
+    return Path("/.dockerenv").exists() or bool(
+        os.environ.get("container")  # noqa: TID251 - set by podman and others
+    )
+
+
+def _read_cgroup(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8").strip() or "unreadable"
+    except OSError:
+        return "unreadable"
+
+
+def container_line() -> str:
+    """The report header's container line.
+
+    Inside a container /proc/meminfo and os.cpu_count() show the host or VM,
+    not the limit, so the cgroup v2 limits are printed next to them ("max"
+    means unlimited).
+    """
+    if not in_container():
+        return "container: no"
+    return (
+        f"container: yes (cgroup v2 cpu.max: {_read_cgroup(CGROUP_CPU_MAX)}, "
+        f"memory.max: {_read_cgroup(CGROUP_MEMORY_MAX)})"
+    )
+
+
 def tool_version(cmd: list[str]) -> str:
     try:
         proc = run(cmd, timeout=30)
@@ -378,6 +429,32 @@ def pip_install(venv_dir: Path, specs: list[str]) -> None:
 _family_install_cache: dict[str, str | None] = {}
 
 
+def install_engines(venv_dir: Path) -> int:
+    """Install-only mode (image build): both engine families, wheels only.
+
+    The one place the pins above are used outside a normal run. pip's own
+    output is inherited so a failure is visible, and a failure is returned as
+    a non-zero exit code, never turned into a report line. `--only-binary`
+    means a package without a wheel for this interpreter fails the install
+    instead of needing a compiler.
+    """
+    specs = list(dict.fromkeys([*FASTER_WHISPER_PIP_SPECS, *SHERPA_ONNX_PIP_SPECS]))
+    venv_dir.parent.mkdir(parents=True, exist_ok=True)
+    for cmd in (
+        [sys.executable, "-m", "venv", str(venv_dir)],
+        [
+            str(venv_python(venv_dir)), "-m", "pip", "install",
+            "--only-binary", ":all:", *specs,
+        ],
+    ):
+        log("+ " + " ".join(cmd))
+        returncode = subprocess.run(cmd, check=False).returncode
+        if returncode != 0:
+            log(f"FATAL: {' '.join(cmd[:4])} exited {returncode}")
+            return returncode
+    return 0
+
+
 def ensure_family_installed(venv_dir: Path, family: str) -> str | None:
     """Install the pip specs for `family` in the shared throwaway venv.
 
@@ -386,6 +463,12 @@ def ensure_family_installed(venv_dir: Path, family: str) -> str | None:
     """
     if family in _family_install_cache:
         return _family_install_cache[family]
+    if os.environ.get(ENV_PREINSTALLED):  # noqa: TID251 - standalone script
+        # Container: the engine venv was built into the image and is read-only.
+        # Never create or pip-install anything at run time.
+        if not venv_python(venv_dir).exists():
+            return f"engine venv missing at {venv_dir}"
+        return None
     specs = (
         FASTER_WHISPER_PIP_SPECS if family == "faster-whisper" else SHERPA_ONNX_PIP_SPECS
     )
@@ -712,6 +795,7 @@ def format_report(
     results: list[EngineResult],
     reference_used: bool,
     nouns_used: int,
+    container: str = "container: no",
 ) -> str:
     lines = [
         "# Transcription engine bake-off report",
@@ -724,6 +808,7 @@ def format_report(
         f"threads: {threads}",
         f"CPU: {system.cpu_model} ({system.core_count} cores)",
         f"RAM: {system.ram_gb:.1f} GB",
+        container,
         f"yt-dlp: {yt_dlp_version}",
         f"ffmpeg: {ffmpeg_version}",
         "",
@@ -788,16 +873,19 @@ def build_parser() -> argparse.ArgumentParser:
         "(e.g. 'tiny' for a quick smoke test). Not a real bake-off number.",
     )
     parser.add_argument(
-        "--engines-venv", type=Path, default=Path.home() / ".cache" / "bakeoff-venv",
+        "--engines-venv", type=Path,
+        default=env_path(ENV_ENGINES_VENV, Path.home() / ".cache" / "bakeoff-venv"),
         help="throwaway venv for the engines, outside the repo",
     )
     parser.add_argument(
-        "--cache-dir", type=Path, default=Path.home() / ".cache" / "bakeoff-cache",
+        "--cache-dir", type=Path,
+        default=env_path(ENV_CACHE_DIR, Path.home() / ".cache" / "bakeoff-cache"),
         help="audio and parakeet model cache",
     )
     parser.add_argument(
         "--out-dir", type=Path,
-        help="where transcripts/report go (default: <cache-dir>/runs/<clip key>)",
+        help="where transcripts/report go (default: <cache-dir>/runs/<clip key>; "
+        f"${ENV_OUT_DIR} replaces <cache-dir>/runs)",
     )
     parser.add_argument(
         "--engine-timeout", type=int, default=ENGINE_TIMEOUT_SEC,
@@ -811,6 +899,11 @@ def main(argv: list[str] | None = None) -> int:
 
     # Hidden internal modes, dispatched before the public parser so they
     # don't show up in --help and don't have to share its argument shape.
+    if argv and argv[0] == INSTALL_ENGINES_FLAG:
+        if len(argv) != 2:
+            print(f"usage: bakeoff.py {INSTALL_ENGINES_FLAG} <venv-dir>", file=sys.stderr)
+            return 2
+        return install_engines(Path(argv[1]))
     if argv and argv[0] == "--measure-child":
         return measure_child_main(argv[1])
     if argv and argv[0] == "--engine-worker":
@@ -844,7 +937,9 @@ def main(argv: list[str] | None = None) -> int:
 
     video_id = extract_video_id(args.video_url)
     clip_key = f"{video_id}_{start_sec:06d}_{args.duration:05d}"
-    out_dir = args.out_dir or (args.cache_dir / "runs" / clip_key)
+    out_dir = args.out_dir or (
+        env_path(ENV_OUT_DIR, args.cache_dir / "runs") / clip_key
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
     model_dir = args.cache_dir / "models"
 
@@ -905,6 +1000,7 @@ def main(argv: list[str] | None = None) -> int:
         results,
         reference_used=reference is not None,
         nouns_used=len(nouns),
+        container=container_line(),
     )
     report_path = out_dir / "report.txt"
     report_path.write_text(report, encoding="utf-8")

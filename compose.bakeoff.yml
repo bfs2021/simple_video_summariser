@@ -1,0 +1,24 @@
+# Transcription bake-off harness (issue #76, follow-up to #3). Used only with
+# an explicit -f, never merged into the app stack:
+#   docker compose -f compose.bakeoff.yml run --rm bakeoff <video-url> [flags]
+# Own project name, so its cache volume never mixes with the app stack's and
+# `docker compose down -v` there cannot delete the downloaded models.
+# No deploy.resources limits on purpose: the report header prints the cgroup
+# CPU and memory limits it reads, so any limit you add shows up there.
+# Inputs (--reference, --nouns) and outputs (runs/<clip key>/report.txt and
+# transcripts) live in ./data/bakeoff on the host. Set BAKEOFF_UID/BAKEOFF_GID
+# if your user is not 1000:1000, and `mkdir -p data/bakeoff` first: Docker would
+# otherwise create the missing bind source owned by root.
+name: ytdigest-bakeoff
+
+services:
+  bakeoff:
+    build: {context: ., dockerfile: ops/Dockerfile.bakeoff}
+    image: ytdigest-bakeoff:latest
+    user: "${BAKEOFF_UID:-1000}:${BAKEOFF_GID:-1000}"
+    volumes:
+      - bakeoff-cache:/cache
+      - ./data/bakeoff:/work
+
+volumes:
+  bakeoff-cache:

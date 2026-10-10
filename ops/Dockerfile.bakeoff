@@ -1,0 +1,43 @@
+# Transcription bake-off harness image (issue #76, follow-up to #3).
+# A throwaway Phase 0 tool: it packages scripts/phase0/bakeoff.py with ffmpeg,
+# the pinned yt-dlp and the three engines, so it runs anywhere Docker runs.
+# Build from the repo root:
+#   docker build -f ops/Dockerfile.bakeoff -t ytdigest-bakeoff:latest .
+# or: docker compose -f compose.bakeoff.yml build bakeoff
+# Only bakeoff.py enters the build context (ops/Dockerfile.bakeoff.dockerignore).
+# Wheels only: the image has no compiler, so a package without a wheel for
+# this interpreter fails the build instead of triggering a toolchain install.
+
+FROM python:3.14-slim
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_CACHE_DIR=1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ffmpeg && rm -rf /var/lib/apt/lists/*
+
+# Harness interpreter: stdlib plus yt-dlp, the same pin as requirements.backend.txt.
+RUN python -m venv /opt/venv && \
+    /opt/venv/bin/pip install --only-binary :all: 'yt-dlp==2026.8.19'
+
+RUN useradd -r -u 10001 -m app && mkdir -p /work && chown app:app /work
+WORKDIR /app
+COPY scripts/phase0/bakeoff.py ./bakeoff.py
+
+# Engine venv, built once at build time by the script's install-only mode (the
+# pins live in bakeoff.py only). Root-owned and never written to at run time.
+# A failing install fails the build with pip's own output.
+RUN /opt/venv/bin/python /app/bakeoff.py --install-engines /opt/bakeoff-venv
+
+# /cache is the named volume. Any uid may write to it (compose runs the
+# harness as the invoking user's uid), and a fresh volume copies these modes.
+RUN mkdir -p /cache/bakeoff /cache/hf /cache/xdg && chmod 1777 /cache /cache/bakeoff /cache/hf /cache/xdg
+ENV PATH=/opt/venv/bin:$PATH \
+    PYTHONUNBUFFERED=1 \
+    BAKEOFF_ENGINES_VENV=/opt/bakeoff-venv \
+    BAKEOFF_ENGINES_PREINSTALLED=1 \
+    BAKEOFF_CACHE_DIR=/cache/bakeoff \
+    BAKEOFF_OUT_DIR=/work/runs \
+    HF_HOME=/cache/hf \
+    XDG_CACHE_HOME=/cache/xdg
+WORKDIR /work
+USER app
+# Exec form: the harness is PID 1 and receives SIGTERM. No HEALTHCHECK.
+ENTRYPOINT ["python", "/app/bakeoff.py"]
