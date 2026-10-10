@@ -709,6 +709,7 @@ def test_sigterm_during_a_database_outage_exits_0_within_the_grace_period() -> N
     grace = 5
     env = _clean_env(
         DATABASE_URL=f"postgresql://user:{DB_PASSWORD}@127.0.0.1:{port}/db?connect_timeout=3",
+        OLLAMA_HOST=f"http://127.0.0.1:{port}",  # startup probe (#84): refused at once, no outside call
         WORKER_SHUTDOWN_GRACE_SEC=str(grace),
         LOG_FORMAT="json",
     )

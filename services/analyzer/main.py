@@ -13,7 +13,14 @@ the first job:
 2. build the summarizer (this makes no network call); a configuration that can
    never work, such as ``SUMMARIZER=anthropic`` without a key, exits with
    code 2 -- still before any database connection is opened;
-3. log ``analyzer.started`` and run the worker.
+3. log ``analyzer.started``;
+4. with ``SUMMARIZER=ollama``, probe Ollama once (``GET /api/tags``, 5 s) and
+   log one ``analyzer.ollama_*`` line saying whether it is reachable and
+   ``OLLAMA_MODEL`` is pulled (#84). The probe only reports: it never changes
+   the exit code or delays the worker for more than its timeout, because Ollama
+   runs on the host and may start after the stack, and the job loop already
+   retries ``LLM_UNAVAILABLE``. It needs no database connection;
+5. run the worker.
 
 A database that is down at startup is handled like one that goes down mid-run:
 the connection is opened lazily by the worker's own claim loop, so the process
@@ -40,6 +47,7 @@ import structlog
 from pydantic import ValidationError
 
 from adapters.summarize.factory import build_summarizer
+from adapters.summarize.ollama import GetTransport, probe_ollama, urllib_get_transport
 from common.config import Settings, get_settings
 from common.db import connect as default_connect
 from common.errors import BugError, Defer
@@ -152,6 +160,28 @@ def _model_name(settings: Settings) -> str:
     return settings.OLLAMA_MODEL if settings.SUMMARIZER == "ollama" else settings.ANTHROPIC_MODEL
 
 
+def _report_ollama(settings: Settings, transport: GetTransport) -> None:
+    """Probe Ollama once and log the outcome (#84). Never raises, never exits."""
+    probe = probe_ollama(settings.OLLAMA_HOST, settings.OLLAMA_MODEL, transport=transport)
+    if probe.outcome == "ready":
+        _log.info("analyzer.ollama_ready", host=probe.host, model=probe.model)
+    elif probe.outcome == "model_missing":
+        _log.warning(
+            "analyzer.ollama_model_missing",
+            host=probe.host,
+            model=probe.model,
+            hint=f"ollama pull {probe.model}",
+        )
+    else:
+        _log.warning(
+            "analyzer.ollama_unreachable",
+            host=probe.host,
+            model=probe.model,
+            error=probe.error,
+            note="analyze jobs will be retried when Ollama is up",
+        )
+
+
 def _invalid_settings(exc: ValidationError) -> tuple[list[str], list[str]]:
     """Variable names and ``NAME: problem`` lines, without any input value."""
     variables: list[str] = []
@@ -172,13 +202,14 @@ def main(
     handler_factory: HandlerFactory = make_analyze_handler,
     worker_options: Mapping[str, Any] | None = None,
     max_iterations: int | None = None,
+    probe_transport: GetTransport | None = None,
 ) -> int:
     """Run the analyzer until SIGTERM/SIGINT; returns the process exit code.
 
     The keyword arguments are the test seams: ``settings``, the database
     ``connect``, the summarizer and handler factories, extra ``Worker``
-    options (``poll_sec``, ``sleep``, ``liveness_path`` ...) and a bound on the
-    claim loop.
+    options (``poll_sec``, ``sleep``, ``liveness_path`` ...), a bound on the
+    claim loop and the HTTP round-trip of the Ollama startup probe.
     """
     if settings is None:
         try:
@@ -210,6 +241,8 @@ def main(
     if settings.SUMMARIZER == "anthropic":
         fields["anthropic_batch"] = settings.ANTHROPIC_BATCH
     _log.info("analyzer.started", **fields)
+    if settings.SUMMARIZER == "ollama":
+        _report_ollama(settings, probe_transport or urllib_get_transport)
 
     open_connection = connect if connect is not None else default_connect
     handler = build_job_handler(

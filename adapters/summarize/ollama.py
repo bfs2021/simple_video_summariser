@@ -19,7 +19,8 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 from adapters.summarize.prompt_loader import PromptSet, format_roster, load_prompt_set
 from adapters.summarize.repair import Message, call_with_repair
@@ -68,6 +69,122 @@ def urllib_transport(url: str, body: bytes, timeout: float) -> HttpResponse:
     except urllib.error.HTTPError as err:
         with err:
             return HttpResponse(err.code, err.read(MAX_RESPONSE_BYTES + 1))
+
+
+#: Fixed timeout of the startup probe (#84). Not ``OLLAMA_TIMEOUT_SEC``, which
+#: is sized for generation (900 s); a startup check must not hold the worker up.
+PROBE_TIMEOUT_SEC = 5.0
+
+#: ``transport(url, timeout_sec)`` for the probe's GET. Raises on no response.
+type GetTransport = Callable[[str, float], HttpResponse]
+
+
+def urllib_get_transport(url: str, timeout: float) -> HttpResponse:
+    """GET ``url``. HTTP error statuses are returned, not raised."""
+    request = urllib.request.Request(url, method="GET", headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return HttpResponse(response.status, response.read(MAX_RESPONSE_BYTES + 1))
+    except urllib.error.HTTPError as err:
+        with err:
+            return HttpResponse(err.code, err.read(MAX_RESPONSE_BYTES + 1))
+
+
+@dataclass(frozen=True, slots=True)
+class OllamaProbe:
+    """What ``probe_ollama`` found. ``host`` has no credentials; ``error`` is set
+    only for ``unreachable``."""
+
+    outcome: Literal["ready", "model_missing", "unreachable"]
+    host: str
+    model: str
+    error: str | None = None
+
+
+def public_host(host: str) -> str:
+    """``host`` without any ``user:password@`` userinfo, safe to log."""
+    try:
+        parts = urlsplit(host)
+        if "@" not in parts.netloc:
+            return host
+        return urlunsplit(parts._replace(netloc=parts.netloc.rpartition("@")[2]))
+    except ValueError:
+        return "<invalid OLLAMA_HOST>"
+
+
+def _secrets_of(host: str) -> list[str]:
+    try:
+        parts = urlsplit(host)
+        userinfo = parts.netloc.rpartition("@")[0] if "@" in parts.netloc else ""
+        pieces = [userinfo, parts.username or "", parts.password or ""]
+    except ValueError:
+        return []
+    pieces += [unquote(piece) for piece in pieces]
+    return sorted({piece for piece in pieces if piece}, key=len, reverse=True)
+
+
+def _scrub(text: str, host: str) -> str:
+    for secret in _secrets_of(host):
+        text = text.replace(secret, "***")
+    return text
+
+
+def _with_implicit_tag(name: str) -> str:
+    """``qwen3.5`` -> ``qwen3.5:latest``; a name with a tag is unchanged."""
+    last_segment = name.rpartition("/")[2]
+    return name if ":" in last_segment else f"{name}:latest"
+
+
+def _lists_model(models: list[Any], model: str) -> bool:
+    wanted = _with_implicit_tag(model)
+    for entry in models:
+        if not isinstance(entry, dict):
+            continue
+        for key in ("name", "model"):
+            value = entry.get(key)
+            if isinstance(value, str) and _with_implicit_tag(value) == wanted:
+                return True
+    return False
+
+
+def probe_ollama(
+    host: str, model: str, *, transport: GetTransport = urllib_get_transport
+) -> OllamaProbe:
+    """Ask Ollama once whether it is up and ``model`` is pulled (#84).
+
+    One ``GET <host>/api/tags`` with ``PROBE_TIMEOUT_SEC``; nothing else is
+    requested and nothing is raised: every failure becomes ``unreachable``.
+    The reply is untrusted. Model names match exactly, except that a missing
+    tag means ``latest``, as in Ollama.
+    """
+    shown = public_host(host)
+
+    def unreachable(reason: str) -> OllamaProbe:
+        return OllamaProbe("unreachable", shown, model, _scrub(reason, host))
+
+    try:
+        response = transport(host.rstrip("/") + "/api/tags", PROBE_TIMEOUT_SEC)
+    except Exception as err:  # noqa: BLE001 - any transport failure means "not reachable"
+        return unreachable(f"{type(err).__name__}: {err}")
+
+    quoted = response.body[: _MAX_UNAVAILABLE_BODY_CHARS * 4].decode("utf-8", "replace")
+    quoted = quoted[:_MAX_UNAVAILABLE_BODY_CHARS]
+    if not 200 <= response.status < 300:
+        return unreachable(f"HTTP {response.status}" + (f": {quoted}" if quoted else ""))
+    if len(response.body) > MAX_RESPONSE_BYTES:
+        return unreachable(f"response is larger than {MAX_RESPONSE_BYTES} bytes")
+    try:
+        doc = json.loads(response.body.decode("utf-8"))
+    except (ValueError, RecursionError):
+        return unreachable(f"response is not JSON: {quoted}")
+    if not isinstance(doc, dict):
+        return unreachable("response is not a JSON object")
+    models = doc.get("models")
+    if not isinstance(models, list):
+        return unreachable("response has no models list")
+    if _lists_model(models, model):
+        return OllamaProbe("ready", shown, model)
+    return OllamaProbe("model_missing", shown, model)
 
 
 # JSON schemas sent as ``format`` (structured output). They mirror what the
