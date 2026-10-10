@@ -11,7 +11,7 @@ Input is untrusted. It is parsed by ``common.youtube_refs`` before anything
 reaches the database, and a rejection returns a fixed message that never
 echoes the submitted text. Both routes are idempotent: repeating a submission
 never creates a second job or row, and never moves ``monitor_from``.
-Route bodies hold no SQL; they call ``common.repo`` and ``JobQueue.enqueue``.
+Route bodies hold no SQL; they call ``common.repo`` and ``PostgresQueue``.
 """
 
 from __future__ import annotations
@@ -35,7 +35,6 @@ from common.errors import RateLimitedError, ToolFailureError, TransientNetworkEr
 from common.models import CatalogSource
 from common.queue import (
     PRIORITY_INTERACTIVE,
-    JobQueue,
     PostgresQueue,
     analyze_dedupe_key,
 )
@@ -167,15 +166,16 @@ def _require_idle(conn: psycopg.Connection[Any]) -> None:
 
 
 def submit_video(
-    conn: psycopg.Connection[Any], video_id: str, *, queue: JobQueue
+    conn: psycopg.Connection[Any], video_id: str, *, queue: PostgresQueue
 ) -> SubmitResult:
     """Record ``video_id`` and give it one ``ingest`` job, unless it already has one.
 
     In one transaction: a bare ``adhoc`` row (an existing row is kept as it
     is), then the latest ``ingest`` job is returned if there is one, whatever
-    its state; a finished job is not resubmitted (retry is #44), and an active
-    one keeps its priority (#103). Otherwise one job is enqueued at
-    ``PRIORITY_INTERACTIVE``. A concurrent submission that loses the enqueue
+    its state; a finished job is not resubmitted (retry is #44). Then every
+    ``pending`` job of the video below ``PRIORITY_INTERACTIVE`` is raised to
+    it (#103), whatever its kind; running jobs are never touched. Otherwise
+    one job is enqueued at ``PRIORITY_INTERACTIVE``. A concurrent submission that loses the enqueue
     race returns the winner's job.
     """
     with conn.transaction():
@@ -188,6 +188,7 @@ def submit_video(
             existing = latest_job(conn, video_id, "ingest")
         if existing is None:
             raise RuntimeError("enqueue conflicted but no ingest job is visible")
+        queue.raise_priority(video_id, PRIORITY_INTERACTIVE)
         job_id, state = existing
         return SubmitResult(video_id, job_id, state, created=False)
 

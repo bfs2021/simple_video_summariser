@@ -145,18 +145,152 @@ def test_resubmitting_an_active_job_returns_it_unchanged(
     assert len(_videos(db)) == 1
 
 
-def test_resubmitting_does_not_raise_a_lower_priority_job(
+def test_resubmitting_a_pending_lower_priority_ingest_raises_it_in_place(
     api: TestClient, db: psycopg.Connection[Any]
 ) -> None:
+    # Was "does not raise" under #40; #103 reverses it: a human is waiting now.
     db.execute("INSERT INTO videos (video_id, origin) VALUES (%s, 'rss')", (VID,))
     job_id = PostgresQueue(db).enqueue("ingest", VID, priority=PRIORITY_NORMAL)
+    db.execute("UPDATE jobs SET attempts = 2")
 
     response = api.post("/videos", json={"url": VID})
 
     assert response.status_code == 200
-    assert response.json()["job_id"] == job_id
-    [(_, _, _, _, priority, _, _)] = _jobs(db)
-    assert priority == PRIORITY_NORMAL
+    assert response.json() == {
+        "video_id": VID,
+        "job_id": job_id,
+        "state": "pending",
+        "created": False,
+    }
+    assert db.execute("SELECT id, priority, attempts FROM jobs").fetchall() == [
+        (job_id, PRIORITY_INTERACTIVE, 2)
+    ]
+
+
+def test_resubmitting_a_running_ingest_leaves_its_priority(
+    api: TestClient, db: psycopg.Connection[Any]
+) -> None:
+    db.execute("INSERT INTO videos (video_id, origin) VALUES (%s, 'rss')", (VID,))
+    job_id = PostgresQueue(db).enqueue("ingest", VID, priority=PRIORITY_NORMAL)
+    db.execute("UPDATE jobs SET state = 'running'")
+
+    response = api.post("/videos", json={"url": VID})
+
+    assert response.json() == {
+        "video_id": VID,
+        "job_id": job_id,
+        "state": "running",
+        "created": False,
+    }
+    assert db.execute("SELECT priority FROM jobs").fetchall() == [(PRIORITY_NORMAL,)]
+
+
+def test_resubmitting_after_a_done_ingest_raises_the_pending_transcribe(
+    api: TestClient, db: psycopg.Connection[Any]
+) -> None:
+    db.execute("INSERT INTO videos (video_id, origin) VALUES (%s, 'backfill')", (VID,))
+    queue = PostgresQueue(db)
+    ingest = queue.enqueue("ingest", VID, priority=-10)
+    transcribe = queue.enqueue("transcribe", VID, priority=-10)
+    db.execute("UPDATE jobs SET state = 'done' WHERE id = %s", (ingest,))
+
+    response = api.post("/videos", json={"url": VID})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "video_id": VID,
+        "job_id": ingest,
+        "state": "done",
+        "created": False,
+    }
+    assert db.execute("SELECT id, state, priority FROM jobs ORDER BY id").fetchall() == [
+        (ingest, "done", -10),
+        (transcribe, "pending", PRIORITY_INTERACTIVE),
+    ]
+
+
+def test_resubmitting_after_a_dead_ingest_still_raises_other_pending_jobs(
+    api: TestClient, db: psycopg.Connection[Any]
+) -> None:
+    db.execute("INSERT INTO videos (video_id, origin) VALUES (%s, 'rss')", (VID,))
+    queue = PostgresQueue(db)
+    ingest = queue.enqueue("ingest", VID, priority=0)
+    queue.enqueue("analyze", VID, dedupe_key="v1:fake", priority=-5)
+    db.execute("UPDATE jobs SET state = 'dead' WHERE id = %s", (ingest,))
+
+    api.post("/videos", json={"url": VID})
+
+    assert db.execute("SELECT kind, priority FROM jobs ORDER BY id").fetchall() == [
+        ("ingest", 0),
+        ("analyze", PRIORITY_INTERACTIVE),
+    ]
+
+
+def test_resubmitting_when_everything_is_already_interactive_changes_no_row(
+    api: TestClient, db: psycopg.Connection[Any]
+) -> None:
+    api.post("/videos", json={"url": VID})
+    PostgresQueue(db).enqueue("transcribe", VID, priority=PRIORITY_INTERACTIVE + 5)
+    before = db.execute("SELECT * FROM jobs ORDER BY id").fetchall()
+
+    response = api.post("/videos", json={"url": VID})
+
+    assert response.status_code == 200
+    assert db.execute("SELECT * FROM jobs ORDER BY id").fetchall() == before
+
+
+def test_another_videos_pending_jobs_are_not_raised(
+    api: TestClient, db: psycopg.Connection[Any]
+) -> None:
+    db.execute("INSERT INTO videos (video_id, origin) VALUES (%s, 'rss')", (VID,))
+    PostgresQueue(db).enqueue("ingest", VID, priority=0)
+    PostgresQueue(db).enqueue("ingest", DASH, priority=-10)
+
+    api.post("/videos", json={"url": VID})
+
+    assert db.execute("SELECT video_id, priority FROM jobs ORDER BY id").fetchall() == [
+        (VID, PRIORITY_INTERACTIVE),
+        (DASH, -10),
+    ]
+
+
+def test_a_first_submission_leaves_the_single_job_at_interactive(
+    api: TestClient, db: psycopg.Connection[Any]
+) -> None:
+    assert api.post("/videos", json={"url": VID}).status_code == 202
+
+    assert db.execute("SELECT priority FROM jobs").fetchall() == [(PRIORITY_INTERACTIVE,)]
+
+
+def _spy_raise_priority(monkeypatch: pytest.MonkeyPatch, calls: list[tuple[Any, ...]]) -> None:
+    def spy(self: PostgresQueue, *args: Any) -> list[int]:
+        calls.append(args)
+        return []
+
+    monkeypatch.setattr(PostgresQueue, "raise_priority", spy)
+
+
+def test_an_invalid_submission_never_calls_raise_priority(
+    api: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[Any, ...]] = []
+    _spy_raise_priority(monkeypatch, calls)
+
+    assert api.post("/videos", json={"url": "not a video"}).status_code == 422
+
+    assert calls == []
+
+
+def test_a_resubmission_raises_through_the_interactive_constant(
+    api: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api.post("/videos", json={"url": VID})
+    calls: list[tuple[Any, ...]] = []
+    _spy_raise_priority(monkeypatch, calls)
+
+    api.post("/videos", json={"url": VID})
+
+    assert calls == [(VID, PRIORITY_INTERACTIVE)]
 
 
 @pytest.mark.parametrize("state", ["done", "dead"])

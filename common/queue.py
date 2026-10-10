@@ -576,22 +576,46 @@ class PostgresQueue:
 
         Merges ``{"force": true}`` into its payload (other keys stay) and sets
         ``priority = GREATEST(priority, <priority>)``, so a job above it is
-        never lowered. One ``UPDATE`` whose own ``WHERE`` requires
-        ``state = 'pending'``: a job claimed or finished in the meantime
-        matches no row, and the answer is ``False`` with nothing written.
-        PostgresQueue only, not on the ``JobQueue`` Protocol.
+        never lowered. A job claimed or finished in the meantime matches no
+        row: ``False``, nothing written. PostgresQueue only, not on the
+        ``JobQueue`` Protocol.
+        """
+        return bool(
+            self._update_pending(
+                """payload = payload || '{"force": true}'::jsonb,
+                    priority = GREATEST(priority, %(priority)s)""",
+                "id = %(id)s",
+                {"id": job_id, "priority": priority},
+            )
+        )
+
+    def raise_priority(self, video_id: str, priority: int) -> list[int]:
+        """Raise every ``pending`` job of ``video_id`` below ``priority`` to it (#103).
+
+        Whatever its kind or key. Returns the ids it changed. Only ``priority``
+        is written, so a job in backoff keeps its ``run_after`` and spends no
+        attempt; a job at or above ``priority`` is left alone. Nothing is
+        inserted. PostgresQueue only, not on the ``JobQueue`` Protocol.
+        """
+        return self._update_pending(
+            "priority = %(priority)s",
+            "video_id = %(video_id)s AND priority < %(priority)s",
+            {"video_id": video_id, "priority": priority},
+        )
+
+    def _update_pending(self, set_sql: str, where_sql: str, params: dict[str, Any]) -> list[int]:
+        """``UPDATE ... RETURNING id`` over ``pending`` jobs, in one transaction.
+
+        ``state = 'pending'`` sits in the statement's own ``WHERE``, so under
+        READ COMMITTED a job claimed while this waited on its row lock is
+        re-checked and skipped, never read first and written later.
         """
         with self._conn.transaction(), self._conn.cursor() as cur:
             cur.execute(
-                """
-                UPDATE jobs
-                SET payload = payload || '{"force": true}'::jsonb,
-                    priority = GREATEST(priority, %(priority)s)
-                WHERE id = %(id)s AND state = 'pending'
-                """,
-                {"id": job_id, "priority": priority},
+                f"UPDATE jobs SET {set_sql} WHERE state = 'pending' AND {where_sql} RETURNING id",
+                params,
             )
-            return cur.rowcount > 0
+            return [int(row[0]) for row in cur.fetchall()]
 
     # -- reap_stale ------------------------------------------------------------
 

@@ -1757,3 +1757,181 @@ def test_force_pending_commits_on_a_default_connection(
             "SELECT priority, payload FROM jobs WHERE id = %s", (job_id,)
         ).fetchone()
     assert row == (10, {"force": True})
+
+
+# ---------------------------------------------------------------------------
+# raise_priority (issue #103)
+# ---------------------------------------------------------------------------
+
+
+def _wait_until_blocked(conn: psycopg.Connection[Any], app: str) -> None:
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM pg_stat_activity"
+                " WHERE application_name = %s AND wait_event_type = 'Lock'",
+                (app,),
+            )
+            row = cur.fetchone()
+        if row is not None and row[0] > 0:
+            return
+    raise AssertionError(f"{app} never blocked on a lock")
+
+
+@pytest.mark.parametrize(
+    ("start", "raised"), [(-10, True), (0, True), (9, True), (10, False), (11, False), (20, False)]
+)
+def test_raise_priority_raises_only_below_the_target_at_the_boundaries(
+    queue: PostgresQueue, conn: psycopg.Connection[Any], start: int, raised: bool
+) -> None:
+    job_id = queue.enqueue("ingest", "v1", priority=start)
+    assert job_id is not None
+
+    assert queue.raise_priority("v1", 10) == ([job_id] if raised else [])
+
+    assert _row(conn, job_id)["priority"] == (10 if raised else start)
+
+
+def test_raise_priority_is_a_noop_the_second_time(
+    queue: PostgresQueue, conn: psycopg.Connection[Any]
+) -> None:
+    job_id = queue.enqueue("ingest", "v1", priority=-10)
+
+    assert queue.raise_priority("v1", 10) == [job_id]
+    assert queue.raise_priority("v1", 10) == []
+
+
+def test_raise_priority_raises_every_pending_kind_and_key_of_the_video_only(
+    queue: PostgresQueue, conn: psycopg.Connection[Any]
+) -> None:
+    ids = [
+        queue.enqueue("ingest", "v1", priority=-10),
+        queue.enqueue("transcribe", "v1", priority=0),
+        queue.enqueue("analyze", "v1", dedupe_key="v1:fake", priority=-5),
+        queue.enqueue("analyze", "v1", dedupe_key="v2:fake", priority=-5),
+    ]
+    other = queue.enqueue("ingest", "v2", priority=-10)
+    assert other is not None
+    before_other = _row(conn, other)
+
+    assert sorted(queue.raise_priority("v1", 10)) == sorted(i for i in ids if i is not None)
+
+    assert [_row(conn, i)["priority"] for i in ids if i is not None] == [10, 10, 10, 10]
+    assert _row(conn, other) == before_other
+
+
+def test_raise_priority_changes_nothing_but_priority_and_inserts_nothing(
+    queue: PostgresQueue, conn: psycopg.Connection[Any]
+) -> None:
+    job_id = queue.enqueue(
+        "transcribe", "v1", payload={"k": 1}, priority=-10, run_after=datetime(2030, 1, 1, tzinfo=UTC)
+    )
+    assert job_id is not None
+    _set(conn, job_id, attempts=2, last_error="boom", error_class="transient_network")
+    before = _row(conn, job_id)
+    count = _count(conn)
+
+    assert queue.raise_priority("v1", 10) == [job_id]
+
+    after = _row(conn, job_id)
+    assert after["priority"] == 10
+    assert {k: v for k, v in after.items() if k != "priority"} == {
+        k: v for k, v in before.items() if k != "priority"
+    }
+    assert after["run_after"] == datetime(2030, 1, 1, tzinfo=UTC)
+    assert _count(conn) == count
+
+
+@pytest.mark.parametrize("state", ["running", "done", "dead"])
+def test_raise_priority_never_touches_a_job_that_is_not_pending(
+    queue: PostgresQueue, conn: psycopg.Connection[Any], state: str
+) -> None:
+    job_id = queue.enqueue("ingest", "v1", priority=-10)
+    assert job_id is not None
+    _set(conn, job_id, state=state)
+    before = _row(conn, job_id)
+
+    assert queue.raise_priority("v1", 10) == []
+
+    assert _row(conn, job_id) == before
+
+
+def test_raise_priority_on_an_unknown_video_is_empty(
+    queue: PostgresQueue, conn: psycopg.Connection[Any]
+) -> None:
+    assert queue.raise_priority("nope", 10) == []
+    assert _count(conn) == 0
+
+
+def test_a_job_whose_claim_is_in_flight_is_never_both_claimed_low_and_reported_raised(
+    head_dsn: str, conn: psycopg.Connection[Any]
+) -> None:
+    job_id = PostgresQueue(conn, settings=_settings()).enqueue("ingest", "v1", priority=-10)
+    assert job_id is not None
+    result: dict[str, list[int]] = {}
+
+    with psycopg.connect(head_dsn) as claimer:
+        with claimer.transaction():
+            claimer.execute(
+                "UPDATE jobs SET state = 'running', locked_by = 'w', attempts = attempts + 1"
+                " WHERE id = %s",
+                (job_id,),
+            )
+
+            def raise_it() -> None:
+                with psycopg.connect(head_dsn, application_name="raiser-103") as other:
+                    result["ids"] = PostgresQueue(other, settings=_settings()).raise_priority(
+                        "v1", 10
+                    )
+
+            thread = threading.Thread(target=raise_it)
+            thread.start()
+            _wait_until_blocked(conn, "raiser-103")
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+    row = _row(conn, job_id)
+    assert result["ids"] == []
+    assert (row["state"], row["priority"]) == ("running", -10)
+
+
+def test_two_concurrent_raises_both_succeed_and_the_job_ends_at_the_target(
+    head_dsn: str, conn: psycopg.Connection[Any]
+) -> None:
+    job_id = PostgresQueue(conn, settings=_settings()).enqueue("ingest", "v1", priority=-10)
+    assert job_id is not None
+    result: dict[str, list[int]] = {}
+
+    with psycopg.connect(head_dsn) as first:
+        with first.transaction():
+            first_ids = PostgresQueue(first, settings=_settings()).raise_priority("v1", 10)
+
+            def raise_it() -> None:
+                with psycopg.connect(head_dsn, application_name="raiser2-103") as other:
+                    result["ids"] = PostgresQueue(other, settings=_settings()).raise_priority(
+                        "v1", 10
+                    )
+
+            thread = threading.Thread(target=raise_it)
+            thread.start()
+            _wait_until_blocked(conn, "raiser2-103")
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+    assert first_ids == [job_id]
+    assert result["ids"] == []
+    assert _row(conn, job_id)["priority"] == 10
+
+
+def test_raise_priority_commits_on_a_default_connection(
+    head_dsn: str, commit_conn: psycopg.Connection[Any]
+) -> None:
+    queue = PostgresQueue(commit_conn, settings=_settings())
+    job_id = queue.enqueue("ingest", "v1", priority=-10)
+
+    assert queue.raise_priority("v1", 10) == [job_id]
+
+    with psycopg.connect(head_dsn) as other:
+        row = other.execute("SELECT priority FROM jobs WHERE id = %s", (job_id,)).fetchone()
+    assert row == (10,)
