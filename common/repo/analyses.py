@@ -122,6 +122,13 @@ def analysis_exists(
     return bool(row[0])
 
 
+_ANALYSIS_COLUMNS = """
+    id, video_id, transcript_id, chunk_strategy, model, prompt_version, tldr,
+    speaker_roster, input_tokens, output_tokens, cost_usd, duration_ms,
+    created_at, speakers_coerced
+"""
+
+
 def latest_analysis(conn: psycopg.Connection[Any], video_id: str) -> Analysis | None:
     """The newest analysis for ``video_id``, with its children populated.
 
@@ -130,11 +137,8 @@ def latest_analysis(conn: psycopg.Connection[Any], video_id: str) -> Analysis | 
     analysis.
     """
     row = conn.execute(
-        """
-        SELECT id, video_id, transcript_id, chunk_strategy, model,
-               prompt_version, tldr, speaker_roster, input_tokens,
-               output_tokens, cost_usd, duration_ms, created_at,
-               speakers_coerced
+        f"""
+        SELECT {_ANALYSIS_COLUMNS}
         FROM analyses
         WHERE video_id = %s
         ORDER BY created_at DESC, id DESC
@@ -142,9 +146,26 @@ def latest_analysis(conn: psycopg.Connection[Any], video_id: str) -> Analysis | 
         """,
         (video_id,),
     ).fetchone()
-    if row is None:
-        return None
+    return None if row is None else _with_children(conn, row)
 
+
+def get_analysis(
+    conn: psycopg.Connection[Any], video_id: str, analysis_id: int
+) -> Analysis | None:
+    """The analysis ``analysis_id``, only if it belongs to ``video_id`` (#109).
+
+    Same shape and child ordering as ``latest_analysis`` (one shared loader).
+    ``None`` for an unknown id and for another video's id. Read-only.
+    """
+    row = conn.execute(
+        f"SELECT {_ANALYSIS_COLUMNS} FROM analyses WHERE id = %s AND video_id = %s",
+        (analysis_id, video_id),
+    ).fetchone()
+    return None if row is None else _with_children(conn, row)
+
+
+def _with_children(conn: psycopg.Connection[Any], row: tuple[Any, ...]) -> Analysis:
+    """An ``Analysis`` from an ``_ANALYSIS_COLUMNS`` row, children loaded and ordered."""
     (
         analysis_id,
         video_id,

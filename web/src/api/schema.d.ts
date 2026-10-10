@@ -232,10 +232,12 @@ export interface paths {
         };
         /**
          * Get Video Render
-         * @description The video's latest analysis as a self-contained page (D12c).
+         * @description One analysis of the video as a self-contained page (D12c).
          *
+         *     The latest by default; ``analysis_id`` picks one run of this video (#109).
          *     The page comes from ``render.render_analysis_html``; this handler only
-         *     reads and sets the security headers. Neither 404 echoes the id.
+         *     reads and sets the security headers. No 404 echoes the ids, and another
+         *     video's analysis id answers like an unknown one.
          */
         get: operations["get_video_render_videos__video_id__render_get"];
         put?: never;
@@ -1105,7 +1107,9 @@ export interface operations {
     };
     get_video_render_videos__video_id__render_get: {
         parameters: {
-            query?: never;
+            query?: {
+                analysis_id?: number | null;
+            };
             header?: never;
             path: {
                 video_id: string;

@@ -38,6 +38,7 @@ from pydantic import (
 from starlette.convertors import Convertor, register_url_convertor
 
 from common.repo.analyses import (
+    get_analysis,
     latest_analysis,
     latest_analysis_run,
     list_analysis_runs,
@@ -91,6 +92,7 @@ BAD_VIDEO_ID = "video id must be 11 characters of A-Z, a-z, 0-9, '_' or '-'"
 VIDEO_NOT_FOUND = "video not found"
 TRANSCRIPT_NOT_FOUND = "transcript not found"
 NO_ANALYSIS_YET = "no analysis yet"
+ANALYSIS_NOT_FOUND = "analysis not found"
 #: The render page loads nothing and runs nothing (#45).
 RENDER_HEADERS = {
     "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'",
@@ -142,6 +144,29 @@ def _channel(value: object) -> object:
 QueryInt = Annotated[int, BeforeValidator(_query_int)]
 QueryDatetime = Annotated[datetime, BeforeValidator(_query_datetime)]
 ChannelId = Annotated[str, BeforeValidator(_channel)]
+
+_BIGINT_MAX = 9_223_372_036_854_775_807
+_ID_DIGITS = re.compile(r"[0-9]{1,19}")
+
+
+def _query_id(value: object) -> object:
+    """Plain ASCII digits only, at most 19 of them (a BIGINT), parsed after the check."""
+    if isinstance(value, str):
+        if _ID_DIGITS.fullmatch(value) is None:
+            raise ValueError("must be a positive integer within range")
+        return int(value)
+    return value
+
+
+QueryId = Annotated[int, Field(ge=1, le=_BIGINT_MAX), BeforeValidator(_query_id)]
+
+
+class RenderQuery(BaseModel):
+    """``analysis_id`` is optional, but present-and-empty is invalid (#109)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    analysis_id: QueryId | None = None
 
 
 class VideoListQuery(BaseModel):
@@ -308,18 +333,30 @@ def get_video_transcript(
 
 
 @router.get("/videos/{video_id:any_segment}/render", response_class=HTMLResponse)
-def get_video_render(video_id: VideoId, conn: ReadConn) -> HTMLResponse:
-    """The video's latest analysis as a self-contained page (D12c).
+def get_video_render(
+    video_id: VideoId,
+    _: Annotated[None, Depends(_gate(RenderQuery))],
+    params: Annotated[RenderQuery, Query()],
+    conn: ReadConn,
+) -> HTMLResponse:
+    """One analysis of the video as a self-contained page (D12c).
 
+    The latest by default; ``analysis_id`` picks one run of this video (#109).
     The page comes from ``render.render_analysis_html``; this handler only
-    reads and sets the security headers. Neither 404 echoes the id.
+    reads and sets the security headers. No 404 echoes the ids, and another
+    video's analysis id answers like an unknown one.
     """
     video = get_video_meta(conn, video_id)
     if video is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, VIDEO_NOT_FOUND)
-    analysis = latest_analysis(conn, video_id)
-    if analysis is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, NO_ANALYSIS_YET)
+    if params.analysis_id is None:
+        analysis = latest_analysis(conn, video_id)
+        if analysis is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, NO_ANALYSIS_YET)
+    else:
+        analysis = get_analysis(conn, video_id, params.analysis_id)
+        if analysis is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, ANALYSIS_NOT_FOUND)
     page = render_analysis_html(video, get_channel_title(conn, video.channel_id), analysis)
     return HTMLResponse(page, headers=RENDER_HEADERS)
 

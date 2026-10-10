@@ -2143,7 +2143,7 @@
     },
     "/videos/{video_id}/render": {
       "get": {
-        "description": "The video's latest analysis as a self-contained page (D12c).\n\nThe page comes from ``render.render_analysis_html``; this handler only\nreads and sets the security headers. Neither 404 echoes the id.",
+        "description": "One analysis of the video as a self-contained page (D12c).\n\nThe latest by default; ``analysis_id`` picks one run of this video (#109).\nThe page comes from ``render.render_analysis_html``; this handler only\nreads and sets the security headers. No 404 echoes the ids, and another\nvideo's analysis id answers like an unknown one.",
         "operationId": "get_video_render_videos__video_id__render_get",
         "parameters": [
           {
@@ -2153,6 +2153,24 @@
             "schema": {
               "title": "Video Id",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "analysis_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 9223372036854775807,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Analysis Id"
             }
           }
         ],

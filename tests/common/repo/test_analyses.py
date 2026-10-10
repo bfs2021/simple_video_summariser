@@ -199,3 +199,102 @@ def test_save_analysis_defaults_token_counts_to_zero(
         f"SELECT {field} FROM analyses WHERE id = %s", (analysis_id,)
     ).fetchone()
     assert row == (0,)
+
+
+# --- get_analysis (issue #109) ----------------------------------------------------
+
+
+def _two_runs_for_a_and_one_for_b(conn: psycopg.Connection) -> tuple[int, int, int]:
+    from common.models import Claim, Quote, Topic
+
+    for vid in ("videoAAAAAA", "videoBBBBBB"):
+        conn.execute("INSERT INTO videos (video_id) VALUES (%s)", (vid,))
+    tid_a = save_transcript(conn, "videoAAAAAA", "whisper", "en", "none", (), None)
+    tid_b = save_transcript(conn, "videoBBBBBB", "whisper", "en", "none", (), None)
+    older = save_analysis(
+        conn,
+        make_analysis(
+            "videoAAAAAA",
+            tid_a,
+            tldr="older",
+            topics=(Topic(seq=1, title="old t1"), Topic(seq=0, title="old t0")),
+            claims=(
+                Claim(text="old late", start_sec=50),
+                Claim(text="old none"),
+                Claim(text="old tie 1", start_sec=10),
+                Claim(text="old tie 2", start_sec=10),
+            ),
+            quotes=(Quote(text="old q late", start_sec=9), Quote(text="old q none")),
+        ),
+    )
+    newer = save_analysis(
+        conn,
+        make_analysis(
+            "videoAAAAAA",
+            tid_a,
+            tldr="newer",
+            topics=(Topic(seq=0, title="new t0"),),
+            claims=(Claim(text="new claim", start_sec=1),),
+            quotes=(Quote(text="new quote", start_sec=1),),
+        ),
+    )
+    other = save_analysis(conn, make_analysis("videoBBBBBB", tid_b, tldr="b run"))
+    return older, newer, other
+
+
+def test_get_analysis_returns_the_requested_run_with_only_its_own_children(
+    conn: psycopg.Connection,
+) -> None:
+    from common.repo.analyses import get_analysis
+
+    older, _newer, _other = _two_runs_for_a_and_one_for_b(conn)
+    # Rewrite the first tied row so its physical position is after the second:
+    # only an explicit ``id`` tiebreak keeps "old tie 1" first.
+    # (Changing the indexed ``start_sec`` and back makes the update non-HOT.)
+    conn.execute("UPDATE claims SET start_sec = 11 WHERE text = 'old tie 1'")
+    conn.execute("UPDATE claims SET start_sec = 10 WHERE text = 'old tie 1'")
+
+    result = get_analysis(conn, "videoAAAAAA", older)
+
+    assert result is not None
+    assert result.id == older
+    assert result.tldr == "older"
+    assert [t.title for t in result.topics] == ["old t0", "old t1"]
+    assert [c.text for c in result.claims] == ["old tie 1", "old tie 2", "old late", "old none"]
+    assert [q.text for q in result.quotes] == ["old q late", "old q none"]
+    assert result.created_at is not None
+
+
+def test_get_analysis_is_none_for_another_videos_id_and_for_an_unused_id(
+    conn: psycopg.Connection,
+) -> None:
+    from common.repo.analyses import get_analysis
+
+    _older, newer, other = _two_runs_for_a_and_one_for_b(conn)
+
+    assert get_analysis(conn, "videoAAAAAA", other) is None
+    assert get_analysis(conn, "videoBBBBBB", newer) is None
+    assert get_analysis(conn, "videoAAAAAA", other + 10_000) is None
+    assert get_analysis(conn, "unknownvide", newer) is None
+
+
+def test_get_analysis_matches_latest_analysis_for_the_latest_run(
+    conn: psycopg.Connection,
+) -> None:
+    from common.repo.analyses import get_analysis
+
+    _older, newer, _other = _two_runs_for_a_and_one_for_b(conn)
+
+    assert get_analysis(conn, "videoAAAAAA", newer) == latest_analysis(conn, "videoAAAAAA")
+
+
+def test_get_analysis_does_not_commit(head_dsn: str) -> None:
+    from common.repo.analyses import get_analysis
+
+    with psycopg.connect(head_dsn) as conn:
+        conn.execute("INSERT INTO videos (video_id) VALUES ('vidrollbk01')")
+        tid = save_transcript(conn, "vidrollbk01", "whisper", "en", "none", (), None)
+        aid = save_analysis(conn, make_analysis("vidrollbk01", tid))
+        assert get_analysis(conn, "vidrollbk01", aid) is not None
+        conn.rollback()
+        assert get_analysis(conn, "vidrollbk01", aid) is None
