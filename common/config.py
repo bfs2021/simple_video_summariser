@@ -117,6 +117,9 @@ class Settings(BaseSettings):
     YTDLP_COOKIE_FILE: Path | None = None
 
     POLL_INTERVAL_SEC: PositiveInt = 3600
+    # How often the planner checks each active channel's newest uploads against
+    # the ~15-entry RSS feed for videos it dropped between polls (#93); 6 h.
+    RECONCILE_INTERVAL_SEC: PositiveInt = 21600
     # How long ingest keeps rescheduling a premiere or live stream that never
     # becomes available, counted from discovery (#65); then it dead-letters.
     UPCOMING_MAX_WAIT_DAYS: PositiveInt = 14

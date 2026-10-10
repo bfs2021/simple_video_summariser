@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -217,18 +218,70 @@ def get_video_meta(conn: psycopg.Connection[Any], video_id: str) -> VideoMeta | 
     )
 
 
+@dataclass(frozen=True, slots=True)
+class KnownVideo:
+    """What a ``videos`` row says about its owner and date (issue #93)."""
+
+    channel_id: str | None  # NULL for a stub row (a submission, an unavailable video)
+    published_at: datetime | None  # NULL until ingest (#28) fills it in
+
+
+def known_videos(
+    conn: psycopg.Connection[Any], video_ids: Sequence[str]
+) -> dict[str, KnownVideo]:
+    """Map each of ``video_ids`` that already has a ``videos`` row to its facts.
+
+    Any row counts, whatever its origin, job state or ``unavailable`` flag. One
+    query for the whole list; unknown IDs are simply absent from the result.
+    """
+    if not video_ids:
+        return {}
+    rows = conn.execute(
+        "SELECT video_id, channel_id, published_at FROM videos WHERE video_id = ANY(%s)",
+        (list(video_ids),),
+    ).fetchall()
+    return {row[0]: KnownVideo(channel_id=row[1], published_at=row[2]) for row in rows}
+
+
 def known_video_ids(conn: psycopg.Connection[Any], video_ids: Sequence[str]) -> set[str]:
     """Return the subset of ``video_ids`` that already has a ``videos`` row.
 
-    Any row counts, whatever its origin, job state or ``unavailable`` flag.
-    One query for the whole list.
+    The keys of ``known_videos``: one query for the whole list.
     """
-    if not video_ids:
-        return set()
-    rows = conn.execute(
-        "SELECT video_id FROM videos WHERE video_id = ANY(%s)", (list(video_ids),)
-    ).fetchall()
-    return {row[0] for row in rows}
+    return set(known_videos(conn, video_ids))
+
+
+def insert_catalog_video(
+    conn: psycopg.Connection[Any], entry: CatalogEntry, *, channel_id: str, origin: str
+) -> bool:
+    """Insert a row for a catalog-listed video with the given ``origin`` (#41, #93).
+
+    Shared by channel backfill (``origin='backfill'``) and RSS-gap
+    reconciliation (``origin='rss'``). The listing has no publish date, so
+    ``published_at`` stays NULL until ingest fills it in; that keeps a row made
+    here from ever acting as a reconciliation anchor. The title is cleaned. A
+    missing ``channels`` row is created inactive, as ``insert_discovered_video``
+    does. An existing video row is left untouched. Returns whether this call
+    inserted the row.
+    """
+    conn.execute(
+        """
+        INSERT INTO channels (channel_id, active)
+        VALUES (%s, false)
+        ON CONFLICT (channel_id) DO NOTHING
+        """,
+        (channel_id,),
+    )
+    row = conn.execute(
+        """
+        INSERT INTO videos (video_id, channel_id, title, duration_sec, origin)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (video_id) DO NOTHING
+        RETURNING video_id
+        """,
+        (entry.video_id, channel_id, clean_text(entry.title), entry.duration_sec, origin),
+    ).fetchone()
+    return row is not None
 
 
 def insert_backfill_video(
@@ -236,19 +289,9 @@ def insert_backfill_video(
 ) -> bool:
     """Insert a channel-backfill row from a catalog entry (issue #41).
 
-    ``origin`` is ``'backfill'``; the title is cleaned. An existing row for
-    the video is left untouched. Returns whether this call inserted the row.
+    ``insert_catalog_video`` with ``origin='backfill'``.
     """
-    row = conn.execute(
-        """
-        INSERT INTO videos (video_id, channel_id, title, duration_sec, origin)
-        VALUES (%s, %s, %s, %s, 'backfill')
-        ON CONFLICT (video_id) DO NOTHING
-        RETURNING video_id
-        """,
-        (entry.video_id, channel_id, clean_text(entry.title), entry.duration_sec),
-    ).fetchone()
-    return row is not None
+    return insert_catalog_video(conn, entry, channel_id=channel_id, origin="backfill")
 
 
 # The one definition of a video's processing status (#42). Both list_videos and
@@ -373,3 +416,4 @@ def _summary(row: Sequence[Any]) -> VideoSummary:
         ),
         latest_analysis_at=latest_analysis_at,
     )
+

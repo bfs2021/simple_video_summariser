@@ -91,6 +91,7 @@ services:
     environment:
       <<: *backend-env
       POLL_INTERVAL_SEC: ${POLL_INTERVAL_SEC:-3600}
+      RECONCILE_INTERVAL_SEC: ${RECONCILE_INTERVAL_SEC:-21600}
       AUDIO_TTL_DAYS: ${AUDIO_TTL_DAYS:-30}
       AUDIO_MAX_GB: ${AUDIO_MAX_GB:-20}
       AUDIO_KEEP: ${AUDIO_KEEP:-1}

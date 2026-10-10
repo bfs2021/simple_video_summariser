@@ -134,6 +134,7 @@ def test_defaults_match_the_architecture_table() -> None:
     assert s.AUDIO_MIN_FREE_GB == 2
     assert s.AUDIO_MIN_FREE_PCT == 5
     assert s.POLL_INTERVAL_SEC == 3600
+    assert s.RECONCILE_INTERVAL_SEC == 21600
     assert s.HEARTBEAT_SEC == 60
     assert s.REAP_AFTER_SEC == 300
     assert s.MAX_ATTEMPTS_TRANSCRIBE == 2
@@ -161,7 +162,7 @@ def test_every_architecture_variable_is_a_field_except_transcriber_cpus() -> Non
         "WORKER_SHUTDOWN_GRACE_SEC", "REAP_INTERVAL_SEC",
         "INGEST_MAX_RUNTIME_SEC", "ANALYZE_MAX_RUNTIME_SEC", "TRANSCRIBE_MAX_RTF",
         "ALERT_WEBHOOK_URL", "ALERT_WEBHOOK_FORMAT", "ALERT_MIN_INTERVAL_SEC",
-        "UPCOMING_MAX_WAIT_DAYS", "AUDIO_MIN_FREE_GB", "AUDIO_MIN_FREE_PCT",
+        "UPCOMING_MAX_WAIT_DAYS", "RECONCILE_INTERVAL_SEC", "AUDIO_MIN_FREE_GB", "AUDIO_MIN_FREE_PCT",
     }  # fmt: skip
 
     assert set(Settings.model_fields) == expected

@@ -1,21 +1,23 @@
 """Planner service entrypoint (issue #38; architecture.md §1, §11.1).
 
-``python -m services.planner.main`` runs the six periodic maintenance tasks
+``python -m services.planner.main`` runs the seven periodic maintenance tasks
 in one long-lived process, each on its own interval:
 
-============================  =====================  =============================
-task                          interval               what it does
-============================  =====================  =============================
-``reap``                      ``REAP_INTERVAL_SEC``  hand back jobs of dead workers
-``auto_caption_fallback``     ``POLL_INTERVAL_SEC``  re-enqueue ingest for a video whose
-                                                     transcribe job dead-lettered (#92)
-``audio_retention``           ``POLL_INTERVAL_SEC``  expire / cap / clean audio
-``reanalysis_sweep``          ``POLL_INTERVAL_SEC``  enqueue analyses for a new prompt
-``poll_channels``             ``POLL_INTERVAL_SEC``  discover new videos from RSS
-``dead_letter_alerts``        ``REAP_INTERVAL_SEC``  alert on TOOL_FAILURE / RESOURCE
-                                                     dead-letters (#67); a no-op
-                                                     without ``ALERT_WEBHOOK_URL``
-============================  =====================  =============================
+============================  ============================  =============================
+task                          interval                      what it does
+============================  ============================  =============================
+``reap``                      ``REAP_INTERVAL_SEC``         hand back jobs of dead workers
+``auto_caption_fallback``     ``POLL_INTERVAL_SEC``         re-enqueue ingest for a video whose
+                                                            transcribe job dead-lettered (#92)
+``audio_retention``           ``POLL_INTERVAL_SEC``         expire / cap / clean audio
+``reanalysis_sweep``          ``POLL_INTERVAL_SEC``         enqueue analyses for a new prompt
+``poll_channels``             ``POLL_INTERVAL_SEC``         discover new videos from RSS
+``reconcile_channels``        ``RECONCILE_INTERVAL_SEC``    recover uploads that fell out of the
+                                                            ~15-entry RSS feed between polls (#93)
+``dead_letter_alerts``        ``REAP_INTERVAL_SEC``         alert on TOOL_FAILURE / RESOURCE
+                                                            dead-letters (#67); a no-op
+                                                            without ``ALERT_WEBHOOK_URL``
+============================  ============================  =============================
 
 Every task runs once at startup, in that order (``PROMPT_VERSION`` changes
 only through a restart, so the sweep must fire on start). Scheduling lives in
@@ -67,6 +69,7 @@ def _install_early_handlers() -> None:
 _install_early_handlers()
 
 import argparse
+import time
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -76,6 +79,7 @@ import structlog
 from pydantic import ValidationError
 
 from adapters.alerts.webhook import WebhookAlerter
+from adapters.youtube.catalog import YouTubeCatalog
 from adapters.youtube.feed import YouTubeFeed
 from common.config import Settings, get_settings
 from common.db import connect
@@ -87,6 +91,7 @@ from services.planner.alerts import send_dead_letter_alerts
 from services.planner.fallback import run_auto_caption_fallback_sweep
 from services.planner.poll import poll_channels
 from services.planner.reaper import reap_stale_jobs
+from services.planner.reconcile import RECONCILE_LIST_TIMEOUT_SEC, reconcile_channels
 from services.planner.retention import enforce_audio_retention, max_bytes_from_gb
 from services.planner.scheduler import Scheduler, Task
 from services.planner.sweep import run_reanalysis_sweep
@@ -104,6 +109,7 @@ LOCK_KEYS: dict[str, tuple[int, int]] = {
     "poll_channels": (LOCK_NAMESPACE, 4),
     "dead_letter_alerts": (LOCK_NAMESPACE, 5),
     "auto_caption_fallback": (LOCK_NAMESPACE, 6),
+    "reconcile_channels": (LOCK_NAMESPACE, 7),
 }
 
 Connect = Callable[[], psycopg.Connection[Any]]
@@ -255,6 +261,21 @@ def build_registry(settings: Settings, connect: Connect) -> list[Task]:
         result = poll_channels(conn, YouTubeFeed(), PostgresQueue(conn, settings=settings))
         return result.jobs_enqueued
 
+    catalog = YouTubeCatalog(timeout=RECONCILE_LIST_TIMEOUT_SEC)
+    # The round-robin cursor lives in memory between runs; a restart resets it (#93).
+    reconcile_cursor: list[str | None] = [None]
+
+    def reconcile(conn: psycopg.Connection[Any]) -> int:
+        result = reconcile_channels(
+            conn,
+            catalog,
+            PostgresQueue(conn, settings=settings),
+            clock=time.monotonic,
+            start_after=reconcile_cursor[0],
+        )
+        reconcile_cursor[0] = result.resume_after
+        return result.jobs_enqueued
+
     webhook = settings.ALERT_WEBHOOK_URL
     sink = (
         WebhookAlerter(webhook.get_secret_value(), fmt=settings.ALERT_WEBHOOK_FORMAT)
@@ -276,6 +297,7 @@ def build_registry(settings: Settings, connect: Connect) -> list[Task]:
         Task("audio_retention", settings.POLL_INTERVAL_SEC, with_conn(audio_retention)),
         Task("reanalysis_sweep", settings.POLL_INTERVAL_SEC, with_conn(reanalysis_sweep)),
         Task("poll_channels", settings.POLL_INTERVAL_SEC, with_conn(poll)),
+        Task("reconcile_channels", settings.RECONCILE_INTERVAL_SEC, with_conn(reconcile)),
         Task(
             "dead_letter_alerts",
             settings.REAP_INTERVAL_SEC,

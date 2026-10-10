@@ -5,14 +5,16 @@ from __future__ import annotations
 import subprocess
 import sys
 import textwrap
+import time
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from common.config import Settings, get_settings
 from services.planner import main as planner_main
+from services.planner.reconcile import ReconcileResult
 from services.planner.retention import RetentionReport
 from services.planner.scheduler import Scheduler, Task
 
@@ -24,6 +26,7 @@ TASK_NAMES = [
     "audio_retention",
     "reanalysis_sweep",
     "poll_channels",
+    "reconcile_channels",
     "dead_letter_alerts",
 ]
 
@@ -54,6 +57,7 @@ def test_reap_uses_its_own_interval_and_the_others_use_the_poll_interval() -> No
         "audio_retention": 99,
         "reanalysis_sweep": 99,
         "poll_channels": 99,
+        "reconcile_channels": 21600,
         "dead_letter_alerts": 7,
     }
 
@@ -67,6 +71,7 @@ def test_default_intervals_are_one_minute_and_one_hour() -> None:
         "audio_retention": 3600,
         "reanalysis_sweep": 3600,
         "poll_channels": 3600,
+        "reconcile_channels": 21600,
         "dead_letter_alerts": 60,
     }
 
@@ -131,6 +136,54 @@ def test_auto_caption_fallback_runs_right_after_reap_with_its_own_fixed_lock_key
 
     assert names.index("auto_caption_fallback") == names.index("reap") + 1
     assert planner_main.LOCK_KEYS["auto_caption_fallback"] == (planner_main.LOCK_NAMESPACE, 6)
+
+
+def test_reconcile_runs_after_poll_on_its_own_interval_with_lock_key_7() -> None:
+    names = [t.name for t in planner_main.build_registry(_settings(), _no_connect)]
+
+    assert names.index("reconcile_channels") == names.index("poll_channels") + 1
+    assert planner_main.LOCK_KEYS["reconcile_channels"] == (planner_main.LOCK_NAMESPACE, 7)
+    tasks = {
+        t.name: t.interval_sec
+        for t in planner_main.build_registry(_settings(RECONCILE_INTERVAL_SEC=123), _no_connect)
+    }
+    assert tasks["reconcile_channels"] == 123
+
+
+class _Conn:
+    def close(self) -> None:
+        pass
+
+
+def test_reconcile_builds_the_catalog_with_the_list_timeout_and_keeps_its_cursor_in_memory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    built: list[float] = []
+    cursors: list[str | None] = []
+    results = iter([("UCb", 2), ("UCz", 0), (None, 1)])
+
+    class FakeCatalog:
+        def __init__(self, *, timeout: float) -> None:
+            built.append(timeout)
+
+    def fake_reconcile(conn: Any, catalog: Any, queue: Any, *, clock: Any, start_after: Any) -> Any:
+        cursors.append(start_after)
+        assert isinstance(catalog, FakeCatalog)
+        assert clock is time.monotonic
+        resume, enqueued = next(results)
+        return ReconcileResult(1, 0, 0, 0, 0, enqueued, resume)
+
+    monkeypatch.setattr(planner_main, "YouTubeCatalog", FakeCatalog)
+    monkeypatch.setattr(planner_main, "reconcile_channels", fake_reconcile)
+    tasks = {
+        t.name: t for t in planner_main.build_registry(_settings(), lambda: cast(Any, _Conn()))
+    }
+
+    returned = [tasks["reconcile_channels"].fn() for _ in range(3)]
+
+    assert built == [60]
+    assert cursors == [None, "UCb", "UCz"]  # each run starts where the last one stopped
+    assert returned == [2, 0, 1]  # the task returns jobs_enqueued
 
 
 def test_the_module_documents_the_single_replica_constraint() -> None:

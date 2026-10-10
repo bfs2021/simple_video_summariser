@@ -272,6 +272,13 @@ and rate-limitable.
 Claim ordering is `priority DESC, run_after ASC`. This is what prevents a
 200-episode backfill from starving today's episodes (D9b).
 
+RSS-gap reconciliation (#93) queues at the Normal band with `origin = 'rss'`:
+a channel that uploads more than the ~15 feed entries between two polls loses
+videos the feed never showed, and those are forward-monitored content, not
+history. Only uploads positioned above a known post-`monitor_from` video (the
+anchor) in the channel's newest-50 listing are recovered; anything below it may
+be pre-cutoff history and stays for an explicit backfill (D9b, #41).
+
 ---
 
 ## 5. Job lifecycle
@@ -879,6 +886,7 @@ than reading `os.environ` directly.
 | `AUDIO_KEEP` / `AUDIO_TTL_DAYS` / `AUDIO_MAX_GB` | `1` / `30` / `20` | transcriber, planner |
 | `AUDIO_MIN_FREE_GB` / `AUDIO_MIN_FREE_PCT` | `2` / `5` | planner: free-space floor on the `AUDIO_DIR` volume (#105). When free space is below the larger of the two, audio retention evicts the oldest audio beyond what `AUDIO_MAX_GB` would, never a running job's. `0` for either disables that half; `AUDIO_MIN_FREE_PCT` is `0 <= x < 100`. A floor at or above the volume size evicts nothing and logs `planner.audio_retention.free_space_floor_invalid` |
 | `POLL_INTERVAL_SEC` | `3600` | planner |
+| `RECONCILE_INTERVAL_SEC` | `21600` | planner: how often each active channel's newest uploads are checked against the RSS feed for videos it dropped (#93) |
 | `UPCOMING_MAX_WAIT_DAYS` | `14` | transcriber: ingest reschedules a premiere or live stream until it is available, and dead-letters it this many days after discovery (#65) |
 | `HEARTBEAT_SEC` / `REAP_AFTER_SEC` | `60` / `300` | workers, planner |
 | `MAX_ATTEMPTS_TRANSCRIBE` | `2` | transcriber |
