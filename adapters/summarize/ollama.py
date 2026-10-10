@@ -18,13 +18,25 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 from urllib.parse import unquote, urlsplit, urlunsplit
 
-from adapters.summarize.prompt_loader import PromptSet, format_roster, load_prompt_set
+from adapters.summarize.prompt_loader import (
+    PromptSet,
+    RenderedPrompt,
+    format_roster,
+    load_prompt_set,
+)
 from adapters.summarize.repair import Message, call_with_repair
-from adapters.summarize.schema import parse_chunk_analysis, parse_roster, parse_tldr
+from adapters.summarize.schema import (
+    MAX_CLAIMS,
+    MAX_QUOTES,
+    MAX_TOPICS,
+    parse_chunk_analysis,
+    parse_roster,
+    parse_tldr,
+)
 from common.config import Settings, get_settings
 from common.errors import BugError, LLMInvalidOutputError, LLMUnavailableError
 from common.models import (
@@ -295,6 +307,55 @@ def _partials_json(partials: list[ChunkAnalysis]) -> str:
     )
 
 
+def estimate_tokens(text: str) -> int:
+    """Conservative token estimate: ``ceil(utf-8 bytes / 3)`` (#85).
+
+    Deliberately pessimistic for English and for non-Latin scripts, and needs
+    no tokenizer library. The post-call overflow check still guards against it
+    being too low.
+    """
+    return -(-len(text.encode("utf-8")) // 3)
+
+
+_ELLIPSIS = "…"
+_LINE_SECOND = re.compile(r"\[(\d+)\]")
+
+
+def _cut_to_fit(text: str, fits: Callable[[str], bool]) -> str:
+    """The longest prefix of ``text`` plus ``…`` for which ``fits`` holds.
+
+    Whole characters only. ``""`` when not even a bare ``…`` fits. ``fits`` is
+    monotone: a longer prefix never fits when a shorter one does not.
+    """
+    lo, hi = -1, len(text) - 1  # lo: largest known fitting prefix length
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if fits(text[:mid] + _ELLIPSIS):
+            lo = mid
+        else:
+            hi = mid - 1
+    return text[:lo] + _ELLIPSIS if lo >= 0 else ""
+
+
+def _merge_analyses(parts: list[ChunkAnalysis]) -> ChunkAnalysis:
+    """Concatenate piece results in order, capped like a single analysis."""
+    topics = [t for p in parts for t in p.topics]
+    claims = [c for p in parts for c in p.claims]
+    quotes = [q for p in parts for q in p.quotes]
+    capped = sum(
+        max(0, len(items) - cap)
+        for items, cap in ((topics, MAX_TOPICS), (claims, MAX_CLAIMS), (quotes, MAX_QUOTES))
+    )
+    return ChunkAnalysis(
+        topics=tuple(replace(t, seq=i) for i, t in enumerate(topics[:MAX_TOPICS])),
+        claims=tuple(claims[:MAX_CLAIMS]),
+        quotes=tuple(quotes[:MAX_QUOTES]),
+        speaker_coercions=sum(p.speaker_coercions for p in parts),
+        start_sec_clamped=sum(p.start_sec_clamped for p in parts),
+        items_dropped=sum(p.items_dropped for p in parts) + capped,
+    )
+
+
 class OllamaSummarizer:
     """``Summarizer`` over Ollama's ``/api/chat``. One instance per process."""
 
@@ -307,6 +368,7 @@ class OllamaSummarizer:
         model: str,
         num_ctx: int,
         timeout_sec: float,
+        output_reserve_tokens: int = 2048,
         prompts: PromptSet,
         transport: Transport = urllib_transport,
         clock: Callable[[], float] = time.monotonic,
@@ -314,6 +376,8 @@ class OllamaSummarizer:
         self.model = model
         self._url = host.rstrip("/") + "/api/chat"
         self._num_ctx = num_ctx
+        self._reserve = output_reserve_tokens
+        self._budget = num_ctx - output_reserve_tokens
         self._timeout = timeout_sec
         self._prompts = prompts
         self._transport = transport
@@ -323,21 +387,56 @@ class OllamaSummarizer:
         self._calls = 0
 
     @classmethod
-    def from_settings(cls, settings: Settings | None = None) -> OllamaSummarizer:
+    def from_settings(
+        cls, settings: Settings | None = None, *, transport: Transport = urllib_transport
+    ) -> OllamaSummarizer:
         s = settings or get_settings()
         return cls(
             host=s.OLLAMA_HOST,
             model=s.OLLAMA_MODEL,
             num_ctx=s.OLLAMA_NUM_CTX,
+            output_reserve_tokens=s.OLLAMA_OUTPUT_RESERVE_TOKENS,
             timeout_sec=s.OLLAMA_TIMEOUT_SEC,
             prompts=load_prompt_set(s.PROMPT_VERSION),
+            transport=transport,
         )
 
     # --- port ---------------------------------------------------------------
 
     def derive_roster(self, meta: VideoMeta, opening: str) -> Roster:
+        description = meta.description
+
+        def tokens(desc: str, open_: str) -> int:
+            p = self._prompts.render_roster(title=meta.title, description=desc, opening=open_)
+            return estimate_tokens(p.system) + estimate_tokens(p.user)
+
+        budget = self._budget
+        original = (len(description), len(opening))
+        if tokens(description, opening) > budget:
+            # Trim, never split: the description first, then the opening.
+            if tokens("", opening) > budget:
+                if tokens("", "") > budget:
+                    raise LLMInvalidOutputError(
+                        f"The roster prompt needs about {tokens('', '')} tokens even without "
+                        f"the description and opening, more than the prompt budget of "
+                        f"{budget} (OLLAMA_NUM_CTX={self._num_ctx} minus "
+                        f"OLLAMA_OUTPUT_RESERVE_TOKENS={self._reserve}); raise OLLAMA_NUM_CTX"
+                    )
+                description = ""
+                opening = _cut_to_fit(opening, lambda t: tokens("", t) <= budget)
+            else:
+                description = _cut_to_fit(description, lambda t: tokens(t, opening) <= budget)
+            _logger.info(
+                "ollama_roster_trimmed",
+                extra={
+                    "description_chars_original": original[0],
+                    "description_chars_final": len(description),
+                    "opening_chars_original": original[1],
+                    "opening_chars_final": len(opening),
+                },
+            )
         prompt = self._prompts.render_roster(
-            title=meta.title, description=meta.description, opening=opening
+            title=meta.title, description=description, opening=opening
         )
         return self._run(
             "derive_roster",
@@ -350,20 +449,89 @@ class OllamaSummarizer:
     def analyze_chunk(self, chunk: Chunk, roster: Roster, meta: VideoMeta) -> ChunkAnalysis:
         if not chunk.text.strip():
             return ChunkAnalysis(topics=(), claims=(), quotes=())
-        prompt = self._prompts.render_chunk(
-            title=meta.title,
-            roster=format_roster([(s.name, s.role) for s in roster.speakers]),
-            chunk_start=chunk.start_sec,
-            chunk_end=chunk.end_sec,
-            transcript=chunk.text,
+        roster_text = format_roster([(s.name, s.role) for s in roster.speakers])
+
+        def render(text: str, start: float, end: float) -> RenderedPrompt:
+            return self._prompts.render_chunk(
+                title=meta.title,
+                roster=roster_text,
+                chunk_start=start,
+                chunk_end=end,
+                transcript=text,
+            )
+
+        def parse(raw: str) -> ChunkAnalysis:
+            # Every piece is validated against the whole chunk, not its own span.
+            return parse_chunk_analysis(raw, roster=roster, chunk=chunk)
+
+        whole = render(chunk.text, chunk.start_sec, chunk.end_sec)
+        estimated = estimate_tokens(whole.system) + estimate_tokens(whole.user)
+        if estimated <= self._budget:
+            return self._run(
+                "analyze_chunk", whole.system, whole.user, format=_CHUNK_FORMAT, parse=parse
+            )
+
+        pieces = self._split_chunk(chunk, render)
+        _logger.info(
+            "ollama_chunk_split",
+            extra={
+                "chunk_seq": chunk.seq,
+                "pieces": len(pieces),
+                "estimated_tokens": estimated,
+                "budget": self._budget,
+            },
         )
-        return self._run(
-            "analyze_chunk",
-            prompt.system,
-            prompt.user,
-            format=_CHUNK_FORMAT,
-            parse=lambda raw: parse_chunk_analysis(raw, roster=roster, chunk=chunk),
-        )
+        results = [
+            self._run("analyze_chunk", p.system, p.user, format=_CHUNK_FORMAT, parse=parse)
+            for p in pieces
+        ]
+        return _merge_analyses(results)
+
+    def _split_chunk(
+        self, chunk: Chunk, render: Callable[[str, float, float], RenderedPrompt]
+    ) -> list[RenderedPrompt]:
+        """Cut ``chunk`` at line boundaries into the fewest prompts that fit.
+
+        A piece shows its own span: from its first line's second to the next
+        piece's first second (the chunk's ``end_sec`` for the last piece).
+        """
+        lines = chunk.text.split("\n")
+        seconds: list[int] = []
+        for line in lines:
+            match = _LINE_SECOND.match(line)
+            seconds.append(
+                int(match.group(1)) if match else (seconds[-1] if seconds else int(chunk.start_sec))
+            )
+        n = len(lines)
+
+        def prompt(i: int, j: int) -> RenderedPrompt:  # lines[i:j]
+            end = seconds[j] if j < n else chunk.end_sec
+            return render("\n".join(lines[i:j]), seconds[i], end)
+
+        def tokens(p: RenderedPrompt) -> int:
+            return estimate_tokens(p.system) + estimate_tokens(p.user)
+
+        pieces: list[RenderedPrompt] = []
+        i = 0
+        while i < n:
+            alone = tokens(prompt(i, i + 1))
+            if alone > self._budget:
+                raise LLMInvalidOutputError(
+                    f"chunk {chunk.seq}: the line at second {seconds[i]} needs about "
+                    f"{alone} tokens by itself, more than the prompt budget of "
+                    f"{self._budget} (OLLAMA_NUM_CTX={self._num_ctx} minus "
+                    f"OLLAMA_OUTPUT_RESERVE_TOKENS={self._reserve}); raise OLLAMA_NUM_CTX"
+                )
+            lo, hi = i + 1, n  # lo always fits; fitting is monotone in the piece length
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                if tokens(prompt(i, mid)) <= self._budget:
+                    lo = mid
+                else:
+                    hi = mid - 1
+            pieces.append(prompt(i, lo))
+            i = lo
+        return pieces
 
     def reduce(self, partials: list[ChunkAnalysis], meta: VideoMeta) -> str:
         if not partials:

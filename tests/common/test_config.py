@@ -112,6 +112,7 @@ def test_defaults_match_the_architecture_table() -> None:
     assert s.OLLAMA_MODEL == "qwen3.5:4b"
     assert s.OLLAMA_HOST == "http://host.docker.internal:11434"
     assert s.OLLAMA_NUM_CTX == 8192
+    assert s.OLLAMA_OUTPUT_RESERVE_TOKENS == 2048
     assert s.OLLAMA_TIMEOUT_SEC == 900
     assert s.ANTHROPIC_API_KEY is None
     assert s.ANTHROPIC_MODEL == "claude-haiku-4-5"
@@ -145,7 +146,7 @@ def test_defaults_match_the_architecture_table() -> None:
 def test_every_architecture_variable_is_a_field_except_transcriber_cpus() -> None:
     expected = {
         "DATABASE_URL", "SUMMARIZER", "OLLAMA_MODEL", "OLLAMA_HOST",
-        "OLLAMA_NUM_CTX", "OLLAMA_TIMEOUT_SEC",
+        "OLLAMA_NUM_CTX", "OLLAMA_OUTPUT_RESERVE_TOKENS", "OLLAMA_TIMEOUT_SEC",
         "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "ANTHROPIC_BATCH",
         "ANTHROPIC_MAX_TOKENS", "ANTHROPIC_BATCH_POLL_SEC",
         "ANTHROPIC_BATCH_MAX_WAIT_SEC",
@@ -290,6 +291,49 @@ def test_valid_chunk_window_edges_are_accepted(chunk: int, overlap: int) -> None
     s = build_settings(DATABASE_URL=DB_URL, CHUNK_SEC=chunk, OVERLAP_SEC=overlap)
 
     assert (s.CHUNK_SEC, s.OVERLAP_SEC) == (chunk, overlap)
+
+
+# --- OLLAMA_OUTPUT_RESERVE_TOKENS vs OLLAMA_NUM_CTX (#85) ---------------------
+
+
+@pytest.mark.parametrize(("num_ctx", "reserve"), [(8192, 8192), (8192, 8193), (4096, 2048 * 2)])
+def test_output_reserve_not_below_the_context_window_is_rejected_naming_both(
+    num_ctx: int, reserve: int
+) -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        build_settings(
+            DATABASE_URL=DB_URL, OLLAMA_NUM_CTX=num_ctx, OLLAMA_OUTPUT_RESERVE_TOKENS=reserve
+        )
+
+    [message] = _errors_for(exc_info.value, "OLLAMA_OUTPUT_RESERVE_TOKENS")
+    assert "OLLAMA_OUTPUT_RESERVE_TOKENS" in message
+    assert "OLLAMA_NUM_CTX" in message
+
+
+@pytest.mark.parametrize(("num_ctx", "reserve"), [(8192, 8191), (2049, 2048), (2, 1)])
+def test_output_reserve_just_below_the_context_window_is_accepted(
+    num_ctx: int, reserve: int
+) -> None:
+    s = build_settings(
+        DATABASE_URL=DB_URL, OLLAMA_NUM_CTX=num_ctx, OLLAMA_OUTPUT_RESERVE_TOKENS=reserve
+    )
+
+    assert (s.OLLAMA_NUM_CTX, s.OLLAMA_OUTPUT_RESERVE_TOKENS) == (num_ctx, reserve)
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_output_reserve_must_be_positive(value: int) -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        build_settings(DATABASE_URL=DB_URL, OLLAMA_OUTPUT_RESERVE_TOKENS=value)
+
+    assert _errors_for(exc_info.value, "OLLAMA_OUTPUT_RESERVE_TOKENS")
+
+
+def test_output_reserve_is_read_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    monkeypatch.setenv("OLLAMA_OUTPUT_RESERVE_TOKENS", "1000")
+
+    assert get_settings().OLLAMA_OUTPUT_RESERVE_TOKENS == 1000
 
 
 # --- REAP_AFTER_SEC vs HEARTBEAT_SEC -------------------------------------------

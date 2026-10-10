@@ -129,6 +129,7 @@ def make(
     *replies: HttpResponse | BaseException,
     host: str = HOST,
     num_ctx: int = NUM_CTX,
+    output_reserve_tokens: int = 2048,
     timeout_sec: float = 900,
 ) -> tuple[OllamaSummarizer, FakeTransport]:
     transport = FakeTransport(*replies)
@@ -136,6 +137,7 @@ def make(
         host=host,
         model=MODEL,
         num_ctx=num_ctx,
+        output_reserve_tokens=output_reserve_tokens,
         timeout_sec=timeout_sec,
         prompts=prompts,
         transport=transport,

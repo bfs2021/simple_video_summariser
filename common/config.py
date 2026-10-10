@@ -82,6 +82,9 @@ class Settings(BaseSettings):
     OLLAMA_MODEL: str = "qwen3.5:4b"
     OLLAMA_HOST: str = "http://host.docker.internal:11434"
     OLLAMA_NUM_CTX: PositiveInt = 8192
+    # Tokens of OLLAMA_NUM_CTX kept free for the reply (#85); the prompt may
+    # use OLLAMA_NUM_CTX - OLLAMA_OUTPUT_RESERVE_TOKENS.
+    OLLAMA_OUTPUT_RESERVE_TOKENS: PositiveInt = 2048
     # CPU inference on a 4B model is slow (architecture.md 16.7).
     OLLAMA_TIMEOUT_SEC: PositiveInt = 900
     ANTHROPIC_API_KEY: SecretStr | None = None
@@ -175,6 +178,17 @@ class Settings(BaseSettings):
     # field error (an "after" model validator is skipped when a field fails).
     # CHUNK_SEC and HEARTBEAT_SEC are declared first, so ``info.data`` has
     # them unless they were themselves invalid, which is reported separately.
+    @field_validator("OLLAMA_OUTPUT_RESERVE_TOKENS")
+    @classmethod
+    def _reserve_below_context_window(cls, value: int, info: ValidationInfo) -> int:
+        ctx = info.data.get("OLLAMA_NUM_CTX")
+        if ctx is not None and value >= ctx:
+            raise ValueError(
+                f"OLLAMA_OUTPUT_RESERVE_TOKENS ({value}) must be less than "
+                f"OLLAMA_NUM_CTX ({ctx})"
+            )
+        return value
+
     @field_validator("OVERLAP_SEC")
     @classmethod
     def _overlap_shorter_than_chunk(cls, value: int, info: ValidationInfo) -> int:
