@@ -539,6 +539,17 @@ CREATE INDEX jobs_dead_idx ON jobs (created_at DESC) WHERE state = 'dead';
 5. else: enqueue transcribe (same priority as this job)
 ```
 
+**Premieres and live streams (#65).** After step 1, `live_status` of
+`is_upcoming`, `is_live` or `post_live` (or yt-dlp's "Premieres in ..." error)
+makes ingest raise `Defer` instead of continuing: the job returns to `pending`
+with a future `run_after`, its attempt refunded, nothing written. A premiere
+runs again 10 minutes after its scheduled start (1 hour if the start is unknown
+or already past and the video is still upcoming); `is_live` rechecks in 2 hours
+(a stream's end is not knowable), `post_live` in 30 minutes. `was_live` is an
+ordinary video. When `UPCOMING_MAX_WAIT_DAYS` have passed since
+`videos.discovered_at` the job dead-letters as `PERMANENT_SOURCE` with the
+reason in `last_error`; `videos.unavailable` is left alone.
+
 **Auto-caption policy.** D2 ranks `youtube_auto` *below* Whisper. Concretely
 `ingest` does not take auto-captions when Whisper is available; it enqueues
 `transcribe`. Auto-captions are used only when `AUTO_CAPTION_FALLBACK=1` and
@@ -841,6 +852,7 @@ than reading `os.environ` directly.
 | `AUTO_CAPTION_FALLBACK` | `1` | transcriber |
 | `AUDIO_KEEP` / `AUDIO_TTL_DAYS` / `AUDIO_MAX_GB` | `1` / `30` / `20` | transcriber, planner |
 | `POLL_INTERVAL_SEC` | `3600` | planner |
+| `UPCOMING_MAX_WAIT_DAYS` | `14` | transcriber: ingest reschedules a premiere or live stream until it is available, and dead-letters it this many days after discovery (#65) |
 | `HEARTBEAT_SEC` / `REAP_AFTER_SEC` | `60` / `300` | workers, planner |
 | `MAX_ATTEMPTS_TRANSCRIBE` | `2` | transcriber |
 | `INGEST_MAX_RUNTIME_SEC` / `ANALYZE_MAX_RUNTIME_SEC` / `TRANSCRIBE_MAX_RTF` | `600` / `3600` / `3.0` | workers (§11.5) |

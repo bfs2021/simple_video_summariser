@@ -31,6 +31,9 @@ class VideoMeta:
     live_status: str | None
     manual_subtitle_langs: tuple[str, ...]
     auto_caption_langs: tuple[str, ...]
+    #: The scheduled start of a premiere or live stream (yt-dlp's
+    #: ``release_timestamp``), aware UTC; ``None`` when unknown (#65).
+    release_at: datetime | None = None
 
 
 class MetadataSource(Protocol):

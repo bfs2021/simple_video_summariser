@@ -91,6 +91,7 @@ def _parse(info: Any, video_id: str) -> VideoMeta:
         live_status=_optional_str(info, "live_status"),
         manual_subtitle_langs=_langs(info.get("subtitles")),
         auto_caption_langs=_langs(info.get("automatic_captions")),
+        release_at=_from_timestamp(info.get("release_timestamp")),
     )
 
 
@@ -117,14 +118,21 @@ def _duration(value: Any) -> int | None:
     return None if number is None else int(number)
 
 
+def _from_timestamp(raw: Any) -> datetime | None:
+    value = _number(raw)
+    if value is None:
+        return None
+    try:
+        return datetime.fromtimestamp(value, UTC)
+    except OverflowError, OSError, ValueError:
+        return None
+
+
 def _published_at(info: dict[str, Any]) -> datetime | None:
     for key in ("timestamp", "release_timestamp"):
-        value = _number(info.get(key))
-        if value is not None:
-            try:
-                return datetime.fromtimestamp(value, UTC)
-            except OverflowError, OSError, ValueError:
-                continue
+        parsed = _from_timestamp(info.get(key))
+        if parsed is not None:
+            return parsed
     upload_date = info.get("upload_date")
     if isinstance(upload_date, str):
         try:

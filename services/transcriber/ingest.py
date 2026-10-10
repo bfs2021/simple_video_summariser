@@ -9,19 +9,31 @@ between jobs and writes no SQL: the database is reached through
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any, Protocol
 
 import psycopg
 
+from adapters.youtube.errors import UpcomingVideoError
 from adapters.youtube.subtitles import SubtitleAvailability, speaker_source
 from common.config import Settings
-from common.errors import PermanentSourceError, ToolFailureError
+from common.errors import (
+    Defer,
+    PermanentSourceError,
+    ToolFailureError,
+    UnavailableReason,
+)
 from common.models import MetadataSource, Segment, VideoMeta
 from common.queue import Job, JobQueue
 from common.repo.jobs import latest_job_state
 from common.repo.transcripts import get_best_transcript
-from common.repo.videos import clear_unavailable, record_unavailable, upsert_video
+from common.repo.videos import (
+    clear_unavailable,
+    get_discovered_at,
+    record_unavailable,
+    upsert_video,
+)
 from common.worker import JobContext
 from common.youtube_refs import VIDEO_ID_PATTERN
 from services.transcriber.persist import enqueue_analyze, save_transcript_with_chunks
@@ -29,6 +41,31 @@ from services.transcriber.persist import enqueue_analyze, save_transcript_with_c
 _VIDEO_ID = VIDEO_ID_PATTERN
 _ORIGINS = frozenset({"adhoc", "rss", "backfill"})
 _STRONG_SOURCES = frozenset({"youtube_manual", "whisper"})
+
+
+#: Rescheduling of premieres and live streams (#65). A premiere often starts a
+#: few minutes late, so the first look is a margin after the scheduled start.
+PREMIERE_MARGIN = timedelta(minutes=10)
+#: Start unknown, or past but the video still reports upcoming.
+UNKNOWN_START_RECHECK = timedelta(hours=1)
+#: The end of a running stream cannot be known; look again after a typical length.
+LIVE_RECHECK = timedelta(hours=2)
+#: Ended, but YouTube is still processing the recording.
+POST_LIVE_RECHECK = timedelta(minutes=30)
+_NOT_YET = {"is_upcoming", "is_live", "post_live"}
+
+
+def _not_yet_until(meta_status: str, release_at: datetime | None, now: datetime) -> datetime:
+    """When to look at a video that is not available yet again."""
+    if meta_status == "is_live":
+        return now + LIVE_RECHECK
+    if meta_status == "post_live":
+        return now + POST_LIVE_RECHECK
+    if release_at is not None and release_at > now:
+        return release_at + PREMIERE_MARGIN
+    if release_at is not None:
+        return now + PREMIERE_MARGIN  # scheduled start passed: it is just late
+    return now + UNKNOWN_START_RECHECK
 
 
 class SubtitleSource(Protocol):
@@ -84,7 +121,30 @@ def make_ingest_handler(
     metadata: MetadataSource,
     subtitles: SubtitleSource,
     settings: Settings,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> Callable[[Job, JobContext], None]:
+    def not_yet_available(
+        job: Job, ctx: JobContext, status: str, until_of: Callable[[datetime], datetime]
+    ) -> None:
+        """Defer, or dead-letter once the video has waited too long (#65)."""
+        current = now()
+        discovered = get_discovered_at(conn, job.video_id)
+        conn.commit()
+        if discovered is None:
+            discovered = job.created_at
+        limit = timedelta(days=settings.UPCOMING_MAX_WAIT_DAYS)
+        if current - discovered >= limit:
+            raise PermanentSourceError(
+                UnavailableReason.REMOVED,
+                f"video {job.video_id} is still {status} {settings.UPCOMING_MAX_WAIT_DAYS} days "
+                f"after it was discovered ({discovered.isoformat()}); giving up",
+            )
+        until = until_of(current)
+        ctx.logger.info(
+            "video not available yet, rescheduling", live_status=status, until=until.isoformat()
+        )
+        raise Defer(until)
+
     def handler(job: Job, ctx: JobContext) -> None:
         origin = _validate(job)
         video_id = job.video_id
@@ -98,11 +158,22 @@ def make_ingest_handler(
         except PermanentSourceError as exc:
             permanent(exc)
             raise
+        except UpcomingVideoError:
+            # yt-dlp reported the premiere but could not dump it: start unknown.
+            not_yet_available(
+                job, ctx, "is_upcoming", lambda current: _not_yet_until("is_upcoming", None, current)
+            )
         if meta.video_id != video_id:
             raise ToolFailureError(
                 f"metadata is for {meta.video_id!r}, but the job is for {video_id!r}"
             )
         ctx.check_cancelled()
+
+        if meta.live_status in _NOT_YET:
+            status = meta.live_status
+            not_yet_available(
+                job, ctx, status, lambda current: _not_yet_until(status, meta.release_at, current)
+            )
 
         upsert_video(conn, meta, origin)
         clear_unavailable(conn, video_id)

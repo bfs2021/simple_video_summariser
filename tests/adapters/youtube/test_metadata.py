@@ -201,6 +201,28 @@ def test_upcoming_premiere() -> None:
     assert meta.auto_caption_langs == ()
 
 
+def test_release_at_is_the_scheduled_start_not_the_upload_time() -> None:
+    meta = fetch_json(fixture_text("upcoming_premiere"))
+
+    assert meta.release_at == datetime.fromtimestamp(1790585940, UTC)
+    assert meta.release_at != meta.published_at
+
+
+@pytest.mark.parametrize("value", [None, True, "soon", 1e30, -1e30])
+def test_release_at_is_none_when_release_timestamp_is_unusable(value: object) -> None:
+    raw = fixture_dict("upcoming_premiere")
+    raw["release_timestamp"] = value
+
+    assert fetch_json(raw).release_at is None
+
+
+def test_release_at_is_none_when_release_timestamp_is_absent() -> None:
+    raw = fixture_dict("upcoming_premiere")
+    del raw["release_timestamp"]
+
+    assert fetch_json(raw).release_at is None
+
+
 def test_non_english_video_with_translated_english_auto_captions() -> None:
     raw = fixture_dict("non_english_translated_en")
     # The recording shows `en` is a machine translation of the Ukrainian track.

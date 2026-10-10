@@ -28,7 +28,8 @@ _MESSAGE_CHARS = 1000
 class UpcomingVideoError(TransientNetworkError):
     """A scheduled live event or premiere that has not started yet.
 
-    Retried as TRANSIENT_NETWORK until #65 reschedules it to its start time.
+    A TRANSIENT_NETWORK for callers that do not know better; the ingest
+    handler turns it into a ``Defer`` (#65) so it costs no attempt.
     """
 
 

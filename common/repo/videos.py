@@ -90,6 +90,14 @@ def mark_unavailable(conn: psycopg.Connection[Any], video_id: str, reason: str) 
     )
 
 
+def get_discovered_at(conn: psycopg.Connection[Any], video_id: str) -> datetime | None:
+    """When ``video_id`` was first discovered, or ``None`` if it has no row (#65)."""
+    row = conn.execute(
+        "SELECT discovered_at FROM videos WHERE video_id = %s", (video_id,)
+    ).fetchone()
+    return row[0] if row is not None else None
+
+
 def clear_unavailable(conn: psycopg.Connection[Any], video_id: str) -> None:
     """Reset ``videos.unavailable`` to NULL, e.g. a private video went public.
 
