@@ -97,6 +97,8 @@ def test_backend_services_share_the_backend_image_and_only_migrate_builds_it() -
     assert "dockerfile: ops/Dockerfile.backend" in _block("migrate")
     for name in ("api", "planner", "analyzer"):
         assert "build" not in _block(name)
+        # A local-only tag: Compose must never try to pull it from a registry.
+        assert "pull_policy: never" in _block(name)
     assert "ops/Dockerfile.backend" not in COMPOSE_YML.read_text().replace(
         "dockerfile: ops/Dockerfile.backend", "", 1
     )
@@ -117,7 +119,11 @@ def test_whisper_build_takes_the_backend_image_from_the_migrate_build() -> None:
     # migrate first, so the base is never stale or missing.
     block = _block("transcriber")
     assert "additional_contexts:" in block
-    assert '"ytdigest-backend:latest": "service:migrate"' in block
+    # The key is the image name without its tag: the tagged key is ignored
+    # by Compose 2.40 / BuildKit 0.26 (found on the first real build, #58).
+    assert 'ytdigest-backend: "service:migrate"' in block
+    code = [ln for ln in block.splitlines() if not ln.lstrip().startswith("#")]
+    assert not any("ytdigest-backend:latest" in ln for ln in code)
     assert (
         "FROM ytdigest-backend:latest"
         in (REPO_ROOT / "ops" / "Dockerfile.whisper").read_text()
