@@ -1,7 +1,7 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import type { components } from '../api'
-import { apiUrl } from '../api/base'
-import { buildSearchRequest, isSearchPage } from '../lib/search'
+import { api, rethrowHttp } from '../api'
+import { isSearchPage, searchQuery } from '../lib/search'
 
 export type SearchPage = components['schemas']['SearchPage']
 
@@ -16,9 +16,9 @@ export class SearchError extends Error {
 }
 
 async function fetchSearch(q: string, page: number, signal: AbortSignal): Promise<SearchPage> {
-  const res = await fetch(apiUrl(`search?${buildSearchRequest(q, page).toString()}`), { signal })
-  if (!res.ok) throw new SearchError(res.status)
-  const body: unknown = await res.json()
+  const body: unknown = await api
+    .get('/search', { params: { query: searchQuery(q, page) }, signal })
+    .catch((error: unknown) => rethrowHttp(error, (_e, status) => new SearchError(status)))
   if (!isSearchPage(body)) throw new Error('Unexpected response shape')
   return body
 }

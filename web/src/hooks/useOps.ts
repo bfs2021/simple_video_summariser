@@ -1,7 +1,8 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { api, rethrowHttp } from '../api'
 import { apiUrl } from '../api/base'
 import {
-  buildJobsRequest,
+  jobsQuery,
   isHealth,
   isJobList,
   retryMessage,
@@ -27,18 +28,14 @@ export class OpsError extends Error {
   }
 }
 
-async function getJson(path: string, signal: AbortSignal): Promise<unknown> {
-  const res = await fetch(apiUrl(path), { signal })
-  if (!res.ok) throw new OpsError(res.status)
-  return res.json()
-}
-
 /** Queue depth by kind and state (GET /api/healthz), refetched every 15 s while mounted. */
 export function useQueueDepth() {
   return useQuery({
     queryKey: ['ops', 'queue-depth'],
     queryFn: async ({ signal }): Promise<HealthOut> => {
-      const body = await getJson('healthz', signal)
+      const body: unknown = await api
+        .get('/healthz', { signal })
+        .catch((error: unknown) => rethrowHttp(error, (_e, status) => new OpsError(status)))
       if (!isHealth(body)) throw new Error('Unexpected response shape')
       return body
     },
@@ -51,7 +48,9 @@ export function useOpsJobs(filters: OpsFilters, before: number | null) {
   return useQuery({
     queryKey: ['ops', 'jobs', filters.state, filters.kind, filters.errorClass, before],
     queryFn: async ({ signal }): Promise<JobListOut> => {
-      const body = await getJson(`ops/jobs?${buildJobsRequest(filters, before).toString()}`, signal)
+      const body: unknown = await api
+        .get('/ops/jobs', { params: { query: jobsQuery(filters, before) }, signal })
+        .catch((error: unknown) => rethrowHttp(error, (_e, status) => new OpsError(status)))
       if (!isJobList(body)) throw new Error('Unexpected response shape')
       return body
     },

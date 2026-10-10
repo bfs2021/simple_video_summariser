@@ -1,7 +1,7 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import type { components } from '../api'
-import { apiUrl } from '../api/base'
-import { buildVideosQuery, type LibraryState } from '../lib/library'
+import { api, rethrowHttp } from '../api'
+import { videosQuery, type LibraryState } from '../lib/library'
 
 export type VideoList = components['schemas']['VideoList']
 
@@ -24,10 +24,10 @@ function isVideoList(v: unknown): v is VideoList {
   return Array.isArray(o.items) && typeof o.total === 'number'
 }
 
-async function fetchVideos(query: URLSearchParams, signal: AbortSignal): Promise<VideoList> {
-  const res = await fetch(apiUrl(`videos?${query.toString()}`), { signal })
-  if (!res.ok) throw new ApiError(res.status)
-  const body: unknown = await res.json()
+async function fetchVideos(query: ReturnType<typeof videosQuery>, signal: AbortSignal): Promise<VideoList> {
+  const body: unknown = await api
+    .get('/videos', { params: { query }, signal })
+    .catch((error: unknown) => rethrowHttp(error, (_e, status) => new ApiError(status)))
   if (!isVideoList(body)) throw new Error('Unexpected response shape')
   return body
 }
@@ -38,9 +38,9 @@ async function fetchVideos(query: URLSearchParams, signal: AbortSignal): Promise
  * date range) nothing is requested and the previous results stay in place.
  */
 export function useVideos(state: LibraryState, enabled: boolean) {
-  const query = buildVideosQuery(state)
+  const query = videosQuery(state)
   return useQuery({
-    queryKey: ['videos', Object.fromEntries(query)],
+    queryKey: ['videos', query],
     queryFn: ({ signal }) => fetchVideos(query, signal),
     enabled,
     placeholderData: keepPreviousData,

@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import type { components } from '../api'
-import { apiUrl } from '../api/base'
+import { api, rethrowHttp } from '../api'
 
 export type AnalysisRun = components['schemas']['AnalysisOut']
 type AnalysisList = components['schemas']['AnalysisList']
@@ -66,10 +66,12 @@ function isList(v: unknown): v is AnalysisList {
 }
 
 async function fetchPage(videoId: string, offset: number, limit: number, signal: AbortSignal): Promise<AnalysisList> {
-  const query = new URLSearchParams({ limit: String(limit), offset: String(offset) })
-  const res = await fetch(apiUrl(`videos/${videoId}/analyses?${query.toString()}`), { signal })
-  if (!res.ok) throw new AnalysesApiError(res.status)
-  const body: unknown = await res.json()
+  const body: unknown = await api
+    .get('/videos/{video_id}/analyses', {
+      params: { path: { video_id: videoId }, query: { limit, offset } },
+      signal,
+    })
+    .catch((error: unknown) => rethrowHttp(error, (_e, status) => new AnalysesApiError(status)))
   if (!isList(body)) throw new Error('Unexpected response shape')
   return body
 }

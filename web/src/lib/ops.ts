@@ -111,14 +111,19 @@ export function opsSearch(f: OpsFilters, before: number | null): string {
   return p.toString()
 }
 
-/** The GET /ops/jobs query. `state` is always sent: the API's default is every state. */
+/** The GET /ops/jobs query, typed from the schema. `state` is always sent: the API's default is every state. */
+export function jobsQuery(f: OpsFilters, before: number | null): Query {
+  const q: Query = { state: f.state }
+  if (f.kind !== null) q.kind = f.kind
+  if (f.errorClass !== null) q.error_class = f.errorClass
+  if (before !== null) q.before_id = before
+  q.limit = OPS_PAGE_SIZE
+  return q
+}
+
+/** The same query as a query string. The request helper takes `jobsQuery` directly. */
 export function buildJobsRequest(f: OpsFilters, before: number | null): URLSearchParams {
-  const p = new URLSearchParams({ state: f.state })
-  if (f.kind !== null) p.set('kind', f.kind)
-  if (f.errorClass !== null) p.set('error_class', f.errorClass)
-  if (before !== null) p.set('before_id', String(before))
-  p.set('limit', String(OPS_PAGE_SIZE))
-  return p
+  return new URLSearchParams(Object.entries(jobsQuery(f, before)).map(([k, v]) => [k, String(v)]))
 }
 
 // ---- display --------------------------------------------------------------

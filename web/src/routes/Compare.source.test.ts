@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 // Mechanical guards for #53 over the files it adds: nothing stored or taken
-// from the URL may become markup, and every request goes through apiUrl().
+// from the URL may become markup, and every request goes through the typed request helper (#118).
 const files = [
   'routes/Compare.tsx',
   'hooks/useAnalyses.ts',
@@ -19,12 +19,10 @@ describe('Compare source scan', () => {
     expect(text).not.toMatch(/dangerouslySetInnerHTML|innerHTML|insertAdjacentHTML|outerHTML/)
   })
 
-  it('every fetch URL is built by apiUrl()', () => {
+  it('every request goes through the typed helper, which builds the URL with apiUrl()', () => {
     const hook = files.find((f) => f.rel === 'hooks/useAnalyses.ts')?.text ?? ''
-    expect(hook).toMatch(/apiUrl\(/)
-    for (const m of hook.matchAll(/fetch\(\s*([^,)]+)/g)) {
-      expect(m[1]).toMatch(/apiUrl\(|^url$/)
-    }
+    expect(hook).toMatch(/api\s*\.get\(/)
+    expect(hook).not.toMatch(/\bfetch\(/)
     expect(hook).not.toMatch(/['"`]\/api\//)
   })
 

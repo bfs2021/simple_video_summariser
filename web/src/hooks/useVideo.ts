@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import type { components } from '../api'
-import { apiUrl } from '../api/base'
+import { api, rethrowHttp } from '../api'
 
 export type VideoDetailData = components['schemas']['VideoDetail']
 
@@ -35,9 +35,9 @@ function isVideoDetail(v: unknown): v is VideoDetailData {
 }
 
 async function fetchVideo(videoId: string, signal: AbortSignal): Promise<VideoDetailData> {
-  const res = await fetch(apiUrl(`videos/${videoId}`), { signal })
-  if (!res.ok) throw new VideoApiError(res.status)
-  const body: unknown = await res.json()
+  const body: unknown = await api
+    .get('/videos/{video_id}', { params: { path: { video_id: videoId } }, signal })
+    .catch((error: unknown) => rethrowHttp(error, (_e, status) => new VideoApiError(status)))
   if (!isVideoDetail(body)) throw new Error('Unexpected response shape')
   return body
 }

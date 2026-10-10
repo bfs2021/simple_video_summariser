@@ -2,7 +2,7 @@
 // parsing (the URL is untrusted input), the GET /search query, paging maths and
 // the excerpt render model. No React. The server (#43) stays authoritative;
 // these checks only avoid sending requests that are certain to be rejected.
-import type { components } from '../api'
+import type { components, operations } from '../api'
 
 type SearchPage = components['schemas']['SearchPage']
 type Span = components['schemas']['SpanOut']
@@ -92,13 +92,14 @@ export function searchHref(q: string, page: number): string {
   return p.toString()
 }
 
-/** The GET /search query. `q` goes through URLSearchParams only. */
+/** The GET /search query, typed from the schema. `q` is encoded by the request helper only. */
+export function searchQuery(q: string, page: number): NonNullable<operations['get_search_search_get']['parameters']['query']> {
+  return { q, limit: SEARCH_PAGE_SIZE, offset: offsetForPage(page) }
+}
+
+/** The same query as a query string. The request helper takes `searchQuery` directly. */
 export function buildSearchRequest(q: string, page: number): URLSearchParams {
-  return new URLSearchParams({
-    q,
-    limit: String(SEARCH_PAGE_SIZE),
-    offset: String(offsetForPage(page)),
-  })
+  return new URLSearchParams(Object.entries(searchQuery(q, page)).map(([k, v]) => [k, String(v)]))
 }
 
 // ---- response -------------------------------------------------------------

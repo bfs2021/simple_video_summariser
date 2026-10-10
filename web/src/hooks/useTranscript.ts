@@ -1,6 +1,6 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import type { components } from "../api";
-import { apiUrl } from "../api/base";
+import { api, rethrowHttp, type ApiError } from "../api";
 import { PAGE_SIZE } from "../lib/transcript";
 
 export type TranscriptPage = components["schemas"]["TranscriptOut"];
@@ -49,22 +49,12 @@ function isTranscriptPage(v: unknown): v is TranscriptPage {
 }
 
 /** Any 404 that is not exactly "transcript not found" counts as a missing video. */
-async function notFoundKind(res: Response): Promise<NotFoundKind> {
-  try {
-    const body: unknown = await res.json();
-    if (isRecord(body) && body.detail === "transcript not found")
-      return "transcript";
-  } catch {
-    // An unreadable body is treated like any other 404.
-  }
-  return "video";
+function notFoundKind(error: ApiError): NotFoundKind {
+  return error.detail === "transcript not found" ? "transcript" : "video";
 }
 
-export function buildTranscriptQuery(page: number): URLSearchParams {
-  return new URLSearchParams({
-    offset: String((page - 1) * PAGE_SIZE),
-    limit: String(PAGE_SIZE),
-  });
+export function transcriptQuery(page: number) {
+  return { offset: (page - 1) * PAGE_SIZE, limit: PAGE_SIZE };
 }
 
 async function fetchTranscript(
@@ -72,18 +62,18 @@ async function fetchTranscript(
   page: number,
   signal: AbortSignal,
 ): Promise<TranscriptPage> {
-  const res = await fetch(
-    apiUrl(
-      `videos/${videoId}/transcript?${buildTranscriptQuery(page).toString()}`,
-    ),
-    {
+  const body: unknown = await api
+    .get("/videos/{video_id}/transcript", {
+      params: { path: { video_id: videoId }, query: transcriptQuery(page) },
       signal,
-    },
-  );
-  if (res.status === 404)
-    throw new TranscriptApiError(404, await notFoundKind(res));
-  if (!res.ok) throw new TranscriptApiError(res.status);
-  const body: unknown = await res.json();
+    })
+    .catch((error: unknown) =>
+      rethrowHttp(error, (e, status) =>
+        status === 404
+          ? new TranscriptApiError(404, notFoundKind(e))
+          : new TranscriptApiError(status),
+      ),
+    );
   if (!isTranscriptPage(body)) throw new Error("Unexpected response shape");
   return body;
 }

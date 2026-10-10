@@ -1,6 +1,6 @@
 // Pure helpers for the Library view (#49): the status label, URL-parameter
 // parsing (the URL is untrusted input) and the GET /videos query. No React.
-import type { components } from '../api'
+import type { components, operations } from '../api'
 
 type VideoItem = components['schemas']['VideoItem']
 export type VideoStatus = VideoItem['status']
@@ -183,18 +183,25 @@ export function isReversedRange(state: LibraryState): boolean {
   return state.from !== null && state.to !== null && state.from > state.to
 }
 
-/** The `GET /videos` query for a state. Unset parameters are omitted. */
-export function buildVideosQuery(state: LibraryState): URLSearchParams {
-  const p = new URLSearchParams()
-  if (state.channel !== null) p.set('channel', state.channel)
-  if (state.status !== null) p.set('status', state.status)
-  if (state.from !== null) p.set('published_after', state.from)
+/** The `GET /videos` query for a state, typed from the schema. Unset parameters are omitted. */
+export function videosQuery(
+  state: LibraryState,
+): NonNullable<operations['get_videos_videos_get']['parameters']['query']> {
+  const q: NonNullable<operations['get_videos_videos_get']['parameters']['query']> = {}
+  if (state.channel !== null) q.channel = state.channel
+  if (state.status !== null) q.status = state.status
+  if (state.from !== null) q.published_after = state.from
   if (state.to !== null) {
     // The UI's "To" is inclusive; #42's published_before is exclusive.
     const before = addOneDay(state.to)
-    if (before !== null) p.set('published_before', before)
+    if (before !== null) q.published_before = before
   }
-  p.set('limit', String(PAGE_SIZE))
-  p.set('offset', String((state.page - 1) * PAGE_SIZE))
-  return p
+  q.limit = PAGE_SIZE
+  q.offset = (state.page - 1) * PAGE_SIZE
+  return q
+}
+
+/** The same query as a query string. The request helper takes `videosQuery` directly. */
+export function buildVideosQuery(state: LibraryState): URLSearchParams {
+  return new URLSearchParams(Object.entries(videosQuery(state)).map(([k, v]) => [k, String(v)]))
 }
