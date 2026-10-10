@@ -53,9 +53,11 @@ class YouTubeSubtitles:
         *,
         timeout: float = DEFAULT_TIMEOUT_SEC,
         runner: ProcessRunner = run_process,
+        cookie_file: Path | None = None,
     ) -> None:
         self._timeout = timeout
         self._runner = runner
+        self._cookie_file = cookie_file
 
     def available(self, meta: VideoMeta) -> SubtitleAvailability:
         """Which English manual/auto track is preferred, from ``meta`` alone.
@@ -94,7 +96,12 @@ class YouTubeSubtitles:
                 str(tmpdir),
                 url,
             ]
-            run_ytdlp(args, timeout=self._timeout, runner=self._runner)
+            run_ytdlp(
+                args,
+                timeout=self._timeout,
+                runner=self._runner,
+                cookie_file=self._cookie_file,
+            )
             matches = sorted(tmpdir.glob(f"*.{lang}.vtt"))
             if not matches:
                 raise ToolFailureError(

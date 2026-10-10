@@ -35,6 +35,7 @@ from adapters.transcription.faster_whisper import FasterWhisperTranscriber
 from adapters.youtube.audio import YouTubeAudio
 from adapters.youtube.metadata import YouTubeMetadata
 from adapters.youtube.subtitles import YouTubeSubtitles
+from adapters.youtube.ytdlp import CookieFileError, check_cookie_file
 from common.chunking import chunk_segments, chunk_strategy
 from common.config import Settings, get_settings
 from common.db import connect
@@ -122,13 +123,17 @@ class PipelineError(Exception):
 
 
 def default_deps(settings: Settings) -> Deps:
-    """The real adapters. Nothing here loads a model or starts a process."""
+    """The real adapters. Nothing here loads a model or starts a process.
+
+    Raises ``CookieFileError`` if ``YTDLP_COOKIE_FILE`` is set but unusable.
+    """
+    check_cookie_file(settings.YTDLP_COOKIE_FILE)
     return Deps(
         settings=settings,
         connect=connect,
-        metadata=YouTubeMetadata(),
-        subtitles=YouTubeSubtitles(),
-        audio=YouTubeAudio(),
+        metadata=YouTubeMetadata(cookie_file=settings.YTDLP_COOKIE_FILE),
+        subtitles=YouTubeSubtitles(cookie_file=settings.YTDLP_COOKIE_FILE),
+        audio=YouTubeAudio(cookie_file=settings.YTDLP_COOKIE_FILE),
         transcriber=FasterWhisperTranscriber(),
         summarizer=build_summarizer(settings),
     )
@@ -408,7 +413,7 @@ def _run(video_id: str, deps: Deps | None, *, verbose: bool) -> int:
         configure_logging(settings, stream=sys.stderr)
         try:
             deps = default_deps(settings)
-        except SummarizerConfigError as exc:
+        except (SummarizerConfigError, CookieFileError) as exc:
             _say(f"invalid configuration: {_one_line(str(exc))}")
             return _EXIT_FAILED
         except Exception as exc:  # noqa: BLE001 - anything else that cannot be built

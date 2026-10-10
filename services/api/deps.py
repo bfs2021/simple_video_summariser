@@ -21,6 +21,7 @@ from typing import Annotated, Any
 import psycopg
 from fastapi import Depends
 
+from common.config import get_settings
 from common.db import connect
 from common.models import CatalogSource
 
@@ -95,4 +96,7 @@ def get_catalog() -> CatalogSource:
     """
     from adapters.youtube.catalog import YouTubeCatalog
 
-    return YouTubeCatalog(timeout=BACKFILL_LIST_TIMEOUT_SEC)
+    return YouTubeCatalog(
+        timeout=BACKFILL_LIST_TIMEOUT_SEC,
+        cookie_file=get_settings().YTDLP_COOKIE_FILE,
+    )

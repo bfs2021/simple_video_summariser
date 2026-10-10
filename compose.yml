@@ -163,9 +163,19 @@ services:
       MAX_ATTEMPTS_TRANSCRIBE: ${MAX_ATTEMPTS_TRANSCRIBE:-2}
       AUDIO_KEEP: ${AUDIO_KEEP:-1}
       AUDIO_MAX_GB: ${AUDIO_MAX_GB:-20}
+      # YTDLP_COOKIE_FILE: /run/secrets/ytdlp-cookies.txt   # optional, see volumes
     volumes:
       - audio:/data/audio
       - whisper-models:/models
+      # Optional yt-dlp cookie file (issue #63), for bot-check and age-gate
+      # challenges. A cookie file is a credential: keep it outside the repo,
+      # mount it read-only, and uncomment BOTH this line and
+      # `YTDLP_COOKIE_FILE` under `environment` above:
+      #   - /absolute/path/on/the/host/cookies.txt:/run/secrets/ytdlp-cookies.txt:ro
+      # With the variable set to a missing or unreadable file the transcriber
+      # refuses to start, naming the variable. yt-dlp is given a private copy
+      # per call, so the read-only mount is safe. Obtaining and refreshing
+      # the file is manual operator work.
     depends_on:
       migrate: {condition: service_completed_successfully}
     healthcheck: *worker-health

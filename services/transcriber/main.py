@@ -55,6 +55,7 @@ from adapters.transcription.faster_whisper import FasterWhisperTranscriber
 from adapters.youtube.audio import YouTubeAudio
 from adapters.youtube.metadata import YouTubeMetadata
 from adapters.youtube.subtitles import YouTubeSubtitles
+from adapters.youtube.ytdlp import CookieFileError, check_cookie_file
 from common.chunking import chunk_segments
 from common.config import Settings, get_settings
 from common.db import connect as default_connect
@@ -254,9 +255,12 @@ def build_handlers(
 ) -> dict[str, Handler]:
     """The kind -> handler map. Every job opens, uses and closes its own connection."""
     open_connection = connect if connect is not None else default_connect
-    audio = audio_source if audio_source is not None else YouTubeAudio()
-    meta_source = metadata if metadata is not None else YouTubeMetadata()
-    subtitle_source = subtitles if subtitles is not None else YouTubeSubtitles()
+    cookie_file = settings.YTDLP_COOKIE_FILE
+    audio = audio_source if audio_source is not None else YouTubeAudio(cookie_file=cookie_file)
+    meta_source = metadata if metadata is not None else YouTubeMetadata(cookie_file=cookie_file)
+    subtitle_source = (
+        subtitles if subtitles is not None else YouTubeSubtitles(cookie_file=cookie_file)
+    )
     split = chunker if chunker is not None else chunk_segments
 
     def ingest(job: Job, ctx: JobContext) -> None:
@@ -373,6 +377,13 @@ def main(
         print(_invalid_settings_line(exc), file=sys.stderr)
         return _EXIT_BAD_CONFIG
     configure_logging(settings)
+
+    try:
+        check_cookie_file(settings.YTDLP_COOKIE_FILE)
+    except CookieFileError as exc:
+        # Once, at startup: a bad path must not turn into a failure per job.
+        print(f"transcriber: {exc}", file=sys.stderr)
+        return _EXIT_BAD_CONFIG
 
     try:
         prepare_audio_dir(settings.AUDIO_DIR)

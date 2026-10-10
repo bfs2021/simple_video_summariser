@@ -806,3 +806,15 @@ def test_env_example_sets_no_compose_selection_variables() -> None:
             "COMPOSE_PATH_SEPARATOR",
         }
         assert not name.startswith("COMPOSE_")
+
+
+def test_transcriber_documents_an_optional_read_only_cookie_mount() -> None:
+    # Issue #63: documented, but off by default.
+    block = _block("transcriber")
+    assert "YTDLP_COOKIE_FILE: /run/secrets/ytdlp-cookies.txt" in block
+    assert "/run/secrets/ytdlp-cookies.txt:ro" in block
+    active = [line for line in block.splitlines() if not line.lstrip().startswith("#")]
+    assert not any("ytdlp-cookies" in line or "YTDLP_COOKIE" in line for line in active)
+    for name in SERVICES:
+        if name != "transcriber":
+            assert "YTDLP_COOKIE_FILE" not in _block(name)

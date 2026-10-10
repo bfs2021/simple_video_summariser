@@ -101,11 +101,13 @@ class YouTubeAudio:
         *,
         download_timeout: float = DEFAULT_DOWNLOAD_TIMEOUT_SEC,
         ytdlp_runner: ProcessRunner = run_process,
+        cookie_file: Path | None = None,
         ffmpeg_runner: ProcessRunner = run_tool,
         ffprobe_runner: ProcessRunner = run_tool,
     ) -> None:
         self._download_timeout = download_timeout
         self._ytdlp_runner = ytdlp_runner
+        self._cookie_file = cookie_file
         self._ffmpeg_runner = ffmpeg_runner
         self._ffprobe_runner = ffprobe_runner
 
@@ -149,7 +151,12 @@ class YouTubeAudio:
 
     def _download(self, url: str, dest: Path) -> None:
         argv = [*_DOWNLOAD_FLAGS, "-o", str(dest), url]
-        run_ytdlp(argv, timeout=self._download_timeout, runner=self._ytdlp_runner)
+        run_ytdlp(
+            argv,
+            timeout=self._download_timeout,
+            runner=self._ytdlp_runner,
+            cookie_file=self._cookie_file,
+        )
 
     def _convert(self, src: Path, dest_tmp: Path) -> float:
         argv = ["ffmpeg", "-y", "-i", str(src), *FFMPEG_AUDIO_FLAGS, str(dest_tmp)]

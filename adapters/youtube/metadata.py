@@ -7,6 +7,7 @@ a ``VideoMeta``. Failures arrive already classified by the shared runner.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from adapters.youtube.errors import UpcomingVideoError, decode_ytdlp_json
@@ -47,9 +48,11 @@ class YouTubeMetadata:
         *,
         timeout: float = DEFAULT_TIMEOUT_SEC,
         runner: ProcessRunner = run_process,
+        cookie_file: Path | None = None,
     ) -> None:
         self._timeout = timeout
         self._runner = runner
+        self._cookie_file = cookie_file
 
     def fetch(self, video_id: str) -> VideoMeta:
         url = watch_url(video_id)
@@ -60,7 +63,12 @@ class YouTubeMetadata:
         return _parse(decode_ytdlp_json(stdout), video_id)
 
     def _run(self, args: list[str]) -> str:
-        return run_ytdlp(args, timeout=self._timeout, runner=self._runner)
+        return run_ytdlp(
+            args,
+            timeout=self._timeout,
+            runner=self._runner,
+            cookie_file=self._cookie_file,
+        )
 
 
 def _parse(info: Any, video_id: str) -> VideoMeta:

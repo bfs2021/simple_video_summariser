@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import math
+from pathlib import Path
 from typing import Any
 
 from adapters.youtube.errors import decode_ytdlp_json
@@ -43,9 +44,11 @@ class YouTubeCatalog:
         *,
         timeout: float = DEFAULT_TIMEOUT_SEC,
         runner: ProcessRunner = run_process,
+        cookie_file: Path | None = None,
     ) -> None:
         self._timeout = timeout
         self._runner = runner
+        self._cookie_file = cookie_file
 
     def list_uploads(self, channel_id: str, *, limit: int) -> ChannelCatalog:
         validate_channel_id(channel_id)
@@ -64,6 +67,7 @@ class YouTubeCatalog:
             [*_FLAGS, "--playlist-end", str(limit), "--no-warnings", url],
             timeout=self._timeout,
             runner=self._runner,
+            cookie_file=self._cookie_file,
         )
         return _parse(decode_ytdlp_json(stdout), channel_id, playlist_id, limit)
 
