@@ -62,6 +62,10 @@ def run_reanalysis_sweep(
             {"prompt_version": prompt_version, "dedupe_key": dedupe_key, "limit": limit},
         )
         candidates = [str(row[0]) for row in cur.fetchall()]
+    # End the read transaction: enqueue() must open its own, not a savepoint inside
+    # this one that the planner's closing connection would roll back (#199; same
+    # reason as services/planner/fallback.py, #92).
+    conn.commit()
 
     enqueued = 0
     for video_id in candidates:

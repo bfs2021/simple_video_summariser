@@ -78,6 +78,7 @@ from typing import Any, Literal
 
 import psycopg
 import structlog
+from psycopg.pq import TransactionStatus
 from pydantic import ValidationError
 
 from adapters.alerts.webhook import WebhookAlerter
@@ -216,18 +217,36 @@ class PostgresRunRecorder:
             raise
 
 
+def run_on_fresh_connection(
+    connect: Connect, work: Callable[[psycopg.Connection[Any]], int | None]
+) -> int | None:
+    """Run one task body on its own connection, then close it.
+
+    Closing does not commit, so anything still in an open transaction is lost.
+    A body must therefore leave the connection idle (its writes committed, via
+    ``conn.commit()`` or an outermost ``conn.transaction()``); one that does not
+    is rolled back and fails loudly instead of silently losing its writes
+    (#199: the re-analysis sweep enqueued inside its own read transaction).
+    """
+    conn = connect()
+    try:
+        result = work(conn)
+        if conn.info.transaction_status != TransactionStatus.IDLE:
+            conn.rollback()
+            raise RuntimeError(
+                "planner task returned with an open transaction; its writes would be "
+                "lost on close - commit before returning"
+            )
+        return result
+    finally:
+        conn.close()
+
+
 def build_registry(settings: Settings, connect: Connect) -> list[Task]:
     """The ordered task registry. Opens no connection; each run opens its own."""
 
     def with_conn(work: Callable[[psycopg.Connection[Any]], int | None]) -> Callable[[], int | None]:
-        def run() -> int | None:
-            conn = connect()
-            try:
-                return work(conn)
-            finally:
-                conn.close()
-
-        return run
+        return lambda: run_on_fresh_connection(connect, work)
 
     def reap(conn: psycopg.Connection[Any]) -> int:
         return reap_stale_jobs(PostgresQueue(conn, settings=settings), settings)

@@ -353,3 +353,49 @@ def test_limit_reached_is_false_when_candidates_run_out(
 
     record = next(r for r in caplog.records if r.name == "services.planner.sweep")
     assert record.__dict__["limit_reached"] is False
+
+
+# --- durability across the connection lifetime (#199) ------------------------------------
+
+
+def test_enqueued_jobs_survive_the_connection_closing(
+    conn: psycopg.Connection[Any], head_dsn: str
+) -> None:
+    # The planner closes the task's connection without committing, so a job that is
+    # only visible on the sweep's own connection is lost. Commit the seed data the
+    # way earlier ticks would have, run the sweep, close, and look from a fresh one.
+    _ready(conn, "a")
+    _ready(conn, "b")
+    conn.commit()
+
+    assert _sweep(conn) == 2
+    conn.close()
+
+    with psycopg.connect(head_dsn) as other:
+        assert other.execute(
+            "SELECT video_id, kind, dedupe_key, priority, state FROM jobs ORDER BY video_id"
+        ).fetchall() == [
+            ("a", "analyze", KEY, -5, "pending"),
+            ("b", "analyze", KEY, -5, "pending"),
+        ]
+
+
+def test_the_registered_planner_task_persists_its_jobs(
+    conn: psycopg.Connection[Any], head_dsn: str
+) -> None:
+    # Through the real ``with_conn`` wrapper (open, run, close without commit),
+    # which is the path production takes.
+    from services.planner.main import build_registry
+
+    _ready(conn, "a")
+    conn.commit()
+    settings = Settings(
+        DATABASE_URL=SecretStr(head_dsn), PROMPT_VERSION=VERSION, SUMMARIZER="ollama"
+    )
+    registry = build_registry(settings, lambda: psycopg.connect(head_dsn))
+    task = next(t for t in registry if t.name == "reanalysis_sweep")
+
+    assert task.fn() == 1
+
+    with psycopg.connect(head_dsn) as other:
+        assert other.execute("SELECT count(*) FROM jobs WHERE kind = 'analyze'").fetchone() == (1,)

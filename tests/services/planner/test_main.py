@@ -8,9 +8,11 @@ import textwrap
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from psycopg.pq import TransactionStatus
 
 from common.config import Settings, get_settings
 from services.planner import main as planner_main
@@ -94,6 +96,8 @@ def test_alert_task_with_a_channel_opens_a_connection() -> None:
 
 
 class _FakeConn:
+    info = SimpleNamespace(transaction_status=TransactionStatus.IDLE)  # run_on_fresh_connection
+
     def close(self) -> None:
         pass
 
@@ -180,6 +184,8 @@ def test_reconcile_runs_after_poll_on_its_own_interval_with_lock_key_7() -> None
 
 
 class _Conn:
+    info = SimpleNamespace(transaction_status=TransactionStatus.IDLE)  # run_on_fresh_connection
+
     def close(self) -> None:
         pass
 
