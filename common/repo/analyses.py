@@ -256,6 +256,19 @@ def latest_analysis_run(conn: psycopg.Connection[Any], video_id: str) -> Analysi
     return runs[0] if runs else None
 
 
+def analysis_run_for(
+    conn: psycopg.Connection[Any], video_id: str, model: str, prompt_version: str
+) -> AnalysisRun | None:
+    """The newest analysis of ``video_id`` made with ``model`` and ``prompt_version`` (#62).
+
+    Whatever transcript or chunk strategy it used. Ordered by ``created_at DESC,
+    id DESC``; children and their order are exactly those of ``latest_analysis_run``,
+    and the number of statements is fixed (one per table, none per child).
+    """
+    runs = _runs(conn, video_id, offset=0, limit=1, model=model, prompt_version=prompt_version)
+    return runs[0] if runs else None
+
+
 def list_analysis_runs(
     conn: psycopg.Connection[Any], video_id: str, *, offset: int, limit: int
 ) -> tuple[tuple[AnalysisRun, ...], int]:
@@ -273,17 +286,26 @@ def list_analysis_runs(
 
 
 def _runs(
-    conn: psycopg.Connection[Any], video_id: str, *, offset: int, limit: int
+    conn: psycopg.Connection[Any],
+    video_id: str,
+    *,
+    offset: int,
+    limit: int,
+    model: str | None = None,
+    prompt_version: str | None = None,
 ) -> tuple[AnalysisRun, ...]:
+    # ``model`` and ``prompt_version`` are optional filters; ``NULL`` means "any".
     rows = conn.execute(
         f"""
         SELECT {_RUN_COLUMNS}
         FROM analyses a JOIN transcripts t ON t.id = a.transcript_id
         WHERE a.video_id = %s
+          AND (%s::text IS NULL OR a.model = %s)
+          AND (%s::text IS NULL OR a.prompt_version = %s)
         ORDER BY a.created_at DESC, a.id DESC
         OFFSET %s LIMIT %s
         """,
-        (video_id, offset, limit),
+        (video_id, model, model, prompt_version, prompt_version, offset, limit),
     ).fetchall()
     ids = [int(row[0]) for row in rows]
     topics: dict[int, list[Topic]] = {i: [] for i in ids}

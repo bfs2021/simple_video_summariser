@@ -278,6 +278,10 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "-v", "--verbose", action="store_true", help="also print the traceback of a failure"
     )
+    # Lazy: services.eval imports this module.
+    from services.eval.cli import add_eval_parser
+
+    add_eval_parser(commands)
     return parser
 
 
@@ -391,6 +395,16 @@ def main(argv: Sequence[str] | None = None, *, deps: Deps | None = None) -> int:
         args = parser.parse_args(argv)
     except SystemExit as exc:
         return exc.code if isinstance(exc.code, int) else (0 if exc.code is None else _EXIT_USAGE)
+
+    if args.command == "eval":
+        # Lazy: services.eval imports this module.
+        from services.eval.cli import eval_main
+
+        try:
+            return eval_main(args, deps)
+        except KeyboardInterrupt:
+            _say("interrupted (Ctrl-C)")
+            return _EXIT_INTERRUPTED
 
     try:
         video_id = parse_video_ref(args.video)

@@ -1,0 +1,14 @@
+# Golden set for `ytdigest eval run` / `ytdigest eval report` (issue #62).
+#
+# One video per line: an 11-character video ID or a YouTube URL (parsed by
+# common.youtube_refs.parse_video_ref). Blank lines, lines starting with `#`
+# and a trailing ` # note` are ignored. A leading `-` in an ID is valid.
+# Duplicates are kept once (warning on stderr); at most 200 entries.
+#
+# Selection criteria (~20 episodes):
+#   - a mix of transcript sources: youtube_manual, youtube_auto, whisper
+#   - at least two speakers per episode
+#   - lengths from under 30 minutes to 2 hours and more
+#   - every video already ingested and transcribed (use `ytdigest run` first)
+#
+# Empty on purpose: choosing the real episodes is #147.
