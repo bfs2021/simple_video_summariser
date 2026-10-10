@@ -88,3 +88,59 @@ def test_repr_and_str_never_show_the_url() -> None:
 def test_unknown_format_is_rejected() -> None:
     with pytest.raises(ValueError):
         WebhookAlerter(URL, fmt="xml", transport=Recorder())  # type: ignore[arg-type]
+
+
+# --- the real transport: http.client.InvalidURL quotes URL *fragments* -------
+
+TOKEN = "S3CRETTOKEN"
+HOOK_URLS = {
+    "space in path": f"https://127.0.0.1/my topic {TOKEN}",
+    "newline in path": f"https://127.0.0.1/my\ntopic{TOKEN}",
+    "non-numeric port": f"https://127.0.0.1:{TOKEN}/x",
+    "hash in password": f"https://user:p#{TOKEN}@127.0.0.1/x",
+    "slash in password": f"https://user:pa/{TOKEN}@127.0.0.1/x",
+    "at in password": f"https://user:pa@{TOKEN}@127.0.0.1/x",
+}
+
+
+@pytest.mark.parametrize("url", list(HOOK_URLS.values()), ids=list(HOOK_URLS))
+def test_invalid_urls_never_leak_through_the_real_transport(
+    url: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    from adapters.alerts.webhook import urllib_post_transport
+
+    alerter = WebhookAlerter(url, transport=urllib_post_transport)
+
+    with pytest.raises(AlertDeliveryError) as info:
+        alerter.send("t", "m")
+
+    err = info.value
+    assert err.__cause__ is None and err.__suppress_context__ is True
+    for text in (str(err), repr(err), repr(err.args), repr(alerter)):
+        assert TOKEN not in text
+        assert "user:" not in text
+
+    # and the record the planner actually emits
+    import logging
+
+    from services.planner.alerts import _logger
+
+    with caplog.at_level(logging.WARNING, logger=_logger.name):
+        _logger.warning("planner.alert_failed", extra={"error": str(err)})
+    for rec in caplog.records:
+        assert TOKEN not in rec.getMessage()
+        assert TOKEN not in repr(rec.__dict__)
+
+
+def test_a_url_error_reports_the_reason_type_not_its_text() -> None:
+    import urllib.error
+
+    boom = urllib.error.URLError(OSError(f"refused {TOKEN}"))
+
+    with pytest.raises(AlertDeliveryError) as info:
+        WebhookAlerter(URL, transport=Recorder(raises=boom)).send("t", "m")
+
+    assert "URLError" in str(info.value)
+    assert "OSError" in str(info.value)
+    assert TOKEN not in str(info.value)
+    assert "hooks.example.test" in str(info.value)

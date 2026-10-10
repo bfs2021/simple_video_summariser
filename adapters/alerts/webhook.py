@@ -5,8 +5,11 @@ plain text body (``fmt="text"``, title in a ``Title`` header), a
 Slack-compatible endpoint takes ``{"text": ...}`` (``fmt="json"``).
 
 The URL is a secret. It is held only in a private attribute, left out of
-``repr``, and every error this module raises is scrubbed of it and raised
-``from None``, so neither the message nor a chained traceback can quote it.
+``repr``, and every error this module raises is raised ``from None`` and is
+built from safe parts only: exception *types* and, for a URL, the parsed
+``scheme://host[:port]`` (``common.safe_url``). Exception text is never quoted,
+because ``InvalidURL`` and friends echo fragments of the URL that no
+whole-string scrub can match.
 The POST goes through an injectable ``transport`` so tests make no network
 call.
 """
@@ -18,6 +21,8 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
 from typing import Literal
+
+from common.safe_url import public_url
 
 #: ``transport(url, body, headers, timeout_sec)`` returns the HTTP status.
 #: HTTP error statuses are returned, not raised; any other failure raises.
@@ -69,7 +74,10 @@ class WebhookAlerter:
         try:
             status = self._transport(self.__url, body, headers, DELIVERY_TIMEOUT_SEC)
         except Exception as err:  # noqa: BLE001 - any transport failure is a delivery failure
-            detail = f"{type(err).__name__}: {err}".replace(self.__url, "<webhook>")
-            raise AlertDeliveryError(f"alert not delivered: {detail}") from None
+            detail = type(err).__name__
+            if isinstance(err, urllib.error.URLError) and isinstance(err.reason, BaseException):
+                detail += f" ({type(err.reason).__name__})"
+            where = public_url(self.__url, invalid="<invalid webhook URL>")
+            raise AlertDeliveryError(f"alert not delivered to {where}: {detail}") from None
         if not 200 <= status < 300:
             raise AlertDeliveryError(f"alert not delivered: HTTP {status}")

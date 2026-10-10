@@ -47,6 +47,7 @@ from common.models import (
     Usage,
     VideoMeta,
 )
+from common.safe_url import public_url
 
 _logger = logging.getLogger(__name__)
 
@@ -144,21 +145,10 @@ class OllamaProbe:
 def public_host(host: str) -> str:
     """``scheme://hostname[:port]`` rebuilt from the parsed ``host``, safe to log.
 
-    Only those three components are emitted; userinfo, path, params, query and
-    fragment never are, wherever a secret was put. ``<invalid OLLAMA_HOST>`` when
-    the value does not parse to an http(s) URL with a host and a valid port.
+    See ``common.safe_url.public_url``; ``<invalid OLLAMA_HOST>`` when the value
+    does not parse to an http(s) URL with a host and a valid port.
     """
-    invalid = "<invalid OLLAMA_HOST>"
-    try:
-        parts = urlsplit(host)
-        name = parts.hostname
-        port = parts.port
-    except ValueError:
-        return invalid
-    if parts.scheme not in ("http", "https") or not name:
-        return invalid
-    shown = f"[{name}]" if ":" in name else name
-    return f"{parts.scheme}://{shown}" + (f":{port}" if port is not None else "")
+    return public_url(host, invalid="<invalid OLLAMA_HOST>")
 
 
 def _secrets_of(host: str) -> list[str]:

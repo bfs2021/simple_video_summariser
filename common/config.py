@@ -186,8 +186,14 @@ class Settings(BaseSettings):
         # The message must never quote the value: it is a secret.
         if value is not None:
             try:
-                parts = urlsplit(value.get_secret_value())
-                usable = parts.scheme in ("http", "https") and bool(parts.hostname)
+                raw = value.get_secret_value()
+                parts = urlsplit(raw)
+                parts.port  # noqa: B018 - raises ValueError for a non-numeric port
+                usable = (
+                    parts.scheme in ("http", "https")
+                    and bool(parts.hostname)
+                    and not any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in raw)
+                )
             except ValueError:
                 usable = False
             if not usable:

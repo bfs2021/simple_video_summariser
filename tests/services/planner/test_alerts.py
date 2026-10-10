@@ -302,3 +302,35 @@ def test_the_quoted_error_line_is_capped_at_200_chars_with_an_ellipsis(
     quoted = sink.sent[0][1].splitlines()[-1].split(": ", 1)[1]
     assert len(quoted) == shown
     assert quoted.endswith("...") == (length > 200)
+
+
+_TOKEN = "S3CRETTOKEN"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        f"https://127.0.0.1/my topic {_TOKEN}",
+        f"https://127.0.0.1/my\ntopic{_TOKEN}",
+        f"https://127.0.0.1:{_TOKEN}/x",
+        f"https://user:p#{_TOKEN}@127.0.0.1/x",
+        f"https://user:pa/{_TOKEN}@127.0.0.1/x",
+    ],
+    ids=["space", "newline", "port", "hash-password", "slash-password"],
+)
+def test_the_warning_record_never_carries_the_webhook_url(
+    conn: psycopg.Connection[Any], caplog: pytest.LogCaptureFixture, url: str
+) -> None:
+    from adapters.alerts.webhook import WebhookAlerter
+
+    _dead(conn, "TOOL_FAILURE")
+
+    with caplog.at_level(logging.DEBUG):
+        assert _run(conn, WebhookAlerter(url)) == 0  # type: ignore[arg-type]
+
+    failed = [r for r in caplog.records if r.getMessage() == "planner.alert_failed"]
+    assert failed
+    for rec in caplog.records:
+        assert _TOKEN not in repr(rec.__dict__)
+        assert _TOKEN not in rec.getMessage()
+        assert "user:" not in repr(rec.__dict__)

@@ -39,7 +39,9 @@ def test_webhook_url_is_a_secret() -> None:
     assert "s3cr3tT0ken" not in str(s)
 
 
-@pytest.mark.parametrize("bad", ["ftp://x/SECRETX", "not a url SECRETX", "http:///SECRETX", "ntfy.sh/SECRETX"])
+@pytest.mark.parametrize("bad", ["ftp://x/SECRETX", "not a url SECRETX", "http:///SECRETX", "ntfy.sh/SECRETX",
+    "https://h/my topic SECRETX", "https://h/my\ntopic/SECRETX", "https://h:SECRETX/x",
+    "https://h/\tSECRETX", "https://u:p#SECRETX@h:notaport/x"])
 def test_bad_webhook_url_is_rejected_without_echoing_it(bad: str) -> None:
     with pytest.raises(ValidationError) as info:
         _settings(ALERT_WEBHOOK_URL=bad)

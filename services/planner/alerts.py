@@ -48,8 +48,15 @@ _HINTS = {
     ),
 }
 
-_URL_USERINFO = re.compile(r"(?<=://)[^/@\s]*@")
+_URL_REST = re.compile(r"(?<=://)\S+")
 _URL_QUERY = re.compile(r"\?\S*")
+
+
+def _strip_url_secrets(match: re.Match[str]) -> str:
+    # Everything up to the LAST "@" of the token is userinfo, even if the
+    # password holds "@", "/" or "#"; then drop any "#fragment".
+    rest = match.group().rpartition("@")[2]
+    return rest.partition("#")[0]
 
 
 class AlertSink(Protocol):
@@ -63,7 +70,7 @@ def alerting_classes() -> list[str]:
 def _last_line(last_error: str | None) -> str:
     lines = [ln.strip() for ln in (last_error or "").splitlines() if ln.strip()]
     line = lines[-1] if lines else "(no error recorded)"
-    line = _URL_QUERY.sub("?<redacted>", _URL_USERINFO.sub("", line))
+    line = _URL_QUERY.sub("?<redacted>", _URL_REST.sub(_strip_url_secrets, line))
     if len(line) > _MAX_ERROR_CHARS:
         line = line[: _MAX_ERROR_CHARS - 3] + "..."
     return line
