@@ -311,7 +311,8 @@ RETURNING *;
 ### Reaping (C2)
 
 ```sql
-UPDATE jobs SET state='pending', locked_by=NULL, locked_at=NULL
+UPDATE jobs SET state='pending', locked_by=NULL, locked_at=NULL,
+                error_class=NULL, last_error='worker lost: heartbeat stale'
 WHERE state='running' AND heartbeat_at < now() - interval '5 minutes';
 ```
 
@@ -742,6 +743,10 @@ between a fast dead-letter and four wasted Whisper runs.
 
 `error_class` is stored on the job so the Ops view can distinguish "YouTube
 changed something" from "my LLM is down" at a glance.
+
+A NULL `error_class` on a `pending`/`dead` job means the reaper reset it after a
+lost heartbeat (`last_error = 'worker lost: heartbeat stale'`); it is not a
+class and has no retry policy.
 
 ---
 

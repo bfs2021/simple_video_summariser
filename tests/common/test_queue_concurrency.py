@@ -534,6 +534,7 @@ def test_reap_stale_moves_a_job_at_max_attempts_to_dead_instead_of_pending(
     job_id = queue.enqueue("ingest", "v1")  # kind max is 4
     assert job_id is not None
     _make_stale(conn, job_id, seconds_ago=600, locked_by="w1", attempts=4)
+    _set(conn, job_id, error_class="TRANSIENT_NETWORK")
 
     count = queue.reap_stale(older_than_sec=300)
 
@@ -541,6 +542,7 @@ def test_reap_stale_moves_a_job_at_max_attempts_to_dead_instead_of_pending(
     row = _row(conn, job_id)
     assert row["state"] == "dead"
     assert row["locked_by"] is None
+    assert row["error_class"] is None
 
 
 # ---------------------------------------------------------------------------

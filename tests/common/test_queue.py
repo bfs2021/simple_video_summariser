@@ -720,10 +720,12 @@ def test_reap_stale_ignores_jobs_whose_heartbeat_is_within_the_threshold(
     with queue.claim(["ingest"], worker="w1") as job:
         assert job is not None
         # heartbeat_at was just set to now() by claim(); well within threshold.
+        _set(conn, job_id, error_class="TRANSIENT_NETWORK")
         count = queue.reap_stale(older_than_sec=300)
         assert count == 0
         row = _row(conn, job_id)
         assert row["state"] == "running"
+        assert row["error_class"] == "TRANSIENT_NETWORK"
 
 
 def test_reap_stale_dead_letters_a_job_that_already_used_its_max_attempts(
@@ -843,6 +845,7 @@ def test_reap_stale_never_touches_rows_that_are_not_running(
         state=state,
         heartbeat_at=datetime.now(UTC) - timedelta(hours=2),
         attempts=1,
+        error_class="TRANSIENT_NETWORK",
     )
     before = _row(conn, job_id)
 
@@ -856,6 +859,7 @@ def test_reap_stale_requeue_keeps_attempts_and_records_why(
     queue: PostgresQueue, conn: psycopg.Connection[Any]
 ) -> None:
     job_id = _make_running(queue, conn, attempts=3)  # ingest max is 4
+    _set(conn, job_id, error_class="TRANSIENT_NETWORK")
 
     queue.reap_stale(older_than_sec=300)
 
@@ -866,6 +870,7 @@ def test_reap_stale_requeue_keeps_attempts_and_records_why(
     assert row["locked_at"] is None
     assert row["last_error"] == "worker lost: heartbeat stale"
     assert row["finished_at"] is None
+    assert row["error_class"] is None
 
 
 @pytest.mark.parametrize(
@@ -876,6 +881,7 @@ def test_reap_stale_dead_letters_at_and_beyond_max_attempts(
     queue: PostgresQueue, conn: psycopg.Connection[Any], attempts: int, expected: str
 ) -> None:
     job_id = _make_running(queue, conn, attempts=attempts)
+    _set(conn, job_id, error_class="TRANSIENT_NETWORK")
 
     queue.reap_stale(older_than_sec=300)
 
@@ -883,7 +889,112 @@ def test_reap_stale_dead_letters_at_and_beyond_max_attempts(
     assert row["state"] == expected
     assert row["last_error"] == "worker lost: heartbeat stale"
     assert row["locked_by"] is None
+    assert row["error_class"] is None
     assert (row["finished_at"] is not None) == (expected == "dead")
+
+
+# ---------------------------------------------------------------------------
+# reap_stale clears error_class (issue #114)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("kind", "attempts", "expected"),
+    [
+        ("ingest", 1, "pending"),
+        ("ingest", 4, "dead"),
+        ("transcribe", 1, "pending"),
+        ("transcribe", 2, "dead"),
+    ],
+)
+def test_reap_stale_leaves_error_class_null_when_it_was_already_null(
+    queue: PostgresQueue,
+    conn: psycopg.Connection[Any],
+    kind: str,
+    attempts: int,
+    expected: str,
+) -> None:
+    job_id = _make_running(queue, conn, kind=kind, attempts=attempts)
+    assert _row(conn, job_id)["error_class"] is None
+
+    count = queue.reap_stale(older_than_sec=300)
+
+    assert count == 1
+    row = _row(conn, job_id)
+    assert row["state"] == expected
+    assert row["error_class"] is None
+    assert row["last_error"] == "worker lost: heartbeat stale"
+
+
+@pytest.mark.parametrize(("kind", "attempts"), [("ingest", 4), ("transcribe", 2)])
+def test_reap_stale_dead_letter_clears_a_seeded_class_at_each_kinds_max(
+    queue: PostgresQueue, conn: psycopg.Connection[Any], kind: str, attempts: int
+) -> None:
+    job_id = _make_running(queue, conn, kind=kind, attempts=attempts)
+    _set(conn, job_id, error_class="TRANSIENT_NETWORK")
+
+    queue.reap_stale(older_than_sec=300)
+
+    row = _row(conn, job_id)
+    assert row["state"] == "dead"
+    assert row["finished_at"] is not None
+    assert row["error_class"] is None
+    assert row["last_error"] == "worker lost: heartbeat stale"
+
+
+def test_reap_stale_keeps_the_class_of_a_live_heartbeat_job_next_to_a_reaped_one(
+    queue: PostgresQueue, conn: psycopg.Connection[Any]
+) -> None:
+    live = _make_running(queue, conn, video_id="live", heartbeat_age_sec=10)
+    stale = _make_running(queue, conn, video_id="stale", heartbeat_age_sec=600)
+    _set(conn, live, error_class="TOOL_FAILURE")
+    _set(conn, stale, error_class="TOOL_FAILURE")
+
+    count = queue.reap_stale(older_than_sec=300)
+
+    assert count == 1
+    assert _row(conn, live)["error_class"] == "TOOL_FAILURE"
+    assert _row(conn, stale)["error_class"] is None
+
+
+def test_a_job_reaped_to_pending_gets_its_class_back_when_it_later_fails(
+    queue: PostgresQueue, conn: psycopg.Connection[Any]
+) -> None:
+    job_id = _make_running(queue, conn, attempts=1)
+    _set(conn, job_id, error_class="TOOL_FAILURE")
+    queue.reap_stale(older_than_sec=300)
+    assert _row(conn, job_id)["error_class"] is None
+    _set(conn, job_id, run_after=datetime.now(UTC) - timedelta(seconds=1))
+
+    with queue.claim(["ingest"], worker="w2") as job:
+        assert job is not None
+        raise TransientNetworkError("dns lookup failed")
+
+    row = _row(conn, job_id)
+    assert row["state"] == "pending"
+    assert row["error_class"] == "TRANSIENT_NETWORK"
+
+
+def test_reaped_dead_job_is_selectable_by_null_class_and_not_a_fail_dead_one(
+    queue: PostgresQueue, conn: psycopg.Connection[Any]
+) -> None:
+    # The predicates #44 (error_class=none) and #92 (not PERMANENT_SOURCE)
+    # will use, asserted as SQL since neither is merged.
+    reaped = _make_running(queue, conn, kind="transcribe", video_id="r", attempts=2)
+    failed = queue.enqueue("transcribe", "f")
+    assert failed is not None
+    _set(conn, failed, state="dead", error_class="PERMANENT_SOURCE")
+
+    queue.reap_stale(older_than_sec=300)
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM jobs WHERE state = 'dead' AND error_class IS NULL")
+        assert [r[0] for r in cur.fetchall()] == [reaped]
+        cur.execute(
+            "SELECT id FROM jobs WHERE state = 'dead' AND kind = 'transcribe'"
+            " AND error_class IS DISTINCT FROM 'PERMANENT_SOURCE'"
+        )
+        assert [r[0] for r in cur.fetchall()] == [reaped]
 
 
 @pytest.mark.parametrize(

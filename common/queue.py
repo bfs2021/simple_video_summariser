@@ -491,6 +491,14 @@ class PostgresQueue:
     # -- reap_stale ------------------------------------------------------------
 
     def reap_stale(self, older_than_sec: int | None = None) -> int:
+        """Return stale ``running`` jobs to ``pending``, or dead-letter them.
+
+        Clears ``error_class`` to NULL on every job it touches, whether the
+        outcome is ``pending`` or ``dead``. A NULL ``error_class`` together
+        with ``last_error = 'worker lost: heartbeat stale'`` means "lost
+        heartbeat, cause unknown" - distinct from any non-NULL class a
+        handler-raised exception left via ``_fail`` (issue #114).
+        """
         threshold = (
             self._settings.REAP_AFTER_SEC if older_than_sec is None else older_than_sec
         )
@@ -525,7 +533,7 @@ class PostgresQueue:
                                           ELSE %(max_default)s END
                                  THEN now() ELSE j.finished_at END,
                     locked_by = NULL, locked_at = NULL,
-                    last_error = %(last_error)s
+                    last_error = %(last_error)s, error_class = NULL
                 FROM stale
                 WHERE j.id = stale.id AND j.state = 'running'
                   AND (j.heartbeat_at IS NULL
