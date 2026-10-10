@@ -72,8 +72,17 @@ class InProcessQueue:
         return job.id
 
     @contextmanager
-    def claim(self, kinds: Sequence[str], *, worker: str) -> Iterator[Job | None]:
-        index = next((i for i, job in enumerate(self._pending) if job.kind in kinds), None)
+    def claim(
+        self, kinds: Sequence[str], *, worker: str, dedupe_key: str | None = None
+    ) -> Iterator[Job | None]:
+        index = next(
+            (
+                i
+                for i, job in enumerate(self._pending)
+                if job.kind in kinds and (dedupe_key is None or job.dedupe_key == dedupe_key)
+            ),
+            None,
+        )
         if index is None:
             yield None
             return

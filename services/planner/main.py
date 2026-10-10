@@ -1,6 +1,6 @@
 """Planner service entrypoint (issue #38; architecture.md §1, §11.1).
 
-``python -m services.planner.main`` runs the seven periodic maintenance tasks
+``python -m services.planner.main`` runs the eight periodic maintenance tasks
 in one long-lived process, each on its own interval:
 
 ============================  ============================  =============================
@@ -10,6 +10,8 @@ task                          interval                      what it does
 ``auto_caption_fallback``     ``POLL_INTERVAL_SEC``         re-enqueue ingest for a video whose
                                                             transcribe job dead-lettered (#92)
 ``audio_retention``           ``POLL_INTERVAL_SEC``         expire / cap / clean audio
+``stale_analyze``             ``POLL_INTERVAL_SEC``         re-key or supersede pending analyze jobs
+                                                            left on an old PROMPT_VERSION (#100)
 ``reanalysis_sweep``          ``POLL_INTERVAL_SEC``         enqueue analyses for a new prompt
 ``poll_channels``             ``POLL_INTERVAL_SEC``         discover new videos from RSS
 ``reconcile_channels``        ``RECONCILE_INTERVAL_SEC``    recover uploads that fell out of the
@@ -94,6 +96,7 @@ from services.planner.reaper import reap_stale_jobs
 from services.planner.reconcile import RECONCILE_LIST_TIMEOUT_SEC, reconcile_channels
 from services.planner.retention import enforce_audio_retention, max_bytes_from_gb
 from services.planner.scheduler import Scheduler, Task
+from services.planner.stale_analyze import resolve_stale_analyze_jobs
 from services.planner.sweep import run_reanalysis_sweep
 
 _log = structlog.get_logger(__name__)
@@ -110,6 +113,7 @@ LOCK_KEYS: dict[str, tuple[int, int]] = {
     "dead_letter_alerts": (LOCK_NAMESPACE, 5),
     "auto_caption_fallback": (LOCK_NAMESPACE, 6),
     "reconcile_channels": (LOCK_NAMESPACE, 7),
+    "stale_analyze": (LOCK_NAMESPACE, 8),
 }
 
 Connect = Callable[[], psycopg.Connection[Any]]
@@ -249,6 +253,9 @@ def build_registry(settings: Settings, connect: Connect) -> list[Task]:
             + report.evicted_for_space
         )
 
+    def stale_analyze(conn: psycopg.Connection[Any]) -> int:
+        return resolve_stale_analyze_jobs(PostgresQueue(conn, settings=settings), settings)
+
     def reanalysis_sweep(conn: psycopg.Connection[Any]) -> int:
         return run_reanalysis_sweep(
             conn,
@@ -295,6 +302,8 @@ def build_registry(settings: Settings, connect: Connect) -> list[Task]:
         Task("reap", settings.REAP_INTERVAL_SEC, with_conn(reap)),
         Task("auto_caption_fallback", settings.POLL_INTERVAL_SEC, with_conn(auto_caption_fallback)),
         Task("audio_retention", settings.POLL_INTERVAL_SEC, with_conn(audio_retention)),
+        # Before the sweep: it must see a re-keyed job as active (#100).
+        Task("stale_analyze", settings.POLL_INTERVAL_SEC, with_conn(stale_analyze)),
         Task("reanalysis_sweep", settings.POLL_INTERVAL_SEC, with_conn(reanalysis_sweep)),
         Task("poll_channels", settings.POLL_INTERVAL_SEC, with_conn(poll)),
         Task("reconcile_channels", settings.RECONCILE_INTERVAL_SEC, with_conn(reconcile)),

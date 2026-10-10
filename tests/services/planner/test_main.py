@@ -24,6 +24,7 @@ TASK_NAMES = [
     "reap",
     "auto_caption_fallback",
     "audio_retention",
+    "stale_analyze",
     "reanalysis_sweep",
     "poll_channels",
     "reconcile_channels",
@@ -55,6 +56,7 @@ def test_reap_uses_its_own_interval_and_the_others_use_the_poll_interval() -> No
         "reap": 7,
         "auto_caption_fallback": 99,
         "audio_retention": 99,
+        "stale_analyze": 99,
         "reanalysis_sweep": 99,
         "poll_channels": 99,
         "reconcile_channels": 21600,
@@ -69,6 +71,7 @@ def test_default_intervals_are_one_minute_and_one_hour() -> None:
         "reap": 60,
         "auto_caption_fallback": 3600,
         "audio_retention": 3600,
+        "stale_analyze": 3600,
         "reanalysis_sweep": 3600,
         "poll_channels": 3600,
         "reconcile_channels": 21600,
@@ -136,6 +139,32 @@ def test_auto_caption_fallback_runs_right_after_reap_with_its_own_fixed_lock_key
 
     assert names.index("auto_caption_fallback") == names.index("reap") + 1
     assert planner_main.LOCK_KEYS["auto_caption_fallback"] == (planner_main.LOCK_NAMESPACE, 6)
+
+
+def test_stale_analyze_runs_before_the_sweep_with_its_own_fixed_lock_key() -> None:
+    names = [t.name for t in planner_main.build_registry(_settings(), _no_connect)]
+
+    assert names.index("stale_analyze") == names.index("reanalysis_sweep") - 1
+    assert planner_main.LOCK_KEYS["stale_analyze"] == (planner_main.LOCK_NAMESPACE, 8)
+
+
+def test_stale_analyze_task_resolves_with_the_configured_prompt_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[str] = []
+
+    def fake_resolve(queue: Any, settings: Settings) -> int:
+        seen.append(settings.PROMPT_VERSION)
+        return 5
+
+    monkeypatch.setattr(planner_main, "resolve_stale_analyze_jobs", fake_resolve)
+    tasks = {
+        t.name: t
+        for t in planner_main.build_registry(_settings(PROMPT_VERSION="v9"), lambda: cast(Any, _Conn()))
+    }
+
+    assert tasks["stale_analyze"].fn() == 5
+    assert seen == ["v9"]
 
 
 def test_reconcile_runs_after_poll_on_its_own_interval_with_lock_key_7() -> None:

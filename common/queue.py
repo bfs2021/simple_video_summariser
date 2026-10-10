@@ -81,16 +81,66 @@ _JITTER_FRACTION = 0.10
 
 _REAP_LAST_ERROR = "worker lost: heartbeat stale"
 
-_CLAIM_SQL = """
+_CLAIM_SQL_TEMPLATE = """
     UPDATE jobs SET state='running', locked_at=now(), started_at=now(),
                     heartbeat_at=now(), locked_by=%(worker)s, attempts=attempts+1
     WHERE id = (
         SELECT id FROM jobs
-        WHERE state='pending' AND kind = ANY(%(kinds)s) AND run_after <= now()
+        WHERE state='pending' AND kind = ANY(%(kinds)s) AND run_after <= now(){key_filter}
         ORDER BY priority DESC, run_after
         FOR UPDATE SKIP LOCKED
         LIMIT 1)
     RETURNING *
+"""
+_CLAIM_SQL = _CLAIM_SQL_TEMPLATE.format(key_filter="")
+#: ``claim(dedupe_key=...)`` (#100): an exact, bound-parameter match, never a pattern.
+_CLAIM_SQL_KEYED = _CLAIM_SQL_TEMPLATE.format(key_filter=" AND dedupe_key = %(dedupe_key)s")
+
+#: #100. Pending ``analyze`` jobs whose key is ``<version>:<summarizer>`` with a
+#: version other than ``%(prompt_version)s``. ``FOR UPDATE SKIP LOCKED`` leaves a
+#: row that is being claimed for the next tick; the regex leaves malformed keys
+#: alone (``analyze_dedupe_key`` forbids ``:`` and empty parts in either half).
+#: Per (video, target key) the highest ``priority`` (then lowest ``id``) is
+#: re-keyed, unless the target already has a pending/running/dead job or the
+#: video already has an analysis at the version; everything else is superseded.
+#: One statement, so one transaction: the two UPDATEs touch disjoint rows.
+_STALE_ANALYZE_SQL = r"""
+    WITH stale AS (
+        SELECT id, video_id, priority,
+               %(prompt_version)s::text || ':' || split_part(dedupe_key, ':', 2) AS target_key
+        FROM jobs
+        WHERE kind = 'analyze' AND state = 'pending'
+          AND dedupe_key ~ '^[^:]+:[^:]+$'
+          AND split_part(dedupe_key, ':', 1) <> %(prompt_version)s
+        FOR UPDATE SKIP LOCKED
+    ),
+    ranked AS (
+        SELECT s.id, s.target_key,
+               row_number() OVER (PARTITION BY s.video_id, s.target_key
+                                  ORDER BY s.priority DESC, s.id) = 1
+               AND NOT EXISTS (
+                   SELECT 1 FROM jobs j
+                   WHERE j.video_id = s.video_id AND j.kind = 'analyze'
+                     AND j.dedupe_key = s.target_key
+                     AND j.state IN ('pending', 'running', 'dead'))
+               AND NOT EXISTS (
+                   SELECT 1 FROM analyses a
+                   WHERE a.video_id = s.video_id
+                     AND a.prompt_version = %(prompt_version)s) AS rekey
+        FROM stale s
+    ),
+    rekeyed AS (
+        UPDATE jobs j SET dedupe_key = r.target_key
+        FROM ranked r WHERE j.id = r.id AND r.rekey
+        RETURNING j.id
+    ),
+    superseded AS (
+        UPDATE jobs j SET state = 'dead', finished_at = now(), error_class = NULL,
+                          last_error = %(message)s
+        FROM ranked r WHERE j.id = r.id AND NOT r.rekey
+        RETURNING j.id
+    )
+    SELECT (SELECT count(*) FROM rekeyed), (SELECT count(*) FROM superseded)
 """
 
 #: #44. ``NOT EXISTS`` only looks at active-index states, matching the
@@ -121,6 +171,14 @@ _RETRY_DEAD_SQL = """
     WHERE j.id = c.id
     RETURNING j.*, c.prev_attempts
 """
+
+
+@dataclass(frozen=True, slots=True)
+class StaleAnalyzeResult:
+    """What ``PostgresQueue.resolve_stale_analyze`` did (#100)."""
+
+    rekeyed: int
+    superseded: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,7 +250,7 @@ class JobQueue(Protocol):
     ) -> int | None: ...
 
     def claim(
-        self, kinds: Sequence[str], *, worker: str
+        self, kinds: Sequence[str], *, worker: str, dedupe_key: str | None = None
     ) -> AbstractContextManager[Job | None]: ...
 
     def heartbeat(self, job_id: int, worker: str) -> bool: ...
@@ -269,8 +327,17 @@ class PostgresQueue:
     # -- claim ---------------------------------------------------------------
 
     @contextmanager
-    def claim(self, kinds: Sequence[str], *, worker: str) -> Iterator[Job | None]:
-        job = self._do_claim(kinds, worker)
+    def claim(
+        self, kinds: Sequence[str], *, worker: str, dedupe_key: str | None = None
+    ) -> Iterator[Job | None]:
+        """Claim the best pending job of ``kinds``, or yield ``None``.
+
+        With ``dedupe_key`` only a job whose key equals it exactly is eligible
+        (#100): an analyzer passes ``analyze_dedupe_key(PROMPT_VERSION, name)``
+        so it never claims a job it would have to hand back. The filter applies
+        to every kind in ``kinds``, so pass a key only for a single-kind claim.
+        """
+        job = self._do_claim(kinds, worker, dedupe_key)
         if job is None:
             yield None
             return
@@ -318,9 +385,16 @@ class PostgresQueue:
                 {},
             )
 
-    def _do_claim(self, kinds: Sequence[str], worker: str) -> Job | None:
+    def _do_claim(
+        self, kinds: Sequence[str], worker: str, dedupe_key: str | None = None
+    ) -> Job | None:
+        params: dict[str, Any] = {"kinds": list(kinds), "worker": worker}
+        sql = _CLAIM_SQL
+        if dedupe_key is not None:
+            params["dedupe_key"] = dedupe_key
+            sql = _CLAIM_SQL_KEYED
         with self._conn.transaction(), self._conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(_CLAIM_SQL, {"kinds": list(kinds), "worker": worker})
+            cur.execute(sql, params)
             row = cur.fetchone()
         return _job_from_row(row) if row is not None else None
 
@@ -593,3 +667,37 @@ class PostgresQueue:
                 },
             )
         return len(reaped)
+
+    # -- resolve_stale_analyze -------------------------------------------------
+
+    def resolve_stale_analyze(self, prompt_version: str) -> StaleAnalyzeResult:
+        """Re-key or supersede pending ``analyze`` jobs left on another PROMPT_VERSION (#100).
+
+        Only ``pending`` ``analyze`` jobs whose key is ``<version>:<summarizer>``
+        with a version *different from* ``prompt_version`` are touched (not
+        "older": versions have no order, and a rollback works the same way).
+        Per video and target key, one job is re-keyed in place to
+        ``<prompt_version>:<its own summarizer>``, keeping its id, priority,
+        payload, attempts and run_after, unless the target already has a
+        pending, running or dead job (dead work is never revived) or the video
+        already has an analysis at ``prompt_version`` (whatever the model). The
+        other matching jobs are marked ``dead`` with ``last_error`` "superseded:
+        ..." and keep their old key for the ops view. A row being claimed right
+        now is skipped (``SKIP LOCKED``) and handled on the next call. One
+        statement. PostgresQueue only, not on the ``JobQueue`` Protocol.
+        """
+        if not prompt_version or ":" in prompt_version:
+            raise ValueError(
+                f"prompt_version must be non-empty and contain no ':', got {prompt_version!r}"
+            )
+        with self._conn.transaction(), self._conn.cursor() as cur:
+            cur.execute(
+                _STALE_ANALYZE_SQL,
+                {
+                    "prompt_version": prompt_version,
+                    "message": f"superseded: PROMPT_VERSION is now {prompt_version}",
+                },
+            )
+            row = cur.fetchone()
+        assert row is not None
+        return StaleAnalyzeResult(rekeyed=int(row[0]), superseded=int(row[1]))

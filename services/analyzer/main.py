@@ -119,6 +119,11 @@ def build_job_handler(
     replica, or this one after a restart, may own it) without spending an
     attempt. A key that is not even ``<slug>:<slug>`` was never produced by
     ``analyze_dedupe_key``: that is a bug and dead-letters at once.
+
+    Defence in depth since #100: the worker claims by its own key
+    (``Worker(dedupe_key=...)``), so the mismatch branch is reachable only
+    through a caller that claims without the key, and a malformed key is never
+    claimed by this entrypoint at all.
     """
     inner = handler_factory(connect=connect, summarizer=summarizer, settings=settings)
     expected = analyze_dedupe_key(settings.PROMPT_VERSION, summarizer.name)
@@ -154,11 +159,13 @@ class _LazyQueue:
         self._inner: PostgresQueue | None = None
         self._conn: psycopg.Connection[Any] | None = None
 
-    def claim(self, kinds: Sequence[str], *, worker: str) -> AbstractContextManager[Job | None]:
+    def claim(
+        self, kinds: Sequence[str], *, worker: str, dedupe_key: str | None = None
+    ) -> AbstractContextManager[Job | None]:
         if self._inner is None:
             self._conn = self._connect()
             self._inner = PostgresQueue(self._conn, settings=self._settings)
-        return self._inner.claim(kinds, worker=worker)
+        return self._inner.claim(kinds, worker=worker, dedupe_key=dedupe_key)
 
     def reset(self) -> _LazyQueue:
         self.close()
@@ -284,6 +291,9 @@ def _run(
 
     try:
         summarizer = summarizer_factory(settings)
+        # The one key this process claims (#100); built here so a name that cannot
+        # form a key is a startup failure, not a crash after ``analyzer.started``.
+        dedupe_key = analyze_dedupe_key(settings.PROMPT_VERSION, summarizer.name)
     except Exception as exc:  # noqa: BLE001 - any failure to build is a startup failure
         _log.error("analyzer.invalid_config", error=str(exc))
         return EXIT_CONFIG
@@ -297,6 +307,7 @@ def _run(
         "summarizer": settings.SUMMARIZER,
         "model": _model_name(settings),
         "prompt_version": settings.PROMPT_VERSION,
+        "dedupe_key": dedupe_key,
         "chunk_sec": settings.CHUNK_SEC,
         "overlap_sec": settings.OVERLAP_SEC,
     }
@@ -326,6 +337,7 @@ def _run(
         settings=settings,
         heartbeat_queue_factory=heartbeat_queue,
         reconnect=claim_queue.reset,
+        dedupe_key=dedupe_key,
         **(worker_options or {}),
     )
     # Late-bound: resolved when a signal arrives, not when attached.

@@ -121,3 +121,13 @@ def test_pending_counts_jobs_not_yet_claimed() -> None:
     assert queue.pending == 2
     claim_one(queue)
     assert queue.pending == 1
+
+
+def test_a_dedupe_key_claims_only_a_job_with_exactly_that_key() -> None:
+    queue = InProcessQueue()
+    queue.enqueue("analyze", VID, dedupe_key="v1:ollama")
+    second = queue.enqueue("analyze", "BZiu46G4ukc", dedupe_key="v2:ollama")
+
+    with queue.claim(("analyze",), worker="cli", dedupe_key="v2:ollama") as job:
+        assert job is not None and job.id == second
+    assert claim_one(queue, ("analyze",)) is not None  # the v1 job was left pending

@@ -131,8 +131,10 @@ class SpyQueue:
         self.heartbeats += 1
         return self.inner.heartbeat(job_id, worker)
 
-    def claim(self, kinds: Sequence[str], *, worker: str) -> AbstractContextManager[Job | None]:
-        return self.inner.claim(kinds, worker=worker)
+    def claim(
+        self, kinds: Sequence[str], *, worker: str, dedupe_key: str | None = None
+    ) -> AbstractContextManager[Job | None]:
+        return self.inner.claim(kinds, worker=worker, dedupe_key=dedupe_key)
 
     def reap_stale(self, older_than_sec: int | None = None) -> int:
         return self.inner.reap_stale(older_than_sec)

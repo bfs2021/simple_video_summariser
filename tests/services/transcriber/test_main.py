@@ -134,7 +134,9 @@ class FakeQueue:
         self.closed = False
 
     @contextmanager
-    def claim(self, kinds: Sequence[str], *, worker: str) -> Iterator[Job | None]:
+    def claim(
+        self, kinds: Sequence[str], *, worker: str, dedupe_key: str | None = None
+    ) -> Iterator[Job | None]:
         shared = self.shared
         self.claims += 1
         shared.kinds.append(tuple(kinds))

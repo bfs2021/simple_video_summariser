@@ -42,7 +42,7 @@ class FakeQueue:
         raise AssertionError("the reaper must not enqueue")
 
     def claim(
-        self, kinds: Sequence[str], *, worker: str
+        self, kinds: Sequence[str], *, worker: str, dedupe_key: str | None = None
     ) -> AbstractContextManager[Job | None]:
         raise AssertionError("the reaper must not claim")
 

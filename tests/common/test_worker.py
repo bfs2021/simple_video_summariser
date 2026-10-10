@@ -107,7 +107,9 @@ class FakeQueue:
         self.close_raises: Exception | None = None
 
     @contextmanager
-    def claim(self, kinds: Sequence[str], *, worker: str) -> Iterator[Job | None]:
+    def claim(
+        self, kinds: Sequence[str], *, worker: str, dedupe_key: str | None = None
+    ) -> Iterator[Job | None]:
         self.claim_calls.append((tuple(kinds), worker))
         if not self._script:
             yield None

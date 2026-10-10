@@ -315,6 +315,13 @@ WHERE id = (
 RETURNING *;
 ```
 
+An analyzer adds `AND dedupe_key = %(dedupe_key)s` (an exact match, never a
+pattern) with its own `<PROMPT_VERSION>:<summarizer>` (C1), so it never claims
+a job just to defer it. Each planner tick, `stale_analyze` finds `pending`
+`analyze` jobs on any other version and re-keys each to the current version in
+place (keeping its priority), or marks it `dead` as superseded when the target
+key already has work or the video already has an analysis at that version (#100).
+
 ### Reaping (C2)
 
 ```sql
@@ -1457,12 +1464,16 @@ docker compose up -d --build web
 docker compose run --rm migrate
 
 # re-analysis sweep after a prompt change (C4)
-PROMPT_VERSION=v2 docker compose up -d planner analyzer
+PROMPT_VERSION=v2 docker compose up -d planner analyzer transcriber
 
 # inspect the queue without psql
 curl -s localhost:8080/api/healthz | jq
 curl -s 'localhost:8080/api/ops/jobs?state=dead' | jq
 ```
+
+The transcriber is in the rollout command because it builds the `analyze` key
+from its own `PROMPT_VERSION`; left on the old value it keeps enqueueing
+old-version jobs (the planner re-keys them, but only after a delay).
 
 ### 11.7 Development overlay
 

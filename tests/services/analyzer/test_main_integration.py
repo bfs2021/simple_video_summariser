@@ -126,7 +126,9 @@ def test_a_pending_analyze_job_ends_done_with_one_analysis_row(rig: Rig) -> None
     ]
 
 
-def test_a_job_for_another_configuration_is_deferred_without_spending_an_attempt(rig: Rig) -> None:
+def test_a_job_for_another_configuration_is_never_claimed_nor_deferred(rig: Rig) -> None:
+    # Issue #100: the analyzer claims by its own dedupe key, so a job for another prompt
+    # version is left exactly as it was (it used to be claimed and pushed out 15 minutes).
     seed_video(rig.conn, "aaaaaaaaaaa")
     job_id = rig.enqueue("analyze", "aaaaaaaaaaa", "v2:fake")
     fake = FakeSummarizer(name="fake")
@@ -135,16 +137,15 @@ def test_a_job_for_another_configuration_is_deferred_without_spending_an_attempt
 
     row = rig.job(job_id)
     assert (row["state"], row["attempts"], row["locked_by"]) == ("pending", 0, None)
-    minutes = row["wait"].total_seconds() / 60
-    assert 14 < minutes <= 15
+    assert row["wait"].total_seconds() <= 0  # run_after was not pushed into the future
     assert fake.calls == []
     assert rig.analyses() == []
 
 
 @pytest.mark.parametrize("key", ["default", "v1:fake:extra", "fake"])
-def test_a_malformed_key_dead_letters_as_a_bug_without_calling_the_summarizer(
-    rig: Rig, key: str
-) -> None:
+def test_a_malformed_key_is_never_claimed(rig: Rig, key: str) -> None:
+    # Issue #100: no analyzer's own key can equal a malformed one, so the claim filter
+    # skips it (the BugError guard in ``build_job_handler`` is unit-tested in test_main.py).
     seed_video(rig.conn, "aaaaaaaaaaa")
     job_id = rig.enqueue("analyze", "aaaaaaaaaaa", key)
     fake = FakeSummarizer(name="fake")
@@ -152,8 +153,39 @@ def test_a_malformed_key_dead_letters_as_a_bug_without_calling_the_summarizer(
     rig.run(fake, iterations=2)
 
     row = rig.job(job_id)
-    assert (row["state"], row["error_class"]) == ("dead", "BUG")
+    assert (row["state"], row["attempts"], row["error_class"]) == ("pending", 0, None)
     assert fake.calls == []
+
+
+def test_two_analyzers_on_one_database_each_finish_only_their_own_jobs(
+    rig: Rig, capsys: pytest.CaptureFixture[str]
+) -> None:
+    for video in ("aaaaaaaaaaa", "bbbbbbbbbbb"):
+        seed_video(rig.conn, video)
+    ollama = [rig.enqueue("analyze", v, "v1:ollama") for v in ("aaaaaaaaaaa", "bbbbbbbbbbb")]
+    anthropic = [rig.enqueue("analyze", v, "v1:anthropic") for v in ("aaaaaaaaaaa", "bbbbbbbbbbb")]
+    ollama_fake = FakeSummarizer(name="ollama", model="m-ollama")
+    anthropic_fake = FakeSummarizer(name="anthropic", model="m-anthropic")
+
+    # The ollama analyzer runs while the anthropic jobs are already pending, and the other
+    # way round: neither may touch a job that is not its own.
+    rig.run(ollama_fake, iterations=3)
+    assert [rig.job(j)["state"] for j in ollama] == ["done", "done"]
+    assert [(rig.job(j)["state"], rig.job(j)["attempts"]) for j in anthropic] == [("pending", 0)] * 2
+    rig.run(anthropic_fake, iterations=3)
+
+    assert [rig.job(j)["state"] for j in ollama + anthropic] == ["done"] * 4
+    assert [c[0] for c in ollama_fake.calls] and [c[0] for c in anthropic_fake.calls]
+    assert sorted((r["video_id"], r["model"]) for r in rig.analyses()) == [
+        ("aaaaaaaaaaa", "m-anthropic"),
+        ("aaaaaaaaaaa", "m-ollama"),
+        ("bbbbbbbbbbb", "m-anthropic"),
+        ("bbbbbbbbbbb", "m-ollama"),
+    ]
+    output = capsys.readouterr()
+    assert "analyzer.job_config_mismatch" not in output.out + output.err
+    for job_id in ollama + anthropic:
+        assert rig.job(job_id)["wait"].total_seconds() <= 0  # nothing pushed out by MISMATCH_DEFER
 
 
 def test_an_unavailable_summarizer_is_recorded_and_the_worker_goes_on(rig: Rig) -> None:

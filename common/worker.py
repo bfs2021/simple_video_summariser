@@ -203,9 +203,14 @@ class Worker:
         runtime_limit_sec: Callable[[Job], float | None] | None = None,
         exit_process: Callable[[int], None] = os._exit,
         install_signal_handlers: bool = True,
+        dedupe_key: str | None = None,
     ) -> None:
         self._name = name
         self._kinds = list(kinds)
+        # Claim only jobs with exactly this ``dedupe_key`` (#100). Passed to
+        # ``claim`` only when set, so a queue whose ``claim`` predates the
+        # keyword (a fake, the in-process CLI queue) keeps working.
+        self._dedupe_key = dedupe_key
         self._handler = handler
         self._queue = queue
         self._poll_sec = poll_sec
@@ -326,7 +331,12 @@ class Worker:
 
     def _run_once(self) -> bool:
         """Claim and, if there was a job, run it. Returns True to stop the loop."""
-        with self._queue.claim(self._kinds, worker=self._name) as job:
+        claim = (
+            self._queue.claim(self._kinds, worker=self._name)
+            if self._dedupe_key is None
+            else self._queue.claim(self._kinds, worker=self._name, dedupe_key=self._dedupe_key)
+        )
+        with claim as job:
             if job is None:
                 if self._shutdown_event.is_set():
                     return True
