@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
@@ -69,13 +69,20 @@ def poll_channels(conn: psycopg.Connection[Any], feed: FeedSource, queue: JobQue
         except psycopg.OperationalError:
             raise
         except Exception as exc:
+            conn.rollback()
+            health = record_poll(conn, channel.channel_id, error=_error_text(exc))
+            since = health.poll_failing_since if health is not None else None
             _logger.warning(
                 "planner.poll.channel_failed",
                 exc_info=exc,
-                extra={"channel_id": channel.channel_id},
+                extra={
+                    "channel_id": channel.channel_id,
+                    "poll_failing_since": (
+                        since.astimezone(UTC).isoformat() if since is not None else None
+                    ),
+                    "poll_failures": health.poll_failures if health is not None else None,
+                },
             )
-            conn.rollback()
-            record_poll(conn, channel.channel_id, error=_error_text(exc))
             failed += 1
         else:
             record_poll(conn, channel.channel_id)

@@ -335,7 +335,11 @@ CREATE TABLE channels (
     monitor_from  TIMESTAMPTZ NOT NULL DEFAULT now(),  -- D9b forward-only cutoff
     last_polled   TIMESTAMPTZ,
     last_poll_err TEXT,
-    added_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    added_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    poll_failing_since TIMESTAMPTZ,                    -- start of the current failed-poll run; NULL = last poll ok (#90)
+    poll_failures INTEGER     NOT NULL DEFAULT 0,      -- failed RSS polls in a row; 0 iff poll_failing_since IS NULL (#90)
+    CHECK (poll_failures >= 0),
+    CHECK ((poll_failures = 0) = (poll_failing_since IS NULL))
 );
 
 CREATE TABLE videos (

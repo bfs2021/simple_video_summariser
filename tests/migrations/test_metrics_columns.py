@@ -40,7 +40,7 @@ def _column(dsn: str, table: str, column: str) -> tuple[str, str] | None:
     return None if row is None else (str(row[0]), str(row[1]))
 
 
-def test_0006_is_chained_to_0005_and_is_the_head() -> None:
+def test_0006_is_chained_to_0005() -> None:
     config = Config(str(REPO_ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
     scripts = ScriptDirectory.from_config(config)
@@ -49,7 +49,6 @@ def test_0006_is_chained_to_0005_and_is_the_head() -> None:
 
     assert revision is not None
     assert revision.down_revision == "0005"
-    assert scripts.get_heads() == ["0006"]
 
 
 def test_0006_downgrade_drops_exactly_what_upgrade_adds() -> None:

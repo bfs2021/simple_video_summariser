@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 import psycopg
@@ -57,18 +58,20 @@ def register_channel(conn: psycopg.Connection[Any], channel_id: str) -> Register
             SET active = true, monitor_from = now()
             WHERE c.active = false
         RETURNING c.channel_id, c.title, c.active, c.monitor_from, c.last_polled,
-                  c.last_poll_err, c.added_at, (c.xmax = 0) AS created
+                  c.last_poll_err, c.added_at, c.poll_failing_since, c.poll_failures,
+                  (c.xmax = 0) AS created
         """,
         {"id": channel_id},
     ).fetchone()
     if row is not None:
-        return RegisteredChannel(channel=_channel(row[:7]), created=bool(row[7]))
+        return RegisteredChannel(channel=_channel(row[:9]), created=bool(row[9]))
     # Already active: the upsert changed nothing and returned nothing. Read it
     # in a new statement, whose snapshot also sees a row a concurrent
     # registration has just committed.
     existing = conn.execute(
         """
-        SELECT channel_id, title, active, monitor_from, last_polled, last_poll_err, added_at
+        SELECT channel_id, title, active, monitor_from, last_polled, last_poll_err, added_at,
+               poll_failing_since, poll_failures
         FROM channels WHERE channel_id = %(id)s
         """,
         {"id": channel_id},
@@ -90,7 +93,7 @@ def list_active_channels(conn: psycopg.Connection[Any]) -> list[Channel]:
     rows = conn.execute(
         """
         SELECT channel_id, title, active, monitor_from, last_polled,
-               last_poll_err, added_at
+               last_poll_err, added_at, poll_failing_since, poll_failures
         FROM channels
         WHERE active = true
         ORDER BY channel_id
@@ -99,23 +102,70 @@ def list_active_channels(conn: psycopg.Connection[Any]) -> list[Channel]:
     return [_channel(row) for row in rows]
 
 
-def record_poll(conn: psycopg.Connection[Any], channel_id: str, error: str | None = None) -> None:
-    """Set ``last_polled = now()`` and ``last_poll_err`` to ``error``.
+@dataclass(frozen=True, slots=True)
+class PollHealth:
+    """A channel's failure run after ``record_poll`` (see its docstring)."""
 
-    Passing no error clears whatever error the previous poll recorded.
+    poll_failing_since: datetime | None
+    poll_failures: int
+
+
+def record_poll(
+    conn: psycopg.Connection[Any], channel_id: str, error: str | None = None
+) -> PollHealth | None:
+    """Record one RSS poll outcome in a single ``UPDATE`` (#34, #90).
+
+    Always sets ``last_polled = now()`` and ``last_poll_err = error`` (``None``
+    clears the previous error). The failure-run columns mean:
+
+    - ``poll_failing_since``: when the current run of failed polls started
+      (the ``now()`` of its first failure); ``NULL`` when the last poll
+      succeeded or the channel was never polled.
+    - ``poll_failures``: how many polls in a row have failed; ``0`` iff
+      ``poll_failing_since`` is ``NULL``.
+
+    A failure (``error`` is not ``None``) on a healthy channel starts a run
+    (``poll_failing_since = now()``, ``poll_failures = 1``); on an already
+    failing channel it keeps the start and adds 1. A success resets both. Every
+    failure class counts the same. List failing feeds with::
+
+        SELECT channel_id, poll_failing_since, poll_failures, last_poll_err
+        FROM channels WHERE poll_failing_since IS NOT NULL
+        ORDER BY poll_failing_since
+
+    Returns the two columns as stored after this call, or ``None`` when
+    ``channel_id`` has no row.
     """
-    conn.execute(
+    row = conn.execute(
         """
         UPDATE channels
-        SET last_polled = now(), last_poll_err = %s
-        WHERE channel_id = %s
+        SET last_polled = now(),
+            last_poll_err = %(err)s,
+            poll_failing_since = CASE WHEN %(failed)s
+                THEN coalesce(poll_failing_since, now()) END,
+            poll_failures = CASE WHEN %(failed)s THEN poll_failures + 1 ELSE 0 END
+        WHERE channel_id = %(id)s
+        RETURNING poll_failing_since, poll_failures
         """,
-        (clean_text(error), channel_id),
-    )
+        {"err": clean_text(error), "failed": error is not None, "id": channel_id},
+    ).fetchone()
+    if row is None:
+        return None
+    return PollHealth(poll_failing_since=row[0], poll_failures=row[1])
 
 
 def _channel(row: tuple[Any, ...]) -> Channel:
-    channel_id, title, active, monitor_from, last_polled, last_poll_err, added_at = row
+    (
+        channel_id,
+        title,
+        active,
+        monitor_from,
+        last_polled,
+        last_poll_err,
+        added_at,
+        poll_failing_since,
+        poll_failures,
+    ) = row
     return Channel(
         channel_id=channel_id,
         title=title,
@@ -124,6 +174,8 @@ def _channel(row: tuple[Any, ...]) -> Channel:
         last_polled=last_polled,
         last_poll_err=last_poll_err,
         added_at=added_at,
+        poll_failing_since=poll_failing_since,
+        poll_failures=poll_failures,
     )
 
 

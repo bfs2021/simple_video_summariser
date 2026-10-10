@@ -114,6 +114,8 @@ class Channel:
     last_polled: datetime | None
     last_poll_err: str | None
     added_at: datetime
+    poll_failing_since: datetime | None  # start of the current failed-poll run (#90)
+    poll_failures: int  # failed polls in a row (#90)
 
 
 @dataclass(frozen=True, slots=True)

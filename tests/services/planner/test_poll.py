@@ -20,7 +20,7 @@ import pytest
 from common.errors import MAX_ERROR_BYTES
 from common.models import Channel, FeedEntry, FeedSource
 from common.queue import PostgresQueue
-from common.repo.channels import list_active_channels
+from common.repo.channels import PollHealth, list_active_channels
 from services.planner import poll
 from services.planner.poll import PollResult, poll_channels
 
@@ -56,6 +56,8 @@ def _channel(
         last_polled=last_polled,
         last_poll_err=None,
         added_at=CUTOFF,
+        poll_failing_since=None,
+        poll_failures=0,
     )
 
 
@@ -113,6 +115,7 @@ class FakeRepo:
         self.known = known or set()
         self.inserted: list[tuple[FeedEntry, str]] = []
         self.polls: list[tuple[str, str | None]] = []
+        self.health: dict[str, PollHealth] = {}
 
     def list_active_channels(self, conn: Any) -> list[Channel]:
         return list(self.channels)
@@ -124,8 +127,19 @@ class FakeRepo:
         self.inserted.append((entry, origin))
         return True
 
-    def record_poll(self, conn: Any, channel_id: str, error: str | None = None) -> None:
+    def record_poll(
+        self, conn: Any, channel_id: str, error: str | None = None
+    ) -> PollHealth | None:
+        """Same rules as the real function (#90), with a fixed fake clock."""
         self.polls.append((channel_id, error))
+        before = self.health.get(channel_id, PollHealth(None, 0))
+        if error is None:
+            after = PollHealth(None, 0)
+        else:
+            since = before.poll_failing_since or CUTOFF + timedelta(minutes=len(self.polls))
+            after = PollHealth(since, before.poll_failures + 1)
+        self.health[channel_id] = after
+        return after
 
 
 @pytest.fixture
@@ -323,6 +337,45 @@ def test_fetch_failure_is_recorded_and_the_other_channels_are_still_polled(
     failure_logs = [r for r in caplog.records if r.levelno == logging.WARNING and r.exc_info]
     assert failure_logs
     assert getattr(failure_logs[0], "channel_id", None) == "UCa"
+
+
+def _failed_logs(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.getMessage() == "planner.poll.channel_failed"]
+
+
+def test_channel_failing_over_three_polls_then_recovering_logs_each_failure_run(
+    make_repo: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    repo = make_repo([_channel()])
+    caplog.set_level(logging.WARNING)
+    failing = FakeFeed({"UCa": ValueError("boom")})
+
+    for _ in range(3):
+        _run(failing)
+
+    logs = _failed_logs(caplog)
+    assert [r.__dict__["poll_failures"] for r in logs] == [1, 2, 3]
+    starts = {r.__dict__["poll_failing_since"] for r in logs}
+    assert starts == {(CUTOFF + timedelta(minutes=1)).isoformat()}  # ISO 8601 UTC, unchanged
+
+    _run(FakeFeed({"UCa": []}))
+
+    assert repo.health["UCa"] == PollHealth(None, 0)
+    assert len(_failed_logs(caplog)) == 3  # success logs no failure line
+
+
+def test_a_404_and_a_timeout_count_the_same(
+    make_repo: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    from adapters.youtube.feed import FeedNotFoundError
+
+    repo = make_repo([_channel("UCa"), _channel("UCb")])
+    caplog.set_level(logging.WARNING)
+
+    _run(FakeFeed({"UCa": FeedNotFoundError("404"), "UCb": TimeoutError("timed out")}))
+
+    assert repo.health["UCa"].poll_failures == repo.health["UCb"].poll_failures == 1
+    assert [r.__dict__["poll_failures"] for r in _failed_logs(caplog)] == [1, 1]
 
 
 def test_recorded_error_is_capped_at_max_error_bytes(make_repo: Any) -> None:
@@ -676,3 +729,70 @@ def test_failed_fetch_stores_the_error_and_a_later_success_clears_it(
     poll_channels(conn, FakeFeed({"UCa": []}), queue)
     conn.commit()
     assert conn.execute("SELECT last_poll_err FROM channels").fetchone() == (None,)
+
+
+def _health(conn: psycopg.Connection[Any]) -> tuple[Any, ...]:
+    conn.commit()
+    row = conn.execute(
+        "SELECT poll_failing_since, poll_failures, last_polled, last_poll_err, now() FROM channels"
+    ).fetchone()
+    assert row is not None
+    return tuple(row)
+
+
+@pytest.mark.integration
+def test_channel_failing_three_polls_keeps_its_start_then_recovers(
+    conn: psycopg.Connection[Any], queue: PostgresQueue
+) -> None:
+    _add_channel(conn)
+
+    poll_channels(conn, FakeFeed({"UCa": ValueError("bad feed")}), queue)
+    since, failures, last_polled, _, db_now = _health(conn)
+    assert (failures, since) == (1, last_polled)  # the same now() as last_polled
+    assert since <= db_now
+
+    for expected in (2, 3):
+        poll_channels(conn, FakeFeed({"UCa": ValueError("bad feed")}), queue)
+        new_since, failures, last_polled, err, db_now = _health(conn)
+        assert failures == expected
+        assert new_since == since  # run start unchanged
+        assert since < last_polled <= db_now
+        assert err == "ValueError: bad feed"
+
+    poll_channels(conn, FakeFeed({"UCa": []}), queue)
+    assert _health(conn)[:2] == (None, 0)
+
+
+@pytest.mark.integration
+def test_a_404_and_a_timeout_count_the_same_in_the_database(
+    conn: psycopg.Connection[Any], queue: PostgresQueue
+) -> None:
+    from adapters.youtube.feed import FeedNotFoundError
+
+    _add_channel(conn, "UCa")
+    _add_channel(conn, "UCb")
+
+    poll_channels(
+        conn, FakeFeed({"UCa": FeedNotFoundError("404"), "UCb": TimeoutError("slow")}), queue
+    )
+
+    conn.commit()
+    rows = conn.execute(
+        "SELECT channel_id, poll_failures, poll_failing_since IS NOT NULL, last_poll_err"
+        " FROM channels ORDER BY channel_id"
+    ).fetchall()
+    assert rows == [
+        ("UCa", 1, True, "FeedNotFoundError: 404"),
+        ("UCb", 1, True, "TimeoutError: slow"),
+    ]
+
+
+@pytest.mark.integration
+def test_inactive_channel_columns_do_not_change(
+    conn: psycopg.Connection[Any], queue: PostgresQueue
+) -> None:
+    _add_channel(conn, "UCoff", active=False)
+
+    poll_channels(conn, FakeFeed({"UCoff": ValueError("x")}), queue)
+
+    assert _health(conn)[:2] == (None, 0)

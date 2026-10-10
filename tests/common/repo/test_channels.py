@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 import psycopg
 import pytest
 
 from common.repo.channels import (
+    PollHealth,
     add_channel,
     channel_exists,
     get_channel_title,
@@ -197,3 +199,95 @@ def test_get_channel_title_is_none_for_unknown_empty_or_untitled(
     assert get_channel_title(conn, "UC123") is None
     assert get_channel_title(conn, "UCunknown") is None
     assert get_channel_title(conn, "") is None
+
+
+# -- failure run (#90) ----------------------------------------------------------
+
+
+def _run_columns(conn: psycopg.Connection) -> tuple[Any, ...]:
+    conn.commit()  # a new transaction, so the next record_poll has a later now()
+    row = conn.execute(
+        "SELECT poll_failing_since, poll_failures, last_polled, last_poll_err, now()"
+        " FROM channels WHERE channel_id = 'UC1'"
+    ).fetchone()
+    assert row is not None
+    return tuple(row)
+
+
+def test_first_failure_starts_a_run_at_the_same_now_as_last_polled(
+    conn: psycopg.Connection,
+) -> None:
+    add_channel(conn, "UC1", "One")
+
+    health = record_poll(conn, "UC1", error="A: x")
+
+    since, failures, last_polled, err, db_now = _run_columns(conn)
+    assert (failures, err) == (1, "A: x")
+    assert since == last_polled
+    assert since <= db_now
+    assert health == PollHealth(since, 1)
+
+
+def test_second_and_third_failure_keep_the_start_and_count_up(conn: psycopg.Connection) -> None:
+    add_channel(conn, "UC1", "One")
+    record_poll(conn, "UC1", error="A: first")
+    start = _run_columns(conn)[0]
+
+    for count, err in ((2, "B: second"), (3, "C: third")):
+        health = record_poll(conn, "UC1", error=err)
+        since, failures, last_polled, stored_err, db_now = _run_columns(conn)
+        assert since == start
+        assert failures == count
+        assert stored_err == err  # replaced by the newest error
+        assert start < last_polled <= db_now
+        assert health == PollHealth(start, count)
+
+
+def test_success_after_failures_resets_everything(conn: psycopg.Connection) -> None:
+    add_channel(conn, "UC1", "One")
+    record_poll(conn, "UC1", error="A: x")
+    record_poll(conn, "UC1", error="A: x")
+
+    health = record_poll(conn, "UC1")
+
+    assert _run_columns(conn)[:2] == (None, 0)
+    assert conn.execute("SELECT last_poll_err FROM channels").fetchone() == (None,)
+    assert health == PollHealth(None, 0)
+
+
+def test_failure_after_a_success_starts_a_new_run(conn: psycopg.Connection) -> None:
+    add_channel(conn, "UC1", "One")
+    record_poll(conn, "UC1", error="A: x")
+    old_start = _run_columns(conn)[0]
+    record_poll(conn, "UC1")
+    conn.commit()
+
+    record_poll(conn, "UC1", error="A: again")
+
+    since, failures, last_polled, _, _ = _run_columns(conn)
+    assert failures == 1
+    assert since > old_start
+    assert since == last_polled
+
+
+def test_success_on_a_never_failed_channel_stays_null_and_zero(conn: psycopg.Connection) -> None:
+    add_channel(conn, "UC1", "One")
+
+    record_poll(conn, "UC1")
+
+    assert _run_columns(conn)[:2] == (None, 0)
+
+
+def test_record_poll_for_an_unknown_channel_returns_none(conn: psycopg.Connection) -> None:
+    assert record_poll(conn, "UCnope", error="x") is None
+
+
+def test_list_active_channels_fills_the_failure_run(conn: psycopg.Connection) -> None:
+    add_channel(conn, "UC1", "One")
+    record_poll(conn, "UC1", error="A: x")
+    record_poll(conn, "UC1", error="A: x")
+
+    [channel] = list_active_channels(conn)
+
+    assert channel.poll_failures == 2
+    assert channel.poll_failing_since is not None
