@@ -31,7 +31,9 @@ Per-layer approach is in architecture.md §13 — follow it. These rules apply o
 - No network: recorded yt-dlp fixtures, `FakeSummarizer`; never a real API key.
 - Needs Postgres → `@pytest.mark.integration`; everything else runs under
   `pytest -m "not integration"`.
-- Deterministic: no sleep, inject the clock, no test-order dependence.
+- Deterministic: no sleep, inject the clock, no test-order
+  dependence. The suite runs shuffled; replay a failing order with
+  `pytest --shuffle-seed=<N>` using the seed printed by the run.
 - Test via public interfaces; prefer fakes over mocking internals.
 - `tests/` mirrors the package layout; name tests after the behaviour.
 

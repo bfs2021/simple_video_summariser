@@ -20,6 +20,10 @@ import pytest
 from psycopg import sql
 from testcontainers.community.postgres import PostgresContainer
 
+# ``pytester`` is a built-in pytest plugin (no dependency); the shuffle plugin
+# is registered here so every run is shuffled (issue #72).
+pytest_plugins = ["pytester", "tests.shuffle_plugin"]
+
 # Same image tag as compose.yml (architecture.md 11.4, 16.1: >=18.6).
 _POSTGRES_IMAGE = "postgres:18-alpine"
 
