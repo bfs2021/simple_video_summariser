@@ -10,6 +10,7 @@ Desktop stopped.
 
 from __future__ import annotations
 
+import os
 import time
 import uuid
 from collections.abc import Callable, Iterator
@@ -17,8 +18,10 @@ from urllib.parse import urlsplit, urlunsplit
 
 import psycopg
 import pytest
+from docker.errors import DockerException  # type: ignore[import-untyped]
 from psycopg import sql
 from testcontainers.community.postgres import PostgresContainer
+from testcontainers.core.docker_client import DockerClient
 
 # ``pytester`` is a built-in pytest plugin (no dependency); the shuffle plugin
 # is registered here so every run is shuffled (issue #72).
@@ -26,6 +29,26 @@ pytest_plugins = ["pytester", "tests.shuffle_plugin"]
 
 # Same image tag as compose.yml (architecture.md 11.4, 16.1: >=18.6).
 _POSTGRES_IMAGE = "postgres:18-alpine"
+_DEFAULT_DOCKER_ENDPOINT = "unix:///var/run/docker.sock"
+
+
+def _require_docker_daemon[T](factory: Callable[[], T], *, docker_host: str | None) -> T:
+    """Build the Docker client, or fail setup with one actionable line (#77).
+
+    Only a ``DockerException`` (what ``docker.from_env()`` raises when it can't
+    reach the daemon) is rewritten; any other error propagates unchanged.
+    """
+    try:
+        return factory()
+    except DockerException as exc:
+        reason = f"{type(exc).__name__}: {(str(exc).splitlines() or [''])[0]}"
+    # Outside the ``except`` so pytest doesn't print the chained docker traceback.
+    pytest.fail(
+        f"Docker daemon unreachable at {docker_host or _DEFAULT_DOCKER_ENDPOINT} ({reason}): "
+        "start Docker Desktop and enable WSL integration, "
+        'or run pytest -m "not integration"',
+        pytrace=False,
+    )
 
 
 def _probe_postgres(dsn: str, connect_timeout_sec: int) -> None:
@@ -82,6 +105,11 @@ def postgres_container() -> Iterator[PostgresContainer]:
     port, up to 60 s, then fails explicitly naming the endpoint. One run of
     the suite verifies it; no repeat loops (testing-guidelines.md).
     """
+    client = _require_docker_daemon(
+        DockerClient,
+        docker_host=os.environ.get("DOCKER_HOST"),  # noqa: TID251
+    )
+    client.client.close()
     with PostgresContainer(_POSTGRES_IMAGE, driver=None) as container:
         _wait_for_postgres(container.get_connection_url(), container.get_container_id())
         yield container
