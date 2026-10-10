@@ -17,7 +17,7 @@ from services.planner.scheduler import Scheduler, Task
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DB_URL = "postgresql://u:p@h/db"
-TASK_NAMES = ["reap", "audio_retention", "reanalysis_sweep", "poll_channels"]
+TASK_NAMES = ["reap", "audio_retention", "reanalysis_sweep", "poll_channels", "dead_letter_alerts"]
 
 
 def _settings(**values: Any) -> Settings:
@@ -45,6 +45,7 @@ def test_reap_uses_its_own_interval_and_the_others_use_the_poll_interval() -> No
         "audio_retention": 99,
         "reanalysis_sweep": 99,
         "poll_channels": 99,
+        "dead_letter_alerts": 7,
     }
 
 
@@ -56,7 +57,22 @@ def test_default_intervals_are_one_minute_and_one_hour() -> None:
         "audio_retention": 3600,
         "reanalysis_sweep": 3600,
         "poll_channels": 3600,
+        "dead_letter_alerts": 60,
     }
+
+
+def test_alert_task_without_a_channel_returns_without_opening_a_connection() -> None:
+    tasks = {t.name: t for t in planner_main.build_registry(_settings(), _no_connect)}
+
+    assert tasks["dead_letter_alerts"].fn() == 0  # _no_connect would raise
+
+
+def test_alert_task_with_a_channel_opens_a_connection() -> None:
+    settings = _settings(ALERT_WEBHOOK_URL="https://hooks.example.test/s3cr3t")
+    tasks = {t.name: t for t in planner_main.build_registry(settings, _no_connect)}
+
+    with pytest.raises(AssertionError, match="must not open a connection"):
+        tasks["dead_letter_alerts"].fn()
 
 
 def test_every_task_has_one_fixed_distinct_integer_lock_key() -> None:

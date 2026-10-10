@@ -500,7 +500,9 @@ CREATE TABLE jobs (
     locked_at    TIMESTAMPTZ,
     heartbeat_at TIMESTAMPTZ,        -- C2
     finished_at  TIMESTAMPTZ,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    started_at   TIMESTAMPTZ,        -- latest claim (#60)
+    alerted_at   TIMESTAMPTZ         -- dead-letter announced to the operator (#67)
 );
 
 CREATE UNIQUE INDEX jobs_active_uniq ON jobs (video_id, kind, dedupe_key)
@@ -843,6 +845,9 @@ than reading `os.environ` directly.
 | `MAX_ATTEMPTS_TRANSCRIBE` | `2` | transcriber |
 | `INGEST_MAX_RUNTIME_SEC` / `ANALYZE_MAX_RUNTIME_SEC` / `TRANSCRIBE_MAX_RTF` | `600` / `3600` / `3.0` | workers (§11.5) |
 | `TRANSCRIBER_CPUS` | `3.0` | compose |
+| `ALERT_WEBHOOK_URL` | unset (no channel) | planner: secret; `TOOL_FAILURE` / `RESOURCE` dead-letters are POSTed here (#67) |
+| `ALERT_WEBHOOK_FORMAT` | `json` | planner: `json` (`{"text": ...}`, Slack-compatible) or `text` (plain body plus `Title` header, ntfy) |
+| `ALERT_MIN_INTERVAL_SEC` | `3600` | planner: at most one alert per error class in this window; later dead-letters are counted into the next one |
 | `LOG_LEVEL` / `LOG_FORMAT` | `INFO` / `json` | all |
 
 ---
@@ -1879,6 +1884,9 @@ requirements:**
 - The `TOOL_FAILURE` class in §8.4 should trigger a **visible alert**, not a
   silent dead-letter. A 403 storm means "go update yt-dlp", and that signal is
   useless if it only lands in a database column.
+  Implemented by the planner's `dead_letter_alerts` task (#67): one webhook
+  message per class (`TOOL_FAILURE`, `RESOURCE`) with a count, at most one per
+  `ALERT_MIN_INTERVAL_SEC`; `jobs.alerted_at` records what was announced.
 - Support an optional **cookie file** mount on the transcriber for bot-check
   challenges. Design the config now even if unused.
 

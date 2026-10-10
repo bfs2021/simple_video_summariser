@@ -158,6 +158,7 @@ def test_every_architecture_variable_is_a_field_except_transcriber_cpus() -> Non
         "LOG_FORMAT", "AUDIO_DIR", "YTDLP_COOKIE_FILE",
         "WORKER_SHUTDOWN_GRACE_SEC", "REAP_INTERVAL_SEC",
         "INGEST_MAX_RUNTIME_SEC", "ANALYZE_MAX_RUNTIME_SEC", "TRANSCRIBE_MAX_RTF",
+        "ALERT_WEBHOOK_URL", "ALERT_WEBHOOK_FORMAT", "ALERT_MIN_INTERVAL_SEC",
     }  # fmt: skip
 
     assert set(Settings.model_fields) == expected

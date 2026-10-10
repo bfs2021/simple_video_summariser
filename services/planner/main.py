@@ -1,6 +1,6 @@
 """Planner service entrypoint (issue #38; architecture.md §1, §11.1).
 
-``python -m services.planner.main`` runs the four periodic maintenance tasks
+``python -m services.planner.main`` runs the five periodic maintenance tasks
 in one long-lived process, each on its own interval:
 
 ============================  =====================  =============================
@@ -10,6 +10,9 @@ task                          interval               what it does
 ``audio_retention``           ``POLL_INTERVAL_SEC``  expire / cap / clean audio
 ``reanalysis_sweep``          ``POLL_INTERVAL_SEC``  enqueue analyses for a new prompt
 ``poll_channels``             ``POLL_INTERVAL_SEC``  discover new videos from RSS
+``dead_letter_alerts``        ``REAP_INTERVAL_SEC``  alert on TOOL_FAILURE / RESOURCE
+                                                     dead-letters (#67); a no-op
+                                                     without ``ALERT_WEBHOOK_URL``
 ============================  =====================  =============================
 
 Every task runs once at startup, in that order (``PROMPT_VERSION`` changes
@@ -46,11 +49,13 @@ import psycopg
 import structlog
 from pydantic import ValidationError
 
+from adapters.alerts.webhook import WebhookAlerter
 from adapters.youtube.feed import YouTubeFeed
 from common.config import Settings, get_settings
 from common.db import connect
 from common.logging import configure_logging
 from common.queue import PostgresQueue
+from services.planner.alerts import send_dead_letter_alerts
 from services.planner.poll import poll_channels
 from services.planner.reaper import reap_stale_jobs
 from services.planner.retention import enforce_audio_retention, max_bytes_from_gb
@@ -68,6 +73,7 @@ LOCK_KEYS: dict[str, tuple[int, int]] = {
     "audio_retention": (LOCK_NAMESPACE, 2),
     "reanalysis_sweep": (LOCK_NAMESPACE, 3),
     "poll_channels": (LOCK_NAMESPACE, 4),
+    "dead_letter_alerts": (LOCK_NAMESPACE, 5),
 }
 
 Connect = Callable[[], psycopg.Connection[Any]]
@@ -152,11 +158,31 @@ def build_registry(settings: Settings, connect: Connect) -> list[Task]:
         result = poll_channels(conn, YouTubeFeed(), PostgresQueue(conn, settings=settings))
         return result.jobs_enqueued
 
+    webhook = settings.ALERT_WEBHOOK_URL
+    sink = (
+        WebhookAlerter(webhook.get_secret_value(), fmt=settings.ALERT_WEBHOOK_FORMAT)
+        if webhook is not None
+        else None
+    )
+
+    def dead_letter_alerts(conn: psycopg.Connection[Any]) -> int:
+        return send_dead_letter_alerts(
+            conn, sink, min_interval_sec=settings.ALERT_MIN_INTERVAL_SEC
+        )
+
+    def no_channel() -> int:
+        return 0  # no alert channel: do not even open a connection
+
     return [
         Task("reap", settings.REAP_INTERVAL_SEC, with_conn(reap)),
         Task("audio_retention", settings.POLL_INTERVAL_SEC, with_conn(audio_retention)),
         Task("reanalysis_sweep", settings.POLL_INTERVAL_SEC, with_conn(reanalysis_sweep)),
         Task("poll_channels", settings.POLL_INTERVAL_SEC, with_conn(poll)),
+        Task(
+            "dead_letter_alerts",
+            settings.REAP_INTERVAL_SEC,
+            with_conn(dead_letter_alerts) if sink is not None else no_channel,
+        ),
     ]
 
 

@@ -146,6 +146,8 @@ class Job:
     #: Latest claim (#60); ``NULL`` for rows from before the column existed.
     #: No transition clears it.
     started_at: datetime | None = None
+    #: When the planner announced this dead-letter to the operator (#67).
+    alerted_at: datetime | None = None
 
 
 def _job_from_row(row: dict[str, Any]) -> Job:

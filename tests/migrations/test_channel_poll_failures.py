@@ -94,7 +94,7 @@ def test_upgrade_downgrade_upgrade_succeeds_with_channel_rows(
         conn.execute("INSERT INTO channels (channel_id) VALUES ('UC1')")
         conn.commit()
 
-    command.downgrade(config, "-1")
+    command.downgrade(config, "0006")
     assert not _has_column(postgres_dsn, "poll_failing_since")
     assert not _has_column(postgres_dsn, "poll_failures")
     command.upgrade(config, "head")

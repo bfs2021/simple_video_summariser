@@ -128,6 +128,13 @@ class Settings(BaseSettings):
     ANALYZE_MAX_RUNTIME_SEC: PositiveInt = 3600
     TRANSCRIBE_MAX_RTF: PositiveFloat = 3.0
 
+    # Operator alerts for TOOL_FAILURE / RESOURCE dead-letters (#67). The URL
+    # is a secret (it usually embeds a token); unset means no alert channel.
+    ALERT_WEBHOOK_URL: SecretStr | None = None
+    ALERT_WEBHOOK_FORMAT: Literal["json", "text"] = "json"
+    # At most one alert per error class in this window; the rest are counted.
+    ALERT_MIN_INTERVAL_SEC: PositiveInt = 3600
+
     LOG_LEVEL: LogLevel = "INFO"
     LOG_FORMAT: Literal["json", "console"] = "json"
 
@@ -150,7 +157,9 @@ class Settings(BaseSettings):
             raise ValueError("must not be empty")
         return value
 
-    @field_validator("ANTHROPIC_API_KEY", "YTDLP_COOKIE_FILE", mode="before")
+    @field_validator(
+        "ANTHROPIC_API_KEY", "YTDLP_COOKIE_FILE", "ALERT_WEBHOOK_URL", mode="before"
+    )
     @classmethod
     def _empty_means_unset(cls, value: Any) -> Any:
         # Compose passes `${VAR:-}` through as an empty string.
@@ -166,6 +175,20 @@ class Settings(BaseSettings):
                 f"OLLAMA_HOST must be an http:// or https:// URL with a host "
                 f"and no query string ({problem})"
             )
+        return value
+
+    @field_validator("ALERT_WEBHOOK_URL")
+    @classmethod
+    def _alert_webhook_is_http_url(cls, value: SecretStr | None) -> SecretStr | None:
+        # The message must never quote the value: it is a secret.
+        if value is not None:
+            try:
+                parts = urlsplit(value.get_secret_value())
+                usable = parts.scheme in ("http", "https") and bool(parts.hostname)
+            except ValueError:
+                usable = False
+            if not usable:
+                raise ValueError("ALERT_WEBHOOK_URL must be an http:// or https:// URL with a host")
         return value
 
     @field_validator("LOG_LEVEL", mode="before")
