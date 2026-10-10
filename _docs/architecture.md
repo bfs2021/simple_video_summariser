@@ -1881,6 +1881,10 @@ requirements:**
 - Pin the yt-dlp version in `requirements.backend.txt`, but run a **scheduled
   update check** — a broken extractor is usually fixed upstream within days, so
   staleness is a bigger risk than churn here.
+  Implemented by `.github/workflows/ytdlp-update-check.yml` (#68): daily, runs
+  `scripts/ytdlp_update_check.py`, which goes red with an `::error` naming the
+  pinned and latest versions when the pin is behind PyPI, stays silent when it
+  is current, and ends green on a PyPI outage. It never edits the pin.
 - The `TOOL_FAILURE` class in §8.4 should trigger a **visible alert**, not a
   silent dead-letter. A 403 storm means "go update yt-dlp", and that signal is
   useless if it only lands in a database column.
