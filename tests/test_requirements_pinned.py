@@ -51,6 +51,16 @@ def find_unpinned(filename: str, text: str) -> list[str]:
         "a==1\r\nb==2\r\n",
         "a==1.0.post1",
         "a==2!1.0+local.1",
+        # Extras: several, with a comma; spaces after it are tolerated.
+        "pkg[a,b]==1.0",
+        "pkg[a, b]==1.0",
+        # Names are case-insensitive for pip, so an upper-case name is fine.
+        "PyYAML==6.0",
+        "Flask-Cors==4.0.0",
+        # Whitespace around the operator.
+        "a == 1.0",
+        "a  ==  1.0",
+        "a\t==\t1.0",
     ],
 )
 def test_accepts_exact_pins_comments_and_blank_lines(text: str) -> None:
@@ -87,6 +97,32 @@ def test_accepts_exact_pins_comments_and_blank_lines(text: str) -> None:
         "==1.0",
         # `#` starts a comment only after whitespace (pip), so this is a bad version.
         "name==1.0#not-a-comment",
+        # Names must start and end with a letter or digit.
+        "a-==1.0",
+        "a.==1.0",
+        "a_==1.0",
+        "-a==1.0",
+        # Extras are a closed character set, never free text.
+        "pkg[]==1.0",
+        "pkg[a;b]==1.0",
+        "pkg[a$]==1.0",
+        "pkg[a]]==1.0",
+        "pkg[a]b]==1.0",
+        "pkg[a==1.0",
+        # A version is one token: no space inside it, no second specifier.
+        "a==1 b",
+        "a==1. 0",
+        "a==1.0 b==2.0",
+        # Hashes, line continuations and markers after an otherwise exact pin.
+        "name==1.0 --hash=sha256:abc",
+        "name==1.0 \\",
+        "name==1.0; python_version < '3.14'",
+        "name==1.0 ; sys_platform == 'linux'",
+        # Direct references and VCS URLs.
+        "name @ git+https://example.com/x.git@v1",
+        "git+https://example.com/x.git#egg=x",
+        "./local/path",
+        "file:///tmp/x.whl",
     ],
 )
 def test_rejects_anything_that_is_not_an_exact_pin(line: str) -> None:
@@ -97,9 +133,22 @@ def test_rejects_anything_that_is_not_an_exact_pin(line: str) -> None:
     assert line.strip() in problems[0]
 
 
+def test_a_bom_prefixed_line_is_rejected_not_silently_accepted() -> None:
+    # pip tolerates a BOM; this checker fails loudly instead, so a file saved
+    # with one is noticed (and fixed) rather than read as a different name.
+    problems = find_unpinned("req.txt", "\ufeffname==1.0\nb==2\n")
+    assert [p.split(": ")[0] for p in problems] == ["req.txt:1"]
+
+
 def test_reports_every_offending_line() -> None:
     problems = find_unpinned("req.txt", "a\nb==1\nc>=2\n")
     assert [p.split(": ")[0] for p in problems] == ["req.txt:1", "req.txt:3"]
+
+
+def test_every_requirements_file_in_the_repo_is_checked() -> None:
+    # A new requirements*.txt (or a dropped entry) must not leave a file unchecked.
+    on_disk = {p.name for p in ROOT.glob("requirements*.txt")}
+    assert on_disk == set(REQUIREMENT_FILES)
 
 
 @pytest.mark.parametrize("filename", REQUIREMENT_FILES)

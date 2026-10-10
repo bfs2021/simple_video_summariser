@@ -47,7 +47,8 @@ area broke. Every step is the same command as in
 [AGENTS.md](AGENTS.md) -> Commands, so a red step is reproduced locally by
 running that command in WSL (use `bash -lc` for the `npm` ones).
 
-- `python`: `ruff check .`, `mypy .`, `pytest -m "not integration"`, then
+- `python`: installs `ffmpeg` (AGENTS.md -> Setup; the audio tests run the real
+  binaries), then `ruff check .`, `mypy .`, `pytest -m "not integration"`, then
   `pytest -m "integration and not image"` (testcontainers starts Postgres on
   the runner's Docker). The fast step includes the OpenAPI drift test and
   `tests/test_requirements_pinned.py`, which fails on any requirement in
