@@ -1520,12 +1520,12 @@ subtitles-only until Phase 2.
 
 | # | Item | Blocks | Resolution path |
 |---|---|---|---|
-| O1 | Real channel list + subtitle coverage | Phase 1 scope | Phase 0 measurement |
-| O2 | Transcription engine: whisper vs parakeet | D3 validity, D4 diarization premise, audio sizing | Phase 0 bake-off (16.6) |
-| O3 | `AUDIO_TTL_DAYS` 30 vs 90 | Disk provisioning | Follows from O1/O2 |
+| O1 | Real channel list + subtitle coverage | Phase 1 scope | **Measured 2026-09-27 (task #2); the Phase 1 call is pending the repo owner.** 9 owner-chosen channels, 15 RSS entries each: manual subtitles 6 videos (1.95 h), auto-only 64 (48.72 h), none 0, error 2 (transient), 63 Shorts excluded. By default speech-to-text load is ~0 h; with `PREFER_WHISPER=1` it is ~48.7 h per window. Evidence: `_docs/progress.md`, "Phase 0 findings"; script `scripts/phase0/subtitle_coverage.py`. Whether the Whisper path is deferred from Phase 1 (section 14) is the owner's decision and is not yet recorded here |
+| O2 | Transcription engine: whisper vs parakeet | D3 validity, D4 diarization premise, audio sizing | **Open.** Needs the deploy-host bake-off (>=3 real clips, >=1 noisy or accented) from #3, on a host prepared by #78. The containerised harness exists (#76), but numbers from the dev machine do not count and no real figures exist yet. Until then D3 stands, and the D4 revisit (only if Parakeet wins) is not triggered |
+| O3 | `AUDIO_TTL_DAYS` 30 vs 90 | Disk provisioning | **Open; follows from O1 and O2.** Disk need = audio hours ingested per day x TTL days x MB per audio hour (16 kHz mono opus, 7.2/D6b), bounded by `AUDIO_MAX_GB` (default 20). The hours-per-day input depends on the O1 call (~0 h by default, ~48.7 h per 15-entry window with `PREFER_WHISPER=1`); the MB-per-hour figure has not been measured. The default stays 30 until the owner decides |
 | O4 | Local vs cloud summarizer (D5) | Cost model | Phase 5, via Compare view |
 | O5 | Embedding model + dimension (D9c) | v2 schema | Deferred; chunk table already prepared |
-| O7 | `ctranslate2` wheel availability for Python 3.14 | transcriber image build | **Resolved 2026-09-27 (task #4): wheels exist for the whole tree; `faster-whisper` 1.2.1 installs and transcribes on `python:3.14-slim`.** The transcriber can derive from the 3.14 backend image; the 3.13 split is not needed. Details in 16.2 |
+| O7 | `ctranslate2` wheel availability for Python 3.14 | transcriber image build | **Resolved 2026-09-27 (task #4): wheels exist for the whole tree (ctranslate2 4.8.2, av 18.1.0, tokenizers 0.23.2, onnxruntime 1.30.0); `faster-whisper` 1.2.1 installs and transcribes on `python:3.14-slim`.** The transcriber can derive from the 3.14 backend image; the 3.13 split is not needed, which is what #56 implements (`FROM ytdigest-backend:latest`, wheels only). Details in 16.2; also `_docs/progress.md`, "Phase 0 findings" |
 | O6 | Whether `speaker_coercions_total` justifies diarization (D4) | v2 scope | Observe during Phase 5 |
 
 ---
