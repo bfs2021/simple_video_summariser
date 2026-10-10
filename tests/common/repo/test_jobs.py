@@ -8,7 +8,9 @@ import psycopg
 import pytest
 
 from common.repo.jobs import (
+    ActiveJob,
     JobRow,
+    active_job,
     get_job,
     latest_job,
     latest_job_state,
@@ -357,3 +359,73 @@ def test_get_job_returns_the_same_shape_as_list_jobs(conn: psycopg.Connection) -
     assert row is not None
     assert row.id == job_id
     assert row.video_title == "t"
+
+
+# --- active_job (issue #101) ----------------------------------------------------
+
+
+def _add_keyed(
+    conn: psycopg.Connection,
+    state: str,
+    *,
+    key: str = "v1:fake",
+    kind: str = "analyze",
+    video_id: str = VID,
+    payload: str = "{}",
+    priority: int = 0,
+) -> int:
+    row = conn.execute(
+        "INSERT INTO jobs (video_id, kind, dedupe_key, state, payload, priority)"
+        " VALUES (%s, %s, %s, %s, %s::jsonb, %s) RETURNING id",
+        (video_id, kind, key, state, payload, priority),
+    ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+@pytest.mark.parametrize("state", ["pending", "running"])
+def test_active_job_returns_the_pending_or_running_job_at_the_key(
+    conn: psycopg.Connection, state: str
+) -> None:
+    job_id = _add_keyed(conn, state, priority=-5)
+
+    assert active_job(conn, VID, "analyze", "v1:fake") == ActiveJob(
+        id=job_id, state=state, priority=-5, forced=False
+    )
+
+
+@pytest.mark.parametrize("state", ["done", "dead"])
+def test_active_job_ignores_finished_jobs(conn: psycopg.Connection, state: str) -> None:
+    _add_keyed(conn, state)
+
+    assert active_job(conn, VID, "analyze", "v1:fake") is None
+
+
+def test_active_job_ignores_other_keys_kinds_and_videos(conn: psycopg.Connection) -> None:
+    _add_keyed(conn, "pending", key="v2:fake")
+    _add_keyed(conn, "pending", kind="transcribe")
+    _add_keyed(conn, "pending", video_id="zzzzzzzzzzz")
+
+    assert active_job(conn, VID, "analyze", "v1:fake") is None
+
+
+@pytest.mark.parametrize(
+    ("payload", "forced"),
+    [
+        ('{"force": true}', True),
+        ('{"force": false}', False),
+        ('{"force": "true"}', False),
+        ('{"force": 1}', False),
+        ('{"other": 1}', False),
+        ('{"force": true, "other": 1}', True),
+    ],
+)
+def test_active_job_reports_forced_only_for_a_json_true(
+    conn: psycopg.Connection, payload: str, forced: bool
+) -> None:
+    _add_keyed(conn, "pending", payload=payload)
+
+    found = active_job(conn, VID, "analyze", "v1:fake")
+
+    assert found is not None
+    assert found.forced is forced

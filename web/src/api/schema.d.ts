@@ -200,6 +200,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/videos/{video_id}/reanalyze": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Post Video Reanalyze
+         * @description Force a fresh analysis of a stored transcript at the current version (#101).
+         *
+         *     Only enqueues: the analyzer (#33) does the work. The request has no body
+         *     and nothing in it changes the payload, priority or key.
+         */
+        post: operations["post_video_reanalyze_videos__video_id__reanalyze_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/videos/{video_id}/render": {
         parameters: {
             query?: never;
@@ -1025,6 +1048,58 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
+            };
+        };
+    };
+    post_video_reanalyze_videos__video_id__reanalyze_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                video_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description An active forced job was reused */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VideoSubmission"];
+                };
+            };
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VideoSubmission"];
+                };
+            };
+            /** @description No such video */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No transcript yet, or an analysis is already running */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Malformed video ID */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

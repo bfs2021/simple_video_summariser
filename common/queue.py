@@ -497,6 +497,28 @@ class PostgresQueue:
             )
             return cur.rowcount > 0
 
+    def force_pending(self, job_id: int, priority: int) -> bool:
+        """Make a ``pending`` job a forced one at no less than ``priority`` (#101).
+
+        Merges ``{"force": true}`` into its payload (other keys stay) and sets
+        ``priority = GREATEST(priority, <priority>)``, so a job above it is
+        never lowered. One ``UPDATE`` whose own ``WHERE`` requires
+        ``state = 'pending'``: a job claimed or finished in the meantime
+        matches no row, and the answer is ``False`` with nothing written.
+        PostgresQueue only, not on the ``JobQueue`` Protocol.
+        """
+        with self._conn.transaction(), self._conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE jobs
+                SET payload = payload || '{"force": true}'::jsonb,
+                    priority = GREATEST(priority, %(priority)s)
+                WHERE id = %(id)s AND state = 'pending'
+                """,
+                {"id": job_id, "priority": priority},
+            )
+            return cur.rowcount > 0
+
     # -- reap_stale ------------------------------------------------------------
 
     def reap_stale(self, older_than_sec: int | None = None) -> int:

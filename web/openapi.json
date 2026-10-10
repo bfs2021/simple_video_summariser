@@ -2092,6 +2092,55 @@
         "summary": "Get Video Analyses"
       }
     },
+    "/videos/{video_id}/reanalyze": {
+      "post": {
+        "description": "Force a fresh analysis of a stored transcript at the current version (#101).\n\nOnly enqueues: the analyzer (#33) does the work. The request has no body\nand nothing in it changes the payload, priority or key.",
+        "operationId": "post_video_reanalyze_videos__video_id__reanalyze_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoSubmission"
+                }
+              }
+            },
+            "description": "An active forced job was reused"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoSubmission"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such video"
+          },
+          "409": {
+            "description": "No transcript yet, or an analysis is already running"
+          },
+          "422": {
+            "description": "Malformed video ID"
+          }
+        },
+        "summary": "Post Video Reanalyze"
+      }
+    },
     "/videos/{video_id}/render": {
       "get": {
         "description": "The video's latest analysis as a self-contained page (D12c).\n\nThe page comes from ``render.render_analysis_html``; this handler only\nreads and sets the security headers. Neither 404 echoes the id.",

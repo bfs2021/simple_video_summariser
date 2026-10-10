@@ -17,26 +17,36 @@ Route bodies hold no SQL; they call ``common.repo`` and ``JobQueue.enqueue``.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated, Any
 
 import psycopg
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse
 from psycopg.pq import TransactionStatus
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.convertors import Convertor, register_url_convertor
 
+from common.config import get_settings
 from common.errors import RateLimitedError, ToolFailureError, TransientNetworkError
 from common.models import CatalogSource
-from common.queue import PRIORITY_INTERACTIVE, JobQueue, PostgresQueue
+from common.queue import (
+    PRIORITY_INTERACTIVE,
+    JobQueue,
+    PostgresQueue,
+    analyze_dedupe_key,
+)
 from common.repo.channels import register_channel
-from common.repo.jobs import latest_job
-from common.repo.videos import insert_submitted_video
+from common.repo.jobs import active_job, latest_job
+from common.repo.transcripts import get_best_transcript
+from common.repo.videos import insert_submitted_video, video_exists
 from common.youtube_refs import (
     UnsupportedChannelRef,
     is_channel_id,
+    is_video_id,
     parse_channel_ref,
     parse_video_ref,
 )
@@ -80,6 +90,11 @@ BAD_BACKFILL_CHANNEL = "channel_id must be a canonical YouTube channel ID (UC + 
 CHANNEL_NOT_REGISTERED = "channel is not registered; register it with POST /channels first"
 LISTING_UNAVAILABLE = "YouTube listing unavailable, try again later"
 LISTING_FAILED = "YouTube listing failed"
+VIDEO_NOT_FOUND = "video not found"
+NO_TRANSCRIPT = "no transcript yet"
+ANALYSIS_RUNNING = "an analysis is already running for this video"
+REANALYSIS_CONTENDED = "the analysis job kept changing, try again"
+BAD_REANALYZE_VIDEO = "video id must be 11 characters of A-Z, a-z, 0-9, '_' or '-'"
 
 
 class SubmitRef(BaseModel):
@@ -205,6 +220,131 @@ def post_videos(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class Reanalysis:
+    """The one active forced ``analyze`` job the request resolved to (#101)."""
+
+    job_id: int
+    state: str
+    created: bool
+
+
+class ReanalysisConflict(Exception):
+    """An unforced ``analyze`` job is ``running`` at the key: 409 (#101).
+
+    A running job cannot be changed safely, and it may skip as "already analyzed".
+    """
+
+    def __init__(self, job_id: int) -> None:
+        super().__init__(job_id)
+        self.job_id = job_id
+
+
+class ReanalysisContended(Exception):
+    """The active job at the key changed under every attempt: 409, retry (#101)."""
+
+
+#: Re-reads after losing a race. Each loss means another connection changed the
+#: job in between; a handful of consecutive losses is not a realistic race.
+_REANALYSIS_ATTEMPTS = 5
+
+
+def request_reanalysis(
+    conn: psycopg.Connection[Any],
+    video_id: str,
+    *,
+    queue: PostgresQueue,
+    dedupe_key: str,
+    after_lookup: Callable[[], None] | None = None,
+) -> Reanalysis:
+    """Make exactly one active, forced, interactive ``analyze`` job at ``dedupe_key`` (#101).
+
+    One key is shared with the sweep and the post-transcribe analyze (#33's
+    guard dead-letters any other), so an active job there is reused:
+
+    - none: a new ``{"force": true}`` job at ``PRIORITY_INTERACTIVE`` (created);
+    - ``pending`` and forced: as it is;
+    - ``pending`` and not forced: upgraded in place by ``force_pending``;
+    - ``running`` and forced: as it is;
+    - ``running`` and not forced: ``ReanalysisConflict``.
+
+    A lost race (the upgrade matched no row because the job was claimed or
+    finished, or the enqueue conflicted with a job that is gone again) re-reads
+    and applies the rules once more. ``after_lookup`` is a test seam, called
+    between the lookup of a ``pending`` unforced job and its upgrade. The
+    caller owns the transaction (the route wraps this in ``conn.transaction()``).
+    """
+    for _ in range(_REANALYSIS_ATTEMPTS):
+        found = active_job(conn, video_id, "analyze", dedupe_key)
+        if found is None:
+            job_id = queue.enqueue(
+                "analyze",
+                video_id,
+                dedupe_key=dedupe_key,
+                payload={"force": True},
+                priority=PRIORITY_INTERACTIVE,
+            )
+            if job_id is not None:
+                return Reanalysis(job_id, "pending", created=True)
+            continue
+        if found.forced:
+            return Reanalysis(found.id, found.state, created=False)
+        if found.state == "running":
+            raise ReanalysisConflict(found.id)
+        if after_lookup is not None:
+            after_lookup()
+        if queue.force_pending(found.id, PRIORITY_INTERACTIVE):
+            return Reanalysis(found.id, "pending", created=False)
+    raise ReanalysisContended
+
+
+@router.post(
+    "/videos/{video_id:untrusted}/reanalyze",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=VideoSubmission,
+    responses={
+        200: {"model": VideoSubmission, "description": "An active forced job was reused"},
+        404: {"description": "No such video"},
+        409: {"description": "No transcript yet, or an analysis is already running"},
+        422: {"description": "Malformed video ID"},
+    },
+)
+def post_video_reanalyze(
+    video_id: Annotated[str, Depends(_reanalyze_video_id)],
+    response: Response,
+    conn: Annotated[psycopg.Connection[Any], Depends(get_conn)],
+) -> VideoSubmission | JSONResponse:
+    """Force a fresh analysis of a stored transcript at the current version (#101).
+
+    Only enqueues: the analyzer (#33) does the work. The request has no body
+    and nothing in it changes the payload, priority or key.
+    """
+    settings = get_settings()
+    dedupe_key = analyze_dedupe_key(settings.PROMPT_VERSION, settings.SUMMARIZER)
+    _require_idle(conn)
+    with conn.transaction():
+        if not video_exists(conn, video_id):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, VIDEO_NOT_FOUND)
+        if get_best_transcript(conn, video_id) is None:
+            raise HTTPException(status.HTTP_409_CONFLICT, NO_TRANSCRIPT)
+        try:
+            result = request_reanalysis(
+                conn, video_id, queue=PostgresQueue(conn), dedupe_key=dedupe_key
+            )
+        except ReanalysisConflict as conflict:
+            return JSONResponse(
+                {"detail": ANALYSIS_RUNNING, "job_id": conflict.job_id},
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        except ReanalysisContended:
+            raise HTTPException(status.HTTP_409_CONFLICT, REANALYSIS_CONTENDED) from None
+    if not result.created:
+        response.status_code = status.HTTP_200_OK
+    return VideoSubmission(
+        video_id=video_id, job_id=result.job_id, state=result.state, created=result.created
+    )
+
+
 @router.post(
     "/channels",
     status_code=status.HTTP_201_CREATED,
@@ -238,6 +378,20 @@ def post_channels(
         added_at=channel.added_at,
         created=registered.created,
     )
+
+
+def _reanalyze_video_id(request: Request, video_id: str) -> str:
+    """Validate the path before ``get_conn`` resolves.
+
+    The id must also appear verbatim as a raw path segment: a valid id never
+    contains ``%``, so a percent-encoded one that decodes into validity is
+    rejected. The message is fixed; the submitted value is never echoed.
+    """
+    raw_path = request.scope.get("raw_path")
+    raw_ok = not isinstance(raw_path, bytes) or video_id.encode() in raw_path.split(b"/")
+    if not raw_ok or not is_video_id(video_id):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, BAD_REANALYZE_VIDEO)
+    return video_id
 
 
 def _backfill_channel_id(channel_id: str) -> str:

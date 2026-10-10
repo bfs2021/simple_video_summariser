@@ -1665,3 +1665,95 @@ def test_started_at_survives_retry_dead(queue: PostgresQueue, conn: psycopg.Conn
     assert queue.retry_dead(job_id).status == "retried"
 
     assert _row(conn, job_id)["started_at"] == past
+
+
+# ---------------------------------------------------------------------------
+# force_pending (issue #101)
+# ---------------------------------------------------------------------------
+
+
+def _frozen(row: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in row.items() if k not in ("priority", "payload")}
+
+
+def test_force_pending_sets_force_and_priority_and_keeps_other_payload_keys(
+    queue: PostgresQueue, conn: psycopg.Connection[Any]
+) -> None:
+    job_id = queue.enqueue(
+        "analyze", "v1", dedupe_key="v1:fake", payload={"keep": 7}, priority=-5
+    )
+    assert job_id is not None
+    before = _row(conn, job_id)
+
+    assert queue.force_pending(job_id, 10) is True
+
+    after = _row(conn, job_id)
+    assert after["payload"] == {"keep": 7, "force": True}
+    assert after["priority"] == 10
+    assert _frozen(after) == _frozen(before)
+    assert _count(conn) == 1
+
+
+@pytest.mark.parametrize(("start", "expected"), [(9, 10), (10, 10), (11, 11), (20, 20)])
+def test_force_pending_never_lowers_a_priority(
+    queue: PostgresQueue, conn: psycopg.Connection[Any], start: int, expected: int
+) -> None:
+    job_id = queue.enqueue("analyze", "v1", dedupe_key="v1:fake", priority=start)
+    assert job_id is not None
+
+    assert queue.force_pending(job_id, 10) is True
+
+    row = _row(conn, job_id)
+    assert row["priority"] == expected
+    assert row["payload"] == {"force": True}
+
+
+@pytest.mark.parametrize("state", ["running", "done", "dead"])
+def test_force_pending_leaves_a_job_that_is_not_pending_untouched(
+    queue: PostgresQueue, conn: psycopg.Connection[Any], state: str
+) -> None:
+    job_id = queue.enqueue("analyze", "v1", dedupe_key="v1:fake", priority=-5)
+    assert job_id is not None
+    _set(conn, job_id, state=state)
+    before = _row(conn, job_id)
+
+    assert queue.force_pending(job_id, 10) is False
+
+    assert _row(conn, job_id) == before
+
+
+def test_force_pending_on_an_unknown_job_is_false_and_writes_nothing(
+    queue: PostgresQueue, conn: psycopg.Connection[Any]
+) -> None:
+    assert queue.force_pending(987654, 10) is False
+    assert _count(conn) == 0
+
+
+def test_force_pending_touches_only_the_named_job(
+    queue: PostgresQueue, conn: psycopg.Connection[Any]
+) -> None:
+    target = queue.enqueue("analyze", "v1", dedupe_key="v1:fake", priority=-5)
+    other = queue.enqueue("analyze", "v2", dedupe_key="v1:fake", priority=-5)
+    assert target is not None and other is not None
+    before = _row(conn, other)
+
+    queue.force_pending(target, 10)
+
+    assert _row(conn, other) == before
+
+
+def test_force_pending_commits_on_a_default_connection(
+    head_dsn: str, commit_conn: psycopg.Connection[Any]
+) -> None:
+    job_id = PostgresQueue(commit_conn, settings=_settings()).enqueue(
+        "analyze", "v1", dedupe_key="v1:fake", priority=-5
+    )
+    assert job_id is not None
+
+    assert PostgresQueue(commit_conn, settings=_settings()).force_pending(job_id, 10)
+
+    with psycopg.connect(head_dsn) as other:
+        row = other.execute(
+            "SELECT priority, payload FROM jobs WHERE id = %s", (job_id,)
+        ).fetchone()
+    assert row == (10, {"force": True})

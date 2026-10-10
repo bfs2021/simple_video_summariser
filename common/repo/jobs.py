@@ -63,6 +63,41 @@ def latest_job(conn: psycopg.Connection[Any], video_id: str, kind: str) -> tuple
     return None if row is None else (int(row[0]), str(row[1]))
 
 
+@dataclass(frozen=True, slots=True)
+class ActiveJob:
+    """The ``pending`` or ``running`` job at one ``(video, kind, key)`` (#101).
+
+    ``forced`` is true only for a JSON ``true`` at ``payload.force``, the exact
+    test the analyze handler applies (#30).
+    """
+
+    id: int
+    state: str
+    priority: int
+    forced: bool
+
+
+def active_job(
+    conn: psycopg.Connection[Any], video_id: str, kind: str, dedupe_key: str
+) -> ActiveJob | None:
+    """The active job at ``(video_id, kind, dedupe_key)``, or ``None`` (#101).
+
+    ``jobs_active_uniq`` allows at most one, so there is no ordering. Read-only.
+    """
+    row = conn.execute(
+        """
+        SELECT id, state, priority, payload -> 'force' = 'true'::jsonb
+        FROM jobs
+        WHERE video_id = %s AND kind = %s AND dedupe_key = %s
+          AND state IN ('pending', 'running')
+        """,
+        (video_id, kind, dedupe_key),
+    ).fetchone()
+    if row is None:
+        return None
+    return ActiveJob(id=int(row[0]), state=str(row[1]), priority=int(row[2]), forced=bool(row[3]))
+
+
 def queue_depth(conn: psycopg.Connection[Any]) -> dict[tuple[str, str], int]:
     """Number of jobs per ``(kind, state)``, for ``/healthz`` (#39) and ``/metrics`` (#60).
 
