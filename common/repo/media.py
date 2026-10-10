@@ -88,12 +88,15 @@ def lock_for_deletion(
     *,
     expired_at: datetime | None = None,
     max_bytes: int | None = None,
+    low_space: bool = False,
 ) -> tuple[LockOutcome, MediaRow | None]:
     """Lock one row and re-check that it may still be deleted.
 
     Exactly one criterion must be given: ``expired_at`` (the row must still
-    have ``expires_at <= expired_at``) or ``max_bytes`` (the total recorded
-    bytes must still exceed it). The row is taken with
+    have ``expires_at <= expired_at``), ``max_bytes`` (the total recorded
+    bytes must still exceed it) or ``low_space`` (#105: only that the row
+    still exists, is not locked and has no running job; the database cannot
+    see the filesystem, so the caller re-checks free space itself). The row is taken with
     ``SELECT ... FOR UPDATE SKIP LOCKED``, so a row another connection holds
     is reported ``UNAVAILABLE`` instead of waited on. A row whose video has
     a ``running`` job is reported ``RUNNING``.
@@ -101,8 +104,8 @@ def lock_for_deletion(
     Only ``LOCKED`` returns the row; the lock lasts until the caller commits
     or rolls back, after it has unlinked the file and called ``delete_row``.
     """
-    if (expired_at is None) == (max_bytes is None):
-        raise ValueError("give exactly one of expired_at or max_bytes")
+    if (expired_at is not None) + (max_bytes is not None) + low_space != 1:
+        raise ValueError("give exactly one of expired_at, max_bytes or low_space")
 
     found = conn.execute(
         f"SELECT {_COLUMNS} FROM media WHERE id = %s FOR UPDATE SKIP LOCKED",
@@ -114,9 +117,10 @@ def lock_for_deletion(
 
     if expired_at is not None:
         eligible = row.expires_at <= expired_at
-    else:
-        assert max_bytes is not None
+    elif max_bytes is not None:
         eligible = total_bytes(conn) > max_bytes
+    else:
+        eligible = True  # low_space: the caller checks free space
     if not eligible:
         return LockOutcome.NOT_ELIGIBLE, None
 

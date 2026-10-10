@@ -159,6 +159,53 @@ def test_lock_for_deletion_requires_exactly_one_criterion(
         lock_for_deletion(conn, 1)
     with pytest.raises(ValueError):
         lock_for_deletion(conn, 1, expired_at=NOW, max_bytes=1)
+    with pytest.raises(ValueError):
+        lock_for_deletion(conn, 1, low_space=True, expired_at=NOW)
+    with pytest.raises(ValueError):
+        lock_for_deletion(conn, 1, low_space=True, max_bytes=1)
+    with pytest.raises(ValueError):
+        lock_for_deletion(conn, 1, low_space=True, expired_at=NOW, max_bytes=1)
+    with pytest.raises(ValueError):
+        lock_for_deletion(conn, 1, low_space=False)
+
+
+def test_lock_for_deletion_low_space_locks_a_row_that_is_neither_expired_nor_over_cap(
+    conn: psycopg.Connection,
+) -> None:
+    mid = add(conn, new_video(conn, "v1"), "a", size=1, expires_at=NOW + timedelta(days=365))
+
+    outcome, row = lock_for_deletion(conn, mid, low_space=True)
+
+    assert outcome is LockOutcome.LOCKED
+    assert row is not None and row.id == mid
+
+
+def test_lock_for_deletion_low_space_reports_running_jobs(conn: psycopg.Connection) -> None:
+    vid = new_video(conn, "v1")
+    mid = add(conn, vid, "a")
+    conn.execute(
+        "INSERT INTO jobs (video_id, kind, state) VALUES (%s, 'transcribe', 'running')", (vid,)
+    )
+
+    assert lock_for_deletion(conn, mid, low_space=True) == (LockOutcome.RUNNING, None)
+
+
+def test_lock_for_deletion_low_space_missing_row_is_unavailable(conn: psycopg.Connection) -> None:
+    assert lock_for_deletion(conn, 999, low_space=True) == (LockOutcome.UNAVAILABLE, None)
+
+
+def test_lock_for_deletion_low_space_skips_a_row_locked_elsewhere(
+    conn: psycopg.Connection, head_dsn: str
+) -> None:
+    mid = add(conn, new_video(conn, "v1"), "a")
+    conn.commit()
+
+    with psycopg.connect(head_dsn) as other:
+        other.execute("SELECT id FROM media WHERE id = %s FOR UPDATE", (mid,))
+        outcome, row = lock_for_deletion(conn, mid, low_space=True)
+        other.rollback()
+
+    assert (outcome, row) == (LockOutcome.UNAVAILABLE, None)
 
 
 def test_delete_row_removes_only_that_row_and_does_not_commit(

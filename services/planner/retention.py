@@ -11,8 +11,16 @@
    references are deleted once their mtime is older than ``ORPHAN_GRACE``:
    files left behind by deleted videos, and ``.download-*`` / ``.tmp-*``
    leftovers of a crashed fetch.
+4. **Free-space guard** (#105) - after phases 1-3, the real free space on the
+   ``AUDIO_DIR`` filesystem is read (``disk_usage``). Below the floor
+   (``min_free_bytes``: the larger of ``AUDIO_MIN_FREE_GB`` and
+   ``AUDIO_MIN_FREE_PCT`` of the volume) the oldest audio is evicted, in the
+   order of phase 2 and whatever the byte cap says, until free space is back
+   at the floor. Free space is re-read after every unlinked file. The cap
+   cannot see untracked files, other data on the volume, or an
+   ``AUDIO_MAX_GB`` larger than the volume; this can.
 
-Audio of a video with a ``running`` job is never deleted in phases 1 and 2.
+Audio of a video with a ``running`` job is never deleted in phases 1, 2 and 4.
 Each row is handled in its own transaction: lock it with ``FOR UPDATE SKIP
 LOCKED``, re-check eligibility on the locked row, unlink the file, delete the
 row, commit. A row another connection holds is skipped, not waited on.
@@ -24,10 +32,14 @@ Scheduling and the singleton guard belong to the planner entrypoint (#38).
 
 from __future__ import annotations
 
+import math
 import os
+import shutil
 import stat
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -53,7 +65,10 @@ class RetentionReport:
     ``bytes_freed`` counts recorded bytes of files actually unlinked (phases
     1 and 2) plus the on-disk size of deleted orphans. ``bytes_retained`` is
     ``SUM(media.bytes)`` after the run. ``errors`` counts rows or files that
-    could not be handled and were logged.
+    could not be handled and were logged. ``evicted_for_space`` counts rows
+    deleted by the free-space guard (not in ``evicted``); ``free_bytes`` is
+    the free space measured at the end of the pass, ``None`` when the guard
+    was off or the measurement failed.
     """
 
     expired_deleted: int
@@ -63,6 +78,8 @@ class RetentionReport:
     bytes_retained: int
     skipped_running: int
     errors: int
+    evicted_for_space: int = 0
+    free_bytes: int | None = None
 
 
 class UnsafeMediaPath(ValueError):
@@ -104,11 +121,24 @@ def resolve_media_path(audio_dir: Path, rel_path: str) -> Path:
     return parent / target.name
 
 
+def min_free_bytes(total_bytes: int, *, min_free_gb: float, min_free_pct: float) -> int:
+    """The free-space floor in bytes: the larger of the GB floor and the percent floor.
+
+    ``min_free_gb`` uses the decimal-GB rule of ``max_bytes_from_gb``. The
+    percent floor is ``ceil(total_bytes * min_free_pct / 100)``, computed on
+    the decimal value of the percentage so that 0.07 % of 10000 is 7, not the 8
+    that a float product (7.000000000000001) would round up to.
+    """
+    from_pct = math.ceil(Decimal(repr(min_free_pct)) * total_bytes / 100)
+    return max(max_bytes_from_gb(min_free_gb), from_pct)
+
+
 class _Counters:
     def __init__(self) -> None:
         self.expired_deleted = 0
         self.evicted = 0
         self.orphans_deleted = 0
+        self.evicted_for_space = 0
         self.bytes_freed = 0
         self.errors = 0
         self.running: set[int] = set()
@@ -120,10 +150,17 @@ def enforce_audio_retention(
     *,
     max_bytes: int,
     now: datetime,
+    min_free_gb: float = 0,
+    min_free_pct: float = 0,
+    disk_usage: Callable[[Path], Any] = shutil.disk_usage,
 ) -> RetentionReport:
     """Run expiry, cap and orphan cleanup once and return what happened.
 
-    ``now`` must be timezone-aware and is the only clock used. Raises
+    ``now`` must be timezone-aware and is the only clock used. The free-space
+    guard (phase 4) is off unless ``min_free_gb`` or ``min_free_pct`` is
+    non-zero; ``disk_usage(audio_dir)`` returns an object with ``.total`` and
+    ``.free`` (the unprivileged-process free space, as ``shutil.disk_usage``
+    gives). Raises
     ``OSError`` (after logging an error) if ``audio_dir`` is not a directory,
     before anything is deleted. Commits the connection's transaction as it
     goes (one commit per handled row).
@@ -175,6 +212,16 @@ def enforce_audio_retention(
     # Phase 3: orphan files.
     _delete_orphans(conn, audio_dir, now, counters)
 
+    # Phase 4: free-space guard, after phases 1-3 so their deletions count.
+    free_bytes = _free_space_guard(
+        conn,
+        audio_dir,
+        counters,
+        min_free_gb=min_free_gb,
+        min_free_pct=min_free_pct,
+        disk_usage=disk_usage,
+    )
+
     retained = media.total_bytes(conn)
     conn.commit()
     report = RetentionReport(
@@ -185,6 +232,8 @@ def enforce_audio_retention(
         bytes_retained=retained,
         skipped_running=len(counters.running),
         errors=counters.errors,
+        evicted_for_space=counters.evicted_for_space,
+        free_bytes=free_bytes,
     )
     _log.info(
         "planner.audio_retention",
@@ -195,8 +244,77 @@ def enforce_audio_retention(
         bytes_retained=report.bytes_retained,
         skipped_running=report.skipped_running,
         errors=report.errors,
+        evicted_for_space=report.evicted_for_space,
+        free_bytes=report.free_bytes,
     )
     return report
+
+
+def _measure(
+    audio_dir: Path, disk_usage: Callable[[Path], Any], counters: _Counters
+) -> tuple[int, int] | None:
+    """``(total, free)`` of the volume of ``audio_dir``, or ``None`` after logging a failure."""
+    try:
+        usage = disk_usage(audio_dir)
+        total, free = int(usage.total), int(usage.free)
+        if total <= 0 or free < 0:
+            raise OSError(f"nonsensical disk usage: total={total} free={free}")
+    except OSError as exc:
+        _log.error("planner.audio_retention.disk_usage_unavailable", error=str(exc))
+        counters.errors += 1
+        return None
+    return total, free
+
+
+def _free_space_guard(
+    conn: psycopg.Connection[Any],
+    audio_dir: Path,
+    counters: _Counters,
+    *,
+    min_free_gb: float,
+    min_free_pct: float,
+    disk_usage: Callable[[Path], Any],
+) -> int | None:
+    """Phase 4: evict oldest-first until free space is back at the floor (#105).
+
+    Returns the free space last measured, or ``None`` when nothing was
+    measured or a measurement failed. Never raises for a disk problem.
+    """
+    if min_free_gb == 0 and min_free_pct == 0:
+        return None  # guard off: read nothing, evict nothing
+    measured = _measure(audio_dir, disk_usage, counters)
+    if measured is None:
+        return None
+    total, free = measured
+    floor = min_free_bytes(total, min_free_gb=min_free_gb, min_free_pct=min_free_pct)
+    if floor >= total:
+        # A floor the volume can never meet would evict everything.
+        _log.error("planner.audio_retention.free_space_floor_invalid", floor=floor, total=total)
+        return free
+    if free >= floor:
+        return free
+
+    deficit = floor - free
+    evicted_bytes = 0  # recorded bytes of rows deleted by this phase
+    candidates = media.list_oldest_first(conn)
+    conn.commit()
+    for row in candidates:
+        if free >= floor or evicted_bytes >= deficit:
+            break
+        removed = _delete_one(conn, audio_dir, row.id, counters, low_space=True)
+        if removed is None:
+            continue
+        counters.evicted_for_space += 1
+        evicted_bytes += removed
+        measured = _measure(audio_dir, disk_usage, counters)
+        if measured is None:
+            return None
+        free = measured[1]
+    if free < floor:
+        _log.warning(
+            "planner.audio_retention.free_space_unreachable", free_bytes=free, floor_bytes=floor
+        )
+    return free
 
 
 def _delete_one(
@@ -207,6 +325,7 @@ def _delete_one(
     *,
     expired_at: datetime | None = None,
     max_bytes: int | None = None,
+    low_space: bool = False,
 ) -> int | None:
     """Delete one row (and its file) in its own transaction.
 
@@ -215,7 +334,7 @@ def _delete_one(
     """
     try:
         outcome, row = media.lock_for_deletion(
-            conn, media_id, expired_at=expired_at, max_bytes=max_bytes
+            conn, media_id, expired_at=expired_at, max_bytes=max_bytes, low_space=low_space
         )
         if row is None:
             conn.rollback()

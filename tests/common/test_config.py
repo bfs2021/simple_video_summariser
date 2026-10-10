@@ -131,6 +131,8 @@ def test_defaults_match_the_architecture_table() -> None:
     assert s.AUDIO_KEEP is True
     assert s.AUDIO_TTL_DAYS == 30
     assert s.AUDIO_MAX_GB == 20
+    assert s.AUDIO_MIN_FREE_GB == 2
+    assert s.AUDIO_MIN_FREE_PCT == 5
     assert s.POLL_INTERVAL_SEC == 3600
     assert s.HEARTBEAT_SEC == 60
     assert s.REAP_AFTER_SEC == 300
@@ -159,7 +161,7 @@ def test_every_architecture_variable_is_a_field_except_transcriber_cpus() -> Non
         "WORKER_SHUTDOWN_GRACE_SEC", "REAP_INTERVAL_SEC",
         "INGEST_MAX_RUNTIME_SEC", "ANALYZE_MAX_RUNTIME_SEC", "TRANSCRIBE_MAX_RTF",
         "ALERT_WEBHOOK_URL", "ALERT_WEBHOOK_FORMAT", "ALERT_MIN_INTERVAL_SEC",
-        "UPCOMING_MAX_WAIT_DAYS",
+        "UPCOMING_MAX_WAIT_DAYS", "AUDIO_MIN_FREE_GB", "AUDIO_MIN_FREE_PCT",
     }  # fmt: skip
 
     assert set(Settings.model_fields) == expected
@@ -900,3 +902,44 @@ def test_project_config_allows_environment_reads_in_config(source: str) -> None:
     result = _ruff(source, "common/config.py")
 
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+# --- AUDIO_MIN_FREE_GB / AUDIO_MIN_FREE_PCT (issue #105) -----------------------
+
+
+@pytest.mark.parametrize("value", [0, 0.0, 0.5, 2, 1000])
+def test_audio_min_free_gb_accepts_zero_and_positive(value: float) -> None:
+    assert build_settings(DATABASE_URL=DB_URL, AUDIO_MIN_FREE_GB=value).AUDIO_MIN_FREE_GB == value
+
+
+@pytest.mark.parametrize("value", [-1, -0.001])
+def test_audio_min_free_gb_rejects_negative(value: float) -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        build_settings(DATABASE_URL=DB_URL, AUDIO_MIN_FREE_GB=value)
+
+    assert "AUDIO_MIN_FREE_GB" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("value", [0, 0.0, 0.5, 5, 99, 99.999])
+def test_audio_min_free_pct_accepts_zero_up_to_below_100(value: float) -> None:
+    assert build_settings(DATABASE_URL=DB_URL, AUDIO_MIN_FREE_PCT=value).AUDIO_MIN_FREE_PCT == value
+
+
+@pytest.mark.parametrize("value", [-1, -0.001, 100, 100.0, 150])
+def test_audio_min_free_pct_rejects_out_of_range(value: float) -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        build_settings(DATABASE_URL=DB_URL, AUDIO_MIN_FREE_PCT=value)
+
+    assert "AUDIO_MIN_FREE_PCT" in str(exc_info.value)
+
+
+def test_audio_min_free_values_are_read_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    monkeypatch.setenv("AUDIO_MIN_FREE_GB", "0")
+    monkeypatch.setenv("AUDIO_MIN_FREE_PCT", "12.5")
+
+    settings = get_settings()
+
+    assert (settings.AUDIO_MIN_FREE_GB, settings.AUDIO_MIN_FREE_PCT) == (0, 12.5)

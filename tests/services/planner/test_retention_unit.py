@@ -44,6 +44,8 @@ def test_report_is_a_frozen_dataclass_with_the_documented_fields() -> None:
         "bytes_retained",
         "skipped_running",
         "errors",
+        "evicted_for_space",
+        "free_bytes",
     ]
     report = RetentionReport(0, 0, 0, 0, 0, 0, 0)
     with pytest.raises(dataclasses.FrozenInstanceError):

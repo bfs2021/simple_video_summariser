@@ -233,8 +233,15 @@ def build_registry(settings: Settings, connect: Connect) -> list[Task]:
             settings.AUDIO_DIR,
             max_bytes=max_bytes_from_gb(settings.AUDIO_MAX_GB),
             now=datetime.now(UTC),
+            min_free_gb=settings.AUDIO_MIN_FREE_GB,
+            min_free_pct=settings.AUDIO_MIN_FREE_PCT,
         )
-        return report.expired_deleted + report.evicted + report.orphans_deleted
+        return (
+            report.expired_deleted
+            + report.evicted
+            + report.orphans_deleted
+            + report.evicted_for_space
+        )
 
     def reanalysis_sweep(conn: psycopg.Connection[Any]) -> int:
         return run_reanalysis_sweep(

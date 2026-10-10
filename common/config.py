@@ -25,6 +25,7 @@ from urllib.parse import urlsplit
 
 from pydantic import (
     Field,
+    NonNegativeFloat,
     NonNegativeInt,
     PositiveFloat,
     PositiveInt,
@@ -111,6 +112,8 @@ class Settings(BaseSettings):
     AUDIO_KEEP: bool = True
     AUDIO_TTL_DAYS: PositiveInt = 30
     AUDIO_MAX_GB: PositiveFloat = 20
+    AUDIO_MIN_FREE_GB: NonNegativeFloat = 2
+    AUDIO_MIN_FREE_PCT: float = Field(default=5, ge=0, lt=100)
     YTDLP_COOKIE_FILE: Path | None = None
 
     POLL_INTERVAL_SEC: PositiveInt = 3600
