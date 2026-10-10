@@ -186,15 +186,39 @@ def sanitize_chunk(
 
 @dataclass(slots=True)
 class _Tally:
-    """Tokens of the successful calls of one job, taken from ``take_usage()``."""
+    """Tokens and spend of the successful calls of one job, from ``take_usage()``.
+
+    ``cost_usd`` follows one rule (#102): ``NULL`` means "no price reported".
+    ``total_cost`` is ``None`` when any tallied ``Usage`` with ``calls > 0`` has no
+    ``cost_usd`` (a partial sum would understate the spend), and when no ``Usage``
+    reported a cost at all. A ``Usage`` with ``calls == 0`` contributes nothing and
+    does not force ``None``. So an Ollama run stores ``NULL``, never ``0``; the
+    Compare view tells "local" from "unknown price" by ``analyses.model``.
+    """
 
     input_tokens: int = 0
     output_tokens: int = 0
+    cost: float = 0.0
+    priced: bool = False
+    unpriced: bool = False
 
     def add(self, summarizer: Summarizer) -> None:
         usage = summarizer.take_usage()
         self.input_tokens += usage.input_tokens
         self.output_tokens += usage.output_tokens
+        if usage.calls > 0:
+            if usage.cost_usd is None:
+                self.unpriced = True
+            else:
+                self.cost += usage.cost_usd
+                self.priced = True
+
+    @property
+    def total_cost(self) -> float | None:
+        """The job's spend rounded to ``NUMERIC(10,5)``, or ``None`` (see the class docstring)."""
+        if self.unpriced or not self.priced:
+            return None
+        return round(self.cost, 5)
 
 
 def make_analyze_handler(
@@ -284,6 +308,7 @@ def make_analyze_handler(
                     "chunks": 0,
                     "input_tokens": 0,
                     "output_tokens": 0,
+                    "cost_usd": None,
                     "duration_ms": empty_ms,
                     "speakers_coerced": 0,
                     "claims_deduped": 0,
@@ -341,6 +366,7 @@ def make_analyze_handler(
                 speaker_roster=roster.to_json(),
                 input_tokens=tally.input_tokens,
                 output_tokens=tally.output_tokens,
+                cost_usd=tally.total_cost,
                 duration_ms=duration_ms,
                 speakers_coerced=coerced,
                 topics=tuple(replace(t, seq=i) for i, t in enumerate(topics)),
@@ -351,6 +377,7 @@ def make_analyze_handler(
                 "chunks": len(chunks),
                 "input_tokens": tally.input_tokens,
                 "output_tokens": tally.output_tokens,
+                "cost_usd": tally.total_cost,
                 "duration_ms": duration_ms,
                 "speakers_coerced": coerced,
                 "claims_deduped": len(claims) - len(kept_claims),

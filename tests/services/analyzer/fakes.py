@@ -30,7 +30,10 @@ class FakeSummarizer:
     ``fail_on`` maps ``"roster"``, ``"chunk:<seq>"`` or ``"reduce"`` to the
     exception raised by that call. A failed call adds ``usage_on_fail`` tokens
     (as a real adapter that spent tokens on an unusable answer would).
-    ``on_call(kind)`` runs at the start of every call.
+    ``on_call(kind)`` runs at the start of every call. ``costs`` maps a call kind
+    (``"roster"``, ``"chunk"``, ``"reduce"``) to the ``cost_usd`` its successful
+    call reports (``None`` = priced unknown); a kind not listed reports no call at
+    all (``Usage.calls == 0``), like a summarizer that does not track calls.
     """
 
     def __init__(
@@ -46,6 +49,7 @@ class FakeSummarizer:
         fail_on: dict[str, BaseException] | None = None,
         usage_on_fail: tuple[int, int] = (0, 0),
         on_call: Callable[[str], None] | None = None,
+        costs: dict[str, float | None] | None = None,
     ) -> None:
         self.name = name
         self.model = model
@@ -57,9 +61,13 @@ class FakeSummarizer:
         self.fail_on = fail_on if fail_on is not None else {}
         self.usage_on_fail = usage_on_fail
         self.on_call = on_call
+        self.costs = costs or {}
         self.calls: list[tuple[Any, ...]] = []
         self.take_usage_calls = 0
         self._pending = [0, 0]
+        self._calls = 0
+        self._cost: float | None = None
+        self._cost_unknown = False
 
     @property
     def kinds(self) -> list[str]:
@@ -78,6 +86,13 @@ class FakeSummarizer:
         tokens_in, tokens_out = self.tokens[kind]
         self._pending[0] += tokens_in
         self._pending[1] += tokens_out
+        if kind in self.costs:
+            self._calls += 1
+            cost = self.costs[kind]
+            if cost is None:
+                self._cost_unknown = True
+            else:
+                self._cost = (self._cost or 0.0) + cost
 
     def derive_roster(self, meta: VideoMeta, opening: str) -> Roster:
         self.calls.append(("roster", meta, opening))
@@ -99,8 +114,16 @@ class FakeSummarizer:
 
     def take_usage(self) -> Usage:
         self.take_usage_calls += 1
-        usage = Usage(input_tokens=self._pending[0], output_tokens=self._pending[1])
+        usage = Usage(
+            input_tokens=self._pending[0],
+            output_tokens=self._pending[1],
+            calls=self._calls,
+            cost_usd=None if self._cost_unknown else self._cost,
+        )
         self._pending = [0, 0]
+        self._calls = 0
+        self._cost = None
+        self._cost_unknown = False
         return usage
 
 
