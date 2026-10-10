@@ -414,8 +414,13 @@ def test_heartbeat_ticks_on_a_separate_queue_while_handler_runs(tmp_path: Path) 
     timer_factory = FakeTimerFactory()
 
     def handler(job: Job, ctx: JobContext) -> None:
-        timer_factory.last.fire()
-        timer_factory.last.fire()
+        for _ in range(2):
+            scheduled_before = len(timer_factory.scheduled)
+            timer_factory.last.fire()
+            # A successful tick arms exactly one next tick (``last`` is the
+            # fired handle until it does, so re-firing alone proves nothing).
+            assert len(timer_factory.scheduled) == scheduled_before + 1
+            assert timer_factory.scheduled[-1][0] == 60
 
     worker = make_worker(
         queue,
@@ -489,7 +494,10 @@ def test_heartbeat_failure_is_logged_and_retried_next_tick(tmp_path: Path) -> No
     def handler(job: Job, ctx: JobContext) -> None:
         nonlocal tick_count
         queue.heartbeat_result = ConnectionError("blip")
+        scheduled_before = len(timer_factory.scheduled)
         timer_factory.last.fire()  # tick 1: fails
+        assert len(timer_factory.scheduled) == scheduled_before + 1
+        assert timer_factory.scheduled[-1][0] == 60
         tick_count += 1
         queue.heartbeat_result = True
         timer_factory.last.fire()  # tick 2: succeeds, rescheduled by tick 1
@@ -522,7 +530,9 @@ def test_heartbeat_failure_discards_the_queue_and_reconnects_via_the_factory(tmp
 
     def handler(job: Job, ctx: JobContext) -> None:
         queue_a.heartbeat_result = ConnectionError("dead")
+        scheduled_before = len(timer_factory.scheduled)
         timer_factory.last.fire()  # tick 1: on A, fails
+        assert len(timer_factory.scheduled) == scheduled_before + 1
         queue_b.heartbeat_result = True
         timer_factory.last.fire()  # tick 2: gets B fresh from the factory, succeeds
         assert not ctx.cancelled
@@ -572,9 +582,14 @@ def test_heartbeat_reconnect_failure_is_logged_and_next_tick_retries_the_factory
         timer_factory.last.fire()  # tick 1: on A (factory call 1), fails
 
         liveness.unlink()
+        scheduled_before = len(timer_factory.scheduled)
         with capture_logs() as logs:
             timer_factory.last.fire()  # tick 2: factory call 2 raises
         assert liveness.exists()
+        # The failed tick must arm exactly one next tick; re-firing ``last``
+        # alone cannot show this, as it still points at the fired handle.
+        assert len(timer_factory.scheduled) == scheduled_before + 1
+        assert timer_factory.scheduled[-1][0] == 60
         reconnect_failed = [log for log in logs if log["event"] == "worker.heartbeat_reconnect_failed"]
         assert len(reconnect_failed) == 1
         assert reconnect_failed[0]["worker"] == "w1"
