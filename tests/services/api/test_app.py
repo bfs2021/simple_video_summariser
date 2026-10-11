@@ -6,6 +6,7 @@ import inspect
 import json
 import subprocess
 import sys
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -106,17 +107,26 @@ def test_starting_the_app_configures_logging_exactly_once(
     assert logs.configure_calls == 1
 
 
-def test_starting_the_app_opens_no_database_connection(
+def test_starting_the_app_makes_no_synchronous_connect_call(
     app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    calls: list[object] = []
-    monkeypatch.setattr(common_db, "connect", lambda **kw: calls.append(kw))
-    monkeypatch.setattr(psycopg, "connect", lambda *a, **kw: calls.append((a, kw)))
+    # The pool (psycopg.Connection.connect, #95) opens with open(wait=False): its
+    # background workers may try to connect, but startup itself must not. Every
+    # attempt fails, so a startup that waits for the pool raises instead of hanging.
+    threads: list[int] = []
+
+    def refuse(*args: object, **kwargs: object) -> psycopg.Connection[object]:
+        threads.append(threading.get_ident())
+        raise psycopg.OperationalError("no database in this test")
+
+    monkeypatch.setattr(common_db, "connect", refuse)
+    monkeypatch.setattr(psycopg, "connect", refuse)
+    monkeypatch.setattr(psycopg.Connection, "connect", classmethod(lambda cls, *a, **kw: refuse()))
 
     with TestClient(app):
         pass
 
-    assert calls == []
+    assert threading.get_ident() not in threads
 
 
 def test_importing_the_app_needs_no_settings_and_loads_no_processing_modules() -> None:
