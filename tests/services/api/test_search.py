@@ -22,7 +22,7 @@ from common.config import get_settings
 from common.repo.search import SearchHit, SearchPage, Span
 from services.api import deps, routes_read
 from services.api.main import create_app
-from tests.services.api.conftest import UNREACHABLE_DSN, LogSink
+from tests.services.api.conftest import UNREACHABLE_DSN, FakePool, LogSink
 
 MARKER = "ZZMARKER42"
 
@@ -76,6 +76,7 @@ def _hit(**overrides: Any) -> SearchHit:
         "duration_sec": 61,
         "unavailable": None,
         "transcript_source": "whisper",
+        "matched_in": ("transcript",),
         "excerpts": ((Span("the ", False), Span("zebra", True), Span(" ran", False)),),
     }
     values.update(overrides)
@@ -188,6 +189,7 @@ def test_the_response_shape(api: TestClient, recorder: Recorder) -> None:
                 "duration_sec": 61,
                 "unavailable": None,
                 "transcript_source": "whisper",
+                "matched_in": ["transcript"],
                 "excerpts": [
                     [
                         {"text": "the ", "match": False},
@@ -216,6 +218,20 @@ def test_nullable_columns_are_null(api: TestClient, recorder: Recorder) -> None:
             result["published_at"], result["duration_sec"], result["unavailable"]) == (
         None, None, None, None, None, "removed",
     )
+
+
+def test_a_title_only_match_has_no_transcript_and_no_excerpts(
+    api: TestClient, recorder: Recorder
+) -> None:
+    recorder.page = SearchPage(
+        (_hit(transcript_source=None, matched_in=("title", "analysis"), excerpts=()),), False
+    )
+
+    [result] = api.get("/search", params={"q": "zebra"}).json()["results"]
+
+    assert result["transcript_source"] is None
+    assert result["matched_in"] == ["title", "analysis"]
+    assert result["excerpts"] == []
 
 
 def test_search_result_fields_share_names_and_types_with_the_library_item(
@@ -278,12 +294,9 @@ def test_database_errors_are_503_with_a_fixed_body_and_logged(
 
 
 def test_an_unreachable_database_is_503(
-    app: FastAPI, logs: LogSink, monkeypatch: pytest.MonkeyPatch
+    app: FastAPI, logs: LogSink, use_pool: Any
 ) -> None:
-    def refuse(**kwargs: Any) -> Any:
-        raise psycopg.OperationalError(f"could not connect to {UNREACHABLE_DSN}")
-
-    monkeypatch.setattr(deps, "connect", refuse)
+    use_pool(FakePool(getconn_error=psycopg.OperationalError(f"could not connect to {UNREACHABLE_DSN}")))
     with TestClient(app) as client:
         response = client.get("/search", params={"q": "zebra"})
 

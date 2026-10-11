@@ -405,6 +405,27 @@ Encoding the D2 preference order as a SQL function keeps it in one place —
 otherwise it gets re-implemented inconsistently in the analyzer, the API, and
 the SPA.
 
+Search (#111) matches more than the transcript, so a second table holds one
+combined, weighted vector per video. A generated column cannot read other
+tables, so `search_docs.fts` is a plain column kept in sync by the database
+(triggers on `videos`, `transcripts` and `analyses`; the `analyses` one is a
+deferred constraint trigger that fires at commit, after topics and claims are
+inserted). It is created by migration `0010_search_docs`:
+
+```sql
+CREATE TABLE search_docs (
+    video_id   TEXT PRIMARY KEY REFERENCES videos(video_id) ON DELETE CASCADE,
+    fts        tsvector NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX search_docs_fts_idx ON search_docs USING GIN (fts);
+-- refresh_search_doc(video_id) builds: title (A) || latest analysis TL;DR (B)
+-- || topic titles+summaries (C) || claim texts (C) || preferred transcript's
+-- transcripts.fts (D). Title and analysis text are always 'english'.
+```
+
+Query weights are `'{0.1, 0.2, 0.4, 1.0}'` (D, C, B, A).
+
 ```sql
 -- ============ chunks (D9c) ============
 
@@ -699,7 +720,7 @@ separated per D13.
 | `GET` | `/videos/{id}/analyses` | all runs (Compare view, D7) |
 | `GET` | `/videos/{id}/transcript` | paginated segments |
 | `GET` | `/videos/{id}/render` | **server-side HTML render** (D12c) |
-| `GET` | `/search?q=` | FTS with `ts_headline` excerpts |
+| `GET` | `/search?q=` | FTS over `search_docs` (title, latest analysis, preferred transcript); `matched_in` and transcript `ts_headline` excerpts |
 | `GET` | `/ops/jobs` | filter by state/kind — powers Ops view |
 | `POST` | `/ops/jobs/{id}/retry` | resurrect a dead job |
 | `GET` | `/healthz` | liveness + queue depth by kind/state |

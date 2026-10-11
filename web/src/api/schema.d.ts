@@ -522,12 +522,14 @@ export interface components {
             duration_sec: number | null;
             /** Excerpts */
             excerpts: components["schemas"]["SpanOut"][][];
+            /** Matched In */
+            matched_in: ("title" | "analysis" | "transcript")[];
             /** Published At */
             published_at: string | null;
             /** Title */
             title: string | null;
             /** Transcript Source */
-            transcript_source: string;
+            transcript_source: string | null;
             /** Unavailable */
             unavailable: string | null;
             /** Video Id */

@@ -18,6 +18,7 @@ function hit(n: number, over: Partial<SearchResult> = {}): SearchResult {
     duration_sec: 60,
     unavailable: null,
     transcript_source: 'whisper',
+    matched_in: ['transcript'],
     excerpts: [[{ text: `excerpt ${n}`, match: false }]],
     ...over,
   }

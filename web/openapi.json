@@ -772,6 +772,18 @@
             "title": "Excerpts",
             "type": "array"
           },
+          "matched_in": {
+            "items": {
+              "enum": [
+                "title",
+                "analysis",
+                "transcript"
+              ],
+              "type": "string"
+            },
+            "title": "Matched In",
+            "type": "array"
+          },
           "published_at": {
             "anyOf": [
               {
@@ -796,8 +808,15 @@
             "title": "Title"
           },
           "transcript_source": {
-            "title": "Transcript Source",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transcript Source"
           },
           "unavailable": {
             "anyOf": [
@@ -824,6 +843,7 @@
           "duration_sec",
           "unavailable",
           "transcript_source",
+          "matched_in",
           "excerpts"
         ],
         "title": "SearchResult",

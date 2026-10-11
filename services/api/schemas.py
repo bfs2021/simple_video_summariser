@@ -159,7 +159,9 @@ class SpanOut(BaseModel):
 
 
 class SearchResult(VideoFields):
-    transcript_source: str
+    #: ``None`` when the video matched on its title or analysis and has no transcript.
+    transcript_source: str | None
+    matched_in: list[Literal["title", "analysis", "transcript"]]
     excerpts: list[list[SpanOut]]
 
 
@@ -182,6 +184,7 @@ def search_page(page: RepoSearchPage, *, limit: int, offset: int) -> SearchPage:
                 duration_sec=hit.duration_sec,
                 unavailable=hit.unavailable,
                 transcript_source=hit.transcript_source,
+                matched_in=list(hit.matched_in),
                 excerpts=[
                     [SpanOut(text=span.text, match=span.match) for span in fragment]
                     for fragment in hit.excerpts
