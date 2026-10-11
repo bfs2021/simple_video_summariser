@@ -343,8 +343,26 @@ def _probe_videos(
     return outcome
 
 
+# Past a bigint no real estimate exists; an absurd duration gets "unknown" like
+# any non-finite one, instead of a 300-digit integer in the response.
+_MAX_ESTIMATE_INT = 2**63 - 1
+
+
 def _round_int(value: float) -> int | None:
-    return round(value) if math.isfinite(value) else None
+    if not math.isfinite(value) or abs(value) > _MAX_ESTIMATE_INT:
+        return None
+    return round(value)
+
+
+def _scaled_int(seconds: int, factor: float) -> int | None:
+    """``seconds * factor`` rounded; ``None`` when the product is not a sane number.
+
+    ``int * float`` raises ``OverflowError`` once the int exceeds the float range.
+    """
+    try:
+        return _round_int(seconds * factor)
+    except OverflowError:
+        return None
 
 
 def _round_cost(value: float) -> float | None:
@@ -374,11 +392,11 @@ def _estimate(
         elif rtf is None or duration is None:
             transcription = None
         else:
-            transcription = _round_int(duration * rtf)
+            transcription = _scaled_int(duration, rtf)
         chars = (
             None
             if chars_per_sec is None or duration is None
-            else _round_int(duration * chars_per_sec)
+            else _scaled_int(duration, chars_per_sec)
         )
         cost = (
             None
@@ -417,7 +435,7 @@ def _estimate(
         unknown_duration=len(new) - len(durations),
         rtf=rtf,
         rtf_samples=rtf_samples,
-        transcription_sec=None if rtf is None else _round_int(transcribe_audio * rtf),
+        transcription_sec=None if rtf is None else _scaled_int(transcribe_audio, rtf),
         probed=outcome.probed,
         manual_subtitles=manual,
         needs_transcription=transcribe,

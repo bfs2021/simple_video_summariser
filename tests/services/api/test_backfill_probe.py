@@ -444,6 +444,22 @@ def test_a_huge_duration_or_rate_cannot_overflow_the_estimate() -> None:
     assert estimate.llm.cost_usd is None
 
 
+@pytest.mark.parametrize("duration", [10**308, 10**400])
+def test_an_absurd_integer_duration_gives_null_estimates_not_an_error_or_a_huge_int(
+    duration: int,
+) -> None:
+    # 10**400 raises OverflowError on int -> float; 10**308 converts, and the
+    # rounded product would be a 309-digit integer
+    new = [CatalogEntry(_vid(0), "t", duration)]
+
+    estimate, videos = _est(new, rtf=0.5, chars_per_sec=0.5)
+
+    assert videos[0].transcription_sec is None
+    assert videos[0].est_input_tokens is None
+    assert videos[0].llm_cost_usd is None
+    assert estimate.transcription_sec is None
+
+
 def test_a_zero_duration_video_does_not_divide_or_break() -> None:
     estimate, videos = _est([CatalogEntry(_vid(0), "t", 0)])
 
