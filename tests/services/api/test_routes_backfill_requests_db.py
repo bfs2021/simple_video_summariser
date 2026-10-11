@@ -21,6 +21,7 @@ from common.queue import PostgresQueue
 from common.repo.backfill_requests import create_request
 from services.api import routes_write
 from services.api.main import create_app
+from services.planner import backfill as planner_backfill
 from services.planner.backfill import run_channel_backfill
 
 pytestmark = pytest.mark.integration
@@ -112,23 +113,28 @@ def test_a_post_racing_an_uncommitted_request_waits_then_gets_409(
 
 
 def test_planner_result_is_served_and_cancel_ends_the_request(
-    api: TestClient, db: psycopg.Connection[Any], head_dsn: str
+    api: TestClient,
+    db: psycopg.Connection[Any],
+    head_dsn: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # a per-run cap of 5 against 6 videos: one more than a run may write
+    monkeypatch.setattr(planner_backfill, "BACKFILL_ENQUEUE_PER_RUN", 5)
     rid = _post(api, limit=5000, dry_run=False).json()["request_id"]
     with psycopg.connect(head_dsn) as conn:
         run_channel_backfill(
-            conn, PostgresQueue(conn), Catalog(600), settings=Settings(DATABASE_URL=head_dsn)  # type: ignore[arg-type]
+            conn, PostgresQueue(conn), Catalog(6), settings=Settings(DATABASE_URL=head_dsn)  # type: ignore[arg-type]
         )
     body = api.get(f"/channels/{CHANNEL}/backfill-requests/{rid}").json()
-    assert (body["state"], body["enqueued"]) == ("running", 500)
-    assert body["result"]["enqueued"] == 500 and body["result"]["new_videos"] == 600
+    assert (body["state"], body["enqueued"]) == ("running", 5)
+    assert body["result"]["enqueued"] == 5 and body["result"]["new_videos"] == 6
 
     cancelled = api.post(
         f"/channels/{CHANNEL}/backfill/cancel",
         json={"backfill_id": body["result"]["backfill_id"]},
     )
 
-    assert cancelled.status_code == 200 and cancelled.json()["cancelled"] == 500
+    assert cancelled.status_code == 200 and cancelled.json()["cancelled"] == 5
     after = api.get(f"/channels/{CHANNEL}/backfill-requests/{rid}").json()
     assert (after["state"], after["error_class"]) == ("failed", "CANCELLED")
     assert db.execute("SELECT count(*) FROM jobs").fetchone() == (0,)

@@ -32,16 +32,18 @@ from common.repo.backfill_requests import (
     request_backfill_id,
 )
 from services.api.routes_write import BackfillResponse
-from services.planner.backfill import (
-    BACKFILL_ENQUEUE_PER_RUN,
-    BACKFILL_MAX_PENDING,
-    run_channel_backfill,
-)
+from services.planner import backfill as planner_backfill
+from services.planner.backfill import run_channel_backfill
 from services.planner.main import run_on_fresh_connection
 
 pytestmark = pytest.mark.integration
 
 CHANNEL = "UCuAXFkgsw1L7xaCfnd5JJOw"
+
+# The real caps (500 per run, 1000 pending) are safety bounds the unit test pins.
+# These tests prove the slicing and back-pressure logic with small injected ones.
+PER_RUN = 5
+MAX_PENDING = 10
 OTHER = "UCxxxxxxxxxxxxxxxxxxxxxx"
 SECRET = "yt-dlp stderr https://www.youtube.com/playlist?list=UUsecret"
 
@@ -77,6 +79,13 @@ class FakeCatalog:
 @pytest.fixture
 def settings(head_dsn: str) -> Settings:
     return Settings(DATABASE_URL=SecretStr(head_dsn))
+
+
+@pytest.fixture
+def small_caps(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Per-run cap 5 and pending ceiling 10; the run reads both module globals at call time."""
+    monkeypatch.setattr(planner_backfill, "BACKFILL_ENQUEUE_PER_RUN", PER_RUN)
+    monkeypatch.setattr(planner_backfill, "BACKFILL_MAX_PENDING", MAX_PENDING)
 
 
 @pytest.fixture
@@ -201,11 +210,12 @@ def test_result_has_exactly_the_synchronous_routes_response_keys(
     BackfillResponse.model_validate(result)  # same shape, same types
 
 
-def test_1200_new_videos_take_three_runs_of_500_500_200(
+@pytest.mark.usefixtures("small_caps")
+def test_12_new_videos_take_three_runs_of_5_5_2(
     db: psycopg.Connection[Any], settings: Settings
 ) -> None:
     rid = _request(db)
-    catalog = FakeCatalog(db, _entries(1200))
+    catalog = FakeCatalog(db, _entries(12))
     per_run: list[int] = []
     states: list[str] = []
     for _ in range(3):
@@ -213,20 +223,21 @@ def test_1200_new_videos_take_three_runs_of_500_500_200(
         _drain(db)  # the -10 jobs drain between runs
         states.append(_row(db, rid).state)
 
-    assert per_run == [500, 500, 200]
+    assert per_run == [5, 5, 2]
     assert states == ["running", "running", "done"]
     row = _row(db, rid)
-    assert row.enqueued == 1200
-    assert _count(db, "videos") == 1200 and _count(db, "jobs") == 1200
+    assert row.enqueued == 12
+    assert _count(db, "videos") == 12 and _count(db, "jobs") == 12
     assert _run(db, catalog, settings) == 0  # nothing left to claim
     assert len(catalog.calls) == 3
 
 
+@pytest.mark.usefixtures("small_caps")
 def test_each_runs_result_describes_that_runs_listing_and_the_column_is_cumulative(
     db: psycopg.Connection[Any], settings: Settings
 ) -> None:
     rid = _request(db)
-    catalog = FakeCatalog(db, _entries(700))
+    catalog = FakeCatalog(db, _entries(7))
 
     _run(db, catalog, settings)
     first = _row(db, rid)
@@ -234,31 +245,33 @@ def test_each_runs_result_describes_that_runs_listing_and_the_column_is_cumulati
     _run(db, catalog, settings)
     second = _row(db, rid)
 
-    assert first.result["enqueued"] == 500 and first.enqueued == 500
-    assert first.result["new_videos"] == 700 and len(first.result["video_ids"]) == 700
-    assert second.result["enqueued"] == 200 and second.enqueued == 700
-    assert second.result["new_videos"] == 200
-    assert second.result["video_ids"] == [_vid(i) for i in range(500, 700)]
-    assert second.result["already_known"] == 500
+    assert first.result["enqueued"] == 5 and first.enqueued == 5
+    assert first.result["new_videos"] == 7 and len(first.result["video_ids"]) == 7
+    assert second.result["enqueued"] == 2 and second.enqueued == 7
+    assert second.result["new_videos"] == 2
+    assert second.result["video_ids"] == [_vid(i) for i in range(5, 7)]
+    assert second.result["already_known"] == 5
 
 
+@pytest.mark.usefixtures("small_caps")
 def test_exactly_the_per_run_cap_of_new_videos_finishes_in_one_run(
     db: psycopg.Connection[Any], settings: Settings
 ) -> None:
     rid = _request(db)
 
-    assert _run(db, FakeCatalog(db, _entries(BACKFILL_ENQUEUE_PER_RUN)), settings) == 500
+    assert _run(db, FakeCatalog(db, _entries(PER_RUN)), settings) == PER_RUN
 
     assert _row(db, rid).state == "done"
 
 
+@pytest.mark.usefixtures("small_caps")
 def test_one_over_the_per_run_cap_needs_a_second_run(
     db: psycopg.Connection[Any], settings: Settings
 ) -> None:
     rid = _request(db)
-    catalog = FakeCatalog(db, _entries(BACKFILL_ENQUEUE_PER_RUN + 1))
+    catalog = FakeCatalog(db, _entries(PER_RUN + 1))
 
-    assert _run(db, catalog, settings) == 500
+    assert _run(db, catalog, settings) == PER_RUN
     assert _row(db, rid).state == "running"
     _drain(db)
     assert _run(db, catalog, settings) == 1
@@ -279,13 +292,14 @@ def _seed_pending_backfill_jobs(conn: psycopg.Connection[Any], n: int) -> None:
     conn.commit()
 
 
-@pytest.mark.parametrize(("pending", "expected"), [(1000, 0), (1200, 0), (999, 1), (700, 300)])
+@pytest.mark.usefixtures("small_caps")
+@pytest.mark.parametrize(("pending", "expected"), [(10, 0), (12, 0), (9, 1), (7, 3)])
 def test_backpressure_shrinks_the_run_to_the_free_budget(
     db: psycopg.Connection[Any], settings: Settings, pending: int, expected: int
 ) -> None:
     _seed_pending_backfill_jobs(db, pending)
     rid = _request(db)
-    catalog = FakeCatalog(db, _entries(400))
+    catalog = FakeCatalog(db, _entries(6))
 
     assert _run(db, catalog, settings) == expected
 
@@ -299,18 +313,22 @@ def test_backpressure_shrinks_the_run_to_the_free_budget(
         assert catalog.calls == [(CHANNEL, 5000)]
 
 
+@pytest.mark.usefixtures("small_caps")
 def test_only_pending_ingests_at_the_backfill_priority_count_toward_backpressure(
     db: psycopg.Connection[Any], settings: Settings
 ) -> None:
-    _seed_pending_backfill_jobs(db, BACKFILL_MAX_PENDING)
-    db.execute("UPDATE jobs SET state = 'done' WHERE id % 2 = 0")
-    db.execute("UPDATE jobs SET priority = %s WHERE id %% 2 = 1 AND id %% 4 = 1", (PRIORITY_NORMAL,))
+    _seed_pending_backfill_jobs(db, MAX_PENDING)
+    # 2 done, 2 at normal priority: 6 pending at -10 remain, so the budget is 4,
+    # below the run cap of 5. Counting by state or by priority alone gives 8 -> 2.
+    ids = [int(r[0]) for r in db.execute("SELECT id FROM jobs ORDER BY id").fetchall()]
+    db.execute("UPDATE jobs SET state = 'done' WHERE id = ANY(%s)", (ids[:2],))
+    db.execute("UPDATE jobs SET priority = %s WHERE id = ANY(%s)", (PRIORITY_NORMAL, ids[2:4]))
     db.commit()
     rid = _request(db)
 
-    ran = _run(db, FakeCatalog(db, _entries(2000)), settings)
+    ran = _run(db, FakeCatalog(db, _entries(20)), settings)
 
-    assert ran == 500  # 250 pending at -10 remain: the budget is 750, the run cap 500
+    assert ran == MAX_PENDING - 6
     assert _row(db, rid).state == "running"
 
 
@@ -560,6 +578,7 @@ def test_enqueued_work_survives_the_connection_closing(
     assert row == ("done", 3)
 
 
+@pytest.mark.usefixtures("small_caps")
 @pytest.mark.parametrize("scenario", ["idle", "dry_run", "backpressure", "failure"])
 def test_every_path_returns_with_an_idle_connection(
     db: psycopg.Connection[Any], settings: Settings, scenario: str
@@ -568,7 +587,7 @@ def test_every_path_returns_with_an_idle_connection(
     if scenario == "dry_run":
         _request(db, dry_run=True)
     elif scenario == "backpressure":
-        _seed_pending_backfill_jobs(db, BACKFILL_MAX_PENDING)
+        _seed_pending_backfill_jobs(db, MAX_PENDING)
         _request(db)
     elif scenario == "failure":
         _request(db)
