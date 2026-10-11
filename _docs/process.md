@@ -12,6 +12,31 @@ Orchestrator
 
 The main session is the orchestrator. Use Sonnet model with Medium effort for it, as it is just a controller that process goes smoothly. It launches the PM, the engineer and QA as subagents. It does not groom, implement or test itself.
 
+While a subagent is running, check on it about every 5 minutes rather than
+waiting for its completion notification. Decide which of three states it is
+in: working, finished but silent, or stuck. Notifications can arrive late, out
+of order, or not at all (an agent killed by a rate limit may never send one),
+so waiting on them is not monitoring.
+
+Check from outside the agent. Never read its task output file to do this: that
+is the full subagent transcript and it floods the orchestrator's context.
+
+- `ls -lt --time-style=+%H:%M:%S <the files it owns>` against the current time.
+  The newest mtime versus now is the single best liveness signal
+- `pgrep -af 'pytest|alembic|npm|vitest'` - is real work actually running
+- `git log --oneline --since='N minutes ago'` and `git status --short`
+- `gh issue view <n> --json comments --jq '.comments[-1]'` - an agent posts a
+  parking note when it stops on a blocker, which is the fastest way to learn why
+
+Recent mtimes or a live pytest means working: say so briefly and leave it
+alone. A clean tree, a fresh commit and no processes means finished: go read
+its issue comments and move on without waiting for the notification. Old
+mtimes with no processes and no commit means stuck or dead: nudge it with a
+message, or treat it as dead and check the tree for damage before resuming it.
+
+Beware `pgrep -f`: it matches the polling shell's own command line, so
+`until ! pgrep -f X; do sleep 5; done` waits on itself forever. Kill by PID.
+
 Lifecycle
 
 1. Pick the next open issue from the backlog
