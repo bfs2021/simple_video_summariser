@@ -12,15 +12,8 @@ from typing import Any
 import pytest
 import structlog
 
-from common.errors import (
-    PermanentSourceError,
-    RateLimitedError,
-    ToolFailureError,
-    TransientNetworkError,
-)
-from common.models import CatalogEntry
-from services.api import backfill as bf
-from services.api.backfill import (
+from common import backfill as bf
+from common.backfill import (
     BACKFILL_DRY_RUN_DEADLINE_SEC,
     BACKFILL_PROBE_CONCURRENCY,
     BACKFILL_PROBE_TIMEOUT_SEC,
@@ -29,6 +22,13 @@ from services.api.backfill import (
     _probe_videos,
     _ProbeOutcome,
 )
+from common.errors import (
+    PermanentSourceError,
+    RateLimitedError,
+    ToolFailureError,
+    TransientNetworkError,
+)
+from common.models import CatalogEntry
 
 CHANNEL = "UCuAXFkgsw1L7xaCfnd5JJOw"
 

@@ -18,6 +18,7 @@ from common.models import (
     TranscriptPage,
     VideoSummary,
 )
+from common.repo.backfill_requests import BackfillRequestRow
 from common.repo.jobs import JobRow
 from common.repo.search import SearchPage as RepoSearchPage
 
@@ -365,4 +366,42 @@ def transcript_out(page: TranscriptPage, *, offset: int, limit: int) -> Transcri
             SegmentOut(index=s.index, start=s.start, end=s.end, text=s.text, speaker=s.speaker)
             for s in page.segments
         ],
+    )
+
+
+class BackfillRequestOut(BaseModel):
+    """``GET /channels/{id}/backfill-requests/{request_id}`` (#115).
+
+    ``result`` is ``null`` until the first listing succeeds; then it has the
+    keys of ``POST /channels/{id}/backfill``'s response.
+    """
+
+    request_id: int
+    channel_id: str
+    limit: int
+    dry_run: bool
+    state: Literal["pending", "running", "done", "failed"]
+    attempts: int
+    enqueued: int
+    error_class: str | None
+    created_at: UtcDatetime
+    updated_at: UtcDatetime
+    finished_at: UtcDatetime | None
+    result: dict[str, JsonValue] | None
+
+
+def backfill_request_out(row: BackfillRequestRow) -> BackfillRequestOut:
+    return BackfillRequestOut(
+        request_id=row.id,
+        channel_id=row.channel_id,
+        limit=row.limit_n,
+        dry_run=row.dry_run,
+        state=cast(Any, row.state),
+        attempts=row.attempts,
+        enqueued=row.enqueued,
+        error_class=row.error_class,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        finished_at=row.finished_at,
+        result=cast(Any, row.result),
     )

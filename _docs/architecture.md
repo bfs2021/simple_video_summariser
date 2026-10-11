@@ -279,6 +279,13 @@ history. Only uploads positioned above a known post-`monitor_from` video (the
 anchor) in the channel's newest-50 listing are recovered; anything below it may
 be pre-cutoff history and stays for an explicit backfill (D9b, #41).
 
+Backfills beyond `POST /channels/{id}/backfill`'s 500 uploads (#115) are not a
+job kind: `jobs.video_id` is `NOT NULL`, so a per-channel job does not fit, and a
+multi-minute listing would hold a transcriber slot. The API records a row in
+`backfill_requests`, and the planner task `channel_backfill` (every
+`BACKFILL_INTERVAL_SEC`) takes one bounded slice of the oldest active request per
+run: at most 500 new videos, fewer while 1000 backfill `ingest` jobs are pending.
+
 ---
 
 ## 5. Job lifecycle
@@ -720,6 +727,8 @@ separated per D13.
 | `POST` | `/videos` | body `{url}`; priority `+10`; returns job id |
 | `POST` | `/channels` | forward-only; sets `monitor_from` |
 | `POST` | `/channels/{id}/backfill` | `{limit, dry_run}`; priority `-10` (D9b) |
+| `POST` | `/channels/{id}/backfill-requests` | `{limit <= 5000, dry_run}`; only records a request, the planner `channel_backfill` task runs it (#115); `409` while the channel has a pending or running one |
+| `GET` | `/channels/{id}/backfill-requests/{request_id}` | state, attempts, enqueued, timestamps and `result` (the shape of the synchronous response) (#115) |
 | `POST` | `/channels/{id}/backfill/cancel` | `{backfill_id}`; deletes that backfill's pending `ingest` jobs (#116) |
 | `POST` | `/videos/{id}/reanalyze` | force new `analyze` at current version |
 | `GET` | `/videos` | paginated library view; filters: channel, state, date |
@@ -735,6 +744,12 @@ separated per D13.
 
 Every route passes through `deps.require_auth` — a no-op returning `None` in
 v1, one implementation change away from enforcing a bearer token (D13).
+
+`POST /channels/{id}/backfill` (#41) stays synchronous for `limit <= 500`
+(90 s listing, inside nginx's `proxy_read_timeout`). Larger backfills, up to the
+catalog adapter's 5000, go through a backfill request that the planner
+processes outside the HTTP request. Cancelling with the request's `backfill_id`
+(in its `result`) also ends the request (`failed`, `error_class = CANCELLED`).
 
 #### 8.3.1 `POST /channels/{id}/backfill` and the catalog's `REMOVED` ambiguity
 
@@ -923,6 +938,7 @@ than reading `os.environ` directly.
 | `AUDIO_MIN_FREE_GB` / `AUDIO_MIN_FREE_PCT` | `2` / `5` | planner: free-space floor on the `AUDIO_DIR` volume (#105). When free space is below the larger of the two, audio retention evicts the oldest audio beyond what `AUDIO_MAX_GB` would, never a running job's. `0` for either disables that half; `AUDIO_MIN_FREE_PCT` is `0 <= x < 100`. A floor at or above the volume size evicts nothing and logs `planner.audio_retention.free_space_floor_invalid` |
 | `POLL_INTERVAL_SEC` | `3600` | planner |
 | `RECONCILE_INTERVAL_SEC` | `21600` | planner: how often each active channel's newest uploads are checked against the RSS feed for videos it dropped (#93) |
+| `BACKFILL_INTERVAL_SEC` | `60` | planner: how often the `channel_backfill` task takes one bounded slice of the oldest pending backfill request (#115) |
 | `UPCOMING_MAX_WAIT_DAYS` | `14` | transcriber: ingest reschedules a premiere or live stream until it is available, and dead-letters it this many days after discovery (#65) |
 | `HEARTBEAT_SEC` / `REAP_AFTER_SEC` | `60` / `300` | workers, planner |
 | `MAX_ATTEMPTS_TRANSCRIBE` | `2` | transcriber |

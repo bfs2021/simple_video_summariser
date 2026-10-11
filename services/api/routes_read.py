@@ -6,6 +6,7 @@
 - ``GET /videos/{video_id}/transcript``: one page of the best transcript's segments.
 - ``GET /videos/{video_id}/render``: the latest analysis as one HTML page (#45).
 - ``GET /search``: full-text search over each video's preferred transcript (#43).
+- ``GET /channels/{id}/backfill-requests/{request_id}``: one backfill request (#115).
 
 Every path and query parameter is untrusted. It is validated by a gate
 dependency that runs before ``get_read_conn``, so a 422 never opens a
@@ -43,6 +44,7 @@ from common.repo.analyses import (
     latest_analysis_run,
     list_analysis_runs,
 )
+from common.repo.backfill_requests import get_request
 from common.repo.channels import get_channel_title
 from common.repo.search import search_transcripts
 from common.repo.transcripts import best_transcript_info, best_transcript_page
@@ -90,6 +92,9 @@ MAX_SEARCH_CHARS = 200
 MAX_SEARCH_OFFSET = 1000
 BAD_VIDEO_ID = "video id must be 11 characters of A-Z, a-z, 0-9, '_' or '-'"
 VIDEO_NOT_FOUND = "video not found"
+BAD_BACKFILL_CHANNEL = "channel_id must be a canonical YouTube channel ID (UC + 22 characters)"
+BAD_REQUEST_ID = "request id must be a positive integer"
+BACKFILL_REQUEST_NOT_FOUND = "backfill request not found"
 TRANSCRIPT_NOT_FOUND = "transcript not found"
 NO_ANALYSIS_YET = "no analysis yet"
 ANALYSIS_NOT_FOUND = "analysis not found"
@@ -258,7 +263,26 @@ def _valid_video_id(request: Request, video_id: str) -> str:
     return video_id
 
 
+def _valid_backfill_channel(channel_id: str) -> str:
+    if not is_channel_id(channel_id):
+        raise RequestValidationError(
+            [{"loc": ("path", "channel_id"), "msg": BAD_BACKFILL_CHANNEL, "type": "value_error"}]
+        )
+    return channel_id
+
+
+def _valid_request_id(request_id: str) -> int:
+    """Plain ASCII digits, 1..BIGINT max; the message never echoes the input."""
+    if _ID_DIGITS.fullmatch(request_id) is None or not 1 <= int(request_id) <= _BIGINT_MAX:
+        raise RequestValidationError(
+            [{"loc": ("path", "request_id"), "msg": BAD_REQUEST_ID, "type": "value_error"}]
+        )
+    return int(request_id)
+
+
 ReadConn = Annotated[psycopg.Connection[Any], Depends(get_read_conn)]
+BackfillChannelId = Annotated[str, Depends(_valid_backfill_channel)]
+BackfillRequestId = Annotated[int, Depends(_valid_request_id)]
 VideoId = Annotated[str, Depends(_valid_video_id)]
 
 
@@ -284,6 +308,20 @@ def get_videos(
         offset=params.offset,
         limit=params.limit,
     )
+
+
+@router.get(
+    "/channels/{channel_id}/backfill-requests/{request_id}",
+    response_model=schemas.BackfillRequestOut,
+)
+def get_backfill_request(
+    channel_id: BackfillChannelId, request_id: BackfillRequestId, conn: ReadConn
+) -> schemas.BackfillRequestOut:
+    """One backfill request's progress (#115); ``result`` is null until a listing succeeded."""
+    row = get_request(conn, channel_id, request_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, BACKFILL_REQUEST_NOT_FOUND)
+    return schemas.backfill_request_out(row)
 
 
 @router.get("/videos/{video_id}", response_model=schemas.VideoDetail)

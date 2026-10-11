@@ -366,6 +366,164 @@
         "title": "BackfillRequest",
         "type": "object"
       },
+      "BackfillRequestBody": {
+        "additionalProperties": false,
+        "description": "Same strictness as ``BackfillRequest``, with the larger cap (#115).",
+        "properties": {
+          "dry_run": {
+            "default": true,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "limit": {
+            "maximum": 5000.0,
+            "minimum": 1.0,
+            "title": "Limit",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "limit"
+        ],
+        "title": "BackfillRequestBody",
+        "type": "object"
+      },
+      "BackfillRequestCreated": {
+        "properties": {
+          "channel_id": {
+            "title": "Channel Id",
+            "type": "string"
+          },
+          "dry_run": {
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "integer"
+          },
+          "state": {
+            "const": "pending",
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "channel_id",
+          "limit",
+          "dry_run",
+          "state"
+        ],
+        "title": "BackfillRequestCreated",
+        "type": "object"
+      },
+      "BackfillRequestOut": {
+        "description": "``GET /channels/{id}/backfill-requests/{request_id}`` (#115).\n\n``result`` is ``null`` until the first listing succeeds; then it has the\nkeys of ``POST /channels/{id}/backfill``'s response.",
+        "properties": {
+          "attempts": {
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "channel_id": {
+            "title": "Channel Id",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "dry_run": {
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "enqueued": {
+            "title": "Enqueued",
+            "type": "integer"
+          },
+          "error_class": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Class"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "integer"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/JsonValue"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "running",
+              "done",
+              "failed"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "channel_id",
+          "limit",
+          "dry_run",
+          "state",
+          "attempts",
+          "enqueued",
+          "error_class",
+          "created_at",
+          "updated_at",
+          "finished_at",
+          "result"
+        ],
+        "title": "BackfillRequestOut",
+        "type": "object"
+      },
       "BackfillResponse": {
         "properties": {
           "already_known": {
@@ -1954,6 +2112,108 @@
           }
         },
         "summary": "Post Channel Backfill"
+      }
+    },
+    "/channels/{channel_id}/backfill-requests": {
+      "post": {
+        "description": "Record a backfill of up to 5000 uploads for the planner to run (#115).\n\nLists nothing and runs no subprocess: the planner's ``channel_backfill``\ntask does the yt-dlp listing and the enqueueing later, in bounded slices.\nThe unique index on active requests decides concurrent submissions: one\ngets 202, the others 409 with the existing ``request_id``. Poll\n``GET /channels/{id}/backfill-requests/{request_id}`` for progress.",
+        "operationId": "post_channel_backfill_request_channels__channel_id__backfill_requests_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "channel_id",
+            "required": true,
+            "schema": {
+              "title": "Channel Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackfillRequestBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackfillRequestCreated"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "description": "The channel already has a pending or running request"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Post Channel Backfill Request"
+      }
+    },
+    "/channels/{channel_id}/backfill-requests/{request_id}": {
+      "get": {
+        "description": "One backfill request's progress (#115); ``result`` is null until a listing succeeded.",
+        "operationId": "get_backfill_request_channels__channel_id__backfill_requests__request_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "channel_id",
+            "required": true,
+            "schema": {
+              "title": "Channel Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "title": "Request Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackfillRequestOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Backfill Request"
       }
     },
     "/channels/{channel_id}/backfill/cancel": {

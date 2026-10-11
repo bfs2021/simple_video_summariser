@@ -1,6 +1,6 @@
 """Planner service entrypoint (issue #38; architecture.md §1, §11.1).
 
-``python -m services.planner.main`` runs the eight periodic maintenance tasks
+``python -m services.planner.main`` runs the nine periodic maintenance tasks
 in one long-lived process, each on its own interval:
 
 ============================  ============================  =============================
@@ -16,6 +16,8 @@ task                          interval                      what it does
 ``poll_channels``             ``POLL_INTERVAL_SEC``         discover new videos from RSS
 ``reconcile_channels``        ``RECONCILE_INTERVAL_SEC``    recover uploads that fell out of the
                                                             ~15-entry RSS feed between polls (#93)
+``channel_backfill``          ``BACKFILL_INTERVAL_SEC``     one bounded slice of the oldest pending
+                                                            backfill request (#115)
 ``dead_letter_alerts``        ``REAP_INTERVAL_SEC``         alert on TOOL_FAILURE / RESOURCE
                                                             dead-letters (#67); a no-op
                                                             without ``ALERT_WEBHOOK_URL``
@@ -98,6 +100,10 @@ from common.queue import PostgresQueue
 from common.repo import planner_runs
 from common.shutdown import SignalLatch
 from services.planner.alerts import send_dead_letter_alerts
+from services.planner.backfill import (
+    BACKFILL_REQUEST_LIST_TIMEOUT_SEC,
+    run_channel_backfill,
+)
 from services.planner.fallback import run_auto_caption_fallback_sweep
 from services.planner.poll import poll_channels
 from services.planner.reaper import reap_stale_jobs
@@ -126,6 +132,7 @@ LOCK_KEYS: dict[str, tuple[int, int]] = {
     "auto_caption_fallback": (LOCK_NAMESPACE, 6),
     "reconcile_channels": (LOCK_NAMESPACE, 7),
     "stale_analyze": (LOCK_NAMESPACE, 8),
+    "channel_backfill": (LOCK_NAMESPACE, 9),
 }
 
 Connect = Callable[[], psycopg.Connection[Any]]
@@ -314,6 +321,19 @@ def build_registry(settings: Settings, connect: Connect) -> list[Task]:
         reconcile_cursor[0] = result.resume_after
         return result.jobs_enqueued
 
+    def channel_backfill(conn: psycopg.Connection[Any]) -> int:
+        # Built per run (cheap, no I/O) so the registry stays free of adapters' state.
+        catalog = YouTubeCatalog(
+            timeout=BACKFILL_REQUEST_LIST_TIMEOUT_SEC, cookie_file=settings.YTDLP_COOKIE_FILE
+        )
+        return run_channel_backfill(
+            conn,
+            PostgresQueue(conn, settings=settings),
+            catalog,
+            settings=settings,
+            clock=time.monotonic,
+        )
+
     webhook = settings.ALERT_WEBHOOK_URL
     sink = (
         WebhookAlerter(webhook.get_secret_value(), fmt=settings.ALERT_WEBHOOK_FORMAT)
@@ -338,6 +358,7 @@ def build_registry(settings: Settings, connect: Connect) -> list[Task]:
         Task("reanalysis_sweep", settings.POLL_INTERVAL_SEC, with_conn(reanalysis_sweep)),
         Task("poll_channels", settings.POLL_INTERVAL_SEC, with_conn(poll)),
         Task("reconcile_channels", settings.RECONCILE_INTERVAL_SEC, with_conn(reconcile)),
+        Task("channel_backfill", settings.BACKFILL_INTERVAL_SEC, with_conn(channel_backfill)),
         Task(
             "dead_letter_alerts",
             settings.REAP_INTERVAL_SEC,

@@ -54,6 +54,52 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/channels/{channel_id}/backfill-requests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Post Channel Backfill Request
+         * @description Record a backfill of up to 5000 uploads for the planner to run (#115).
+         *
+         *     Lists nothing and runs no subprocess: the planner's ``channel_backfill``
+         *     task does the yt-dlp listing and the enqueueing later, in bounded slices.
+         *     The unique index on active requests decides concurrent submissions: one
+         *     gets 202, the others 409 with the existing ``request_id``. Poll
+         *     ``GET /channels/{id}/backfill-requests/{request_id}`` for progress.
+         */
+        post: operations["post_channel_backfill_request_channels__channel_id__backfill_requests_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/channels/{channel_id}/backfill-requests/{request_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Backfill Request
+         * @description One backfill request's progress (#115); ``result`` is null until a listing succeeded.
+         */
+        get: operations["get_backfill_request_channels__channel_id__backfill_requests__request_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/channels/{channel_id}/backfill/cancel": {
         parameters: {
             query?: never;
@@ -446,6 +492,79 @@ export interface components {
             dry_run: boolean;
             /** Limit */
             limit: number;
+        };
+        /**
+         * BackfillRequestBody
+         * @description Same strictness as ``BackfillRequest``, with the larger cap (#115).
+         */
+        BackfillRequestBody: {
+            /**
+             * Dry Run
+             * @default true
+             */
+            dry_run: boolean;
+            /** Limit */
+            limit: number;
+        };
+        /** BackfillRequestCreated */
+        BackfillRequestCreated: {
+            /** Channel Id */
+            channel_id: string;
+            /** Dry Run */
+            dry_run: boolean;
+            /** Limit */
+            limit: number;
+            /** Request Id */
+            request_id: number;
+            /**
+             * State
+             * @constant
+             */
+            state: "pending";
+        };
+        /**
+         * BackfillRequestOut
+         * @description ``GET /channels/{id}/backfill-requests/{request_id}`` (#115).
+         *
+         *     ``result`` is ``null`` until the first listing succeeds; then it has the
+         *     keys of ``POST /channels/{id}/backfill``'s response.
+         */
+        BackfillRequestOut: {
+            /** Attempts */
+            attempts: number;
+            /** Channel Id */
+            channel_id: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Dry Run */
+            dry_run: boolean;
+            /** Enqueued */
+            enqueued: number;
+            /** Error Class */
+            error_class: string | null;
+            /** Finished At */
+            finished_at: string | null;
+            /** Limit */
+            limit: number;
+            /** Request Id */
+            request_id: number;
+            /** Result */
+            result: {
+                [key: string]: components["schemas"]["JsonValue"];
+            } | null;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "pending" | "running" | "done" | "failed";
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
         };
         /** BackfillResponse */
         BackfillResponse: {
@@ -951,6 +1070,80 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BackfillResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    post_channel_backfill_request_channels__channel_id__backfill_requests_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                channel_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BackfillRequestBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackfillRequestCreated"];
+                };
+            };
+            /** @description The channel already has a pending or running request */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_backfill_request_channels__channel_id__backfill_requests__request_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                channel_id: string;
+                request_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackfillRequestOut"];
                 };
             };
             /** @description Validation Error */

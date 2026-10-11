@@ -6,6 +6,8 @@
 - ``POST /channels/{channel_id}/backfill`` lists a registered channel's newest
   uploads and, unless it is a dry run, enqueues the unknown ones at
   ``PRIORITY_BACKFILL`` (#41; logic in ``services.api.backfill``).
+- ``POST /channels/{channel_id}/backfill-requests`` only records a backfill of
+  up to 5000 uploads; the planner runs it (#115).
 - ``POST /channels/{channel_id}/backfill/cancel`` deletes one real backfill's
   still-pending ``ingest`` jobs (#116).
 
@@ -23,7 +25,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import psycopg
 import structlog
@@ -41,7 +43,8 @@ from common.queue import (
     PostgresQueue,
     analyze_dedupe_key,
 )
-from common.repo.channels import register_channel
+from common.repo.backfill_requests import create_request
+from common.repo.channels import channel_exists, register_channel
 from common.repo.jobs import active_job, latest_job
 from common.repo.transcripts import get_best_transcript
 from common.repo.videos import insert_submitted_video, video_exists
@@ -54,6 +57,7 @@ from common.youtube_refs import (
 )
 from services.api.backfill import (
     MAX_BACKFILL_LIMIT,
+    MAX_BACKFILL_REQUEST_LIMIT,
     BackfillResult,
     CancelResult,
     ChannelNotRegistered,
@@ -96,6 +100,7 @@ BAD_VIDEO_REF = "url must be a YouTube video ID or video URL"
 BAD_CHANNEL_REF = "url must be a YouTube channel ID or youtube.com/channel/ URL"
 BAD_BACKFILL_CHANNEL = "channel_id must be a canonical YouTube channel ID (UC + 22 characters)"
 CHANNEL_NOT_REGISTERED = "channel is not registered; register it with POST /channels first"
+BACKFILL_REQUEST_ACTIVE = "a backfill request is already pending or running for this channel"
 LISTING_UNAVAILABLE = "YouTube listing unavailable, try again later"
 LISTING_FAILED = "YouTube listing failed"
 VIDEO_NOT_FOUND = "video not found"
@@ -116,6 +121,23 @@ class BackfillRequest(BaseModel):
 
     limit: int = Field(ge=1, le=MAX_BACKFILL_LIMIT)
     dry_run: bool = True
+
+
+class BackfillRequestBody(BaseModel):
+    """Same strictness as ``BackfillRequest``, with the larger cap (#115)."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    limit: int = Field(ge=1, le=MAX_BACKFILL_REQUEST_LIMIT)
+    dry_run: bool = True
+
+
+class BackfillRequestCreated(BaseModel):
+    request_id: int
+    channel_id: str
+    limit: int
+    dry_run: bool
+    state: Literal["pending"]
 
 
 class BackfillLlmEstimate(BaseModel):
@@ -609,6 +631,51 @@ def _backfill_response(result: BackfillResult) -> BackfillResponse:
             llm=BackfillLlmEstimate(**{f: getattr(llm, f) for f in _LLM_FIELDS}),
         ),
         backfill_id=result.backfill_id,
+    )
+
+
+@router.post(
+    "/channels/{channel_id:untrusted}/backfill-requests",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=BackfillRequestCreated,
+    responses={409: {"description": "The channel already has a pending or running request"}},
+)
+def post_channel_backfill_request(
+    channel_id: Annotated[str, Depends(_backfill_channel_id)],
+    body: BackfillRequestBody,
+    conn: Annotated[psycopg.Connection[Any], Depends(get_conn)],
+) -> BackfillRequestCreated | JSONResponse:
+    """Record a backfill of up to 5000 uploads for the planner to run (#115).
+
+    Lists nothing and runs no subprocess: the planner's ``channel_backfill``
+    task does the yt-dlp listing and the enqueueing later, in bounded slices.
+    The unique index on active requests decides concurrent submissions: one
+    gets 202, the others 409 with the existing ``request_id``. Poll
+    ``GET /channels/{id}/backfill-requests/{request_id}`` for progress.
+    """
+    _require_idle(conn)
+    with conn.transaction():
+        if not channel_exists(conn, channel_id):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, CHANNEL_NOT_REGISTERED)
+        outcome = create_request(conn, channel_id, limit_n=body.limit, dry_run=body.dry_run)
+    if not outcome.created:
+        return JSONResponse(
+            {"detail": BACKFILL_REQUEST_ACTIVE, "request_id": outcome.request_id},
+            status_code=status.HTTP_409_CONFLICT,
+        )
+    _log.info(
+        "backfill.request_recorded",
+        request_id=outcome.request_id,
+        channel_id=channel_id,
+        limit=body.limit,
+        dry_run=body.dry_run,
+    )
+    return BackfillRequestCreated(
+        request_id=outcome.request_id,
+        channel_id=channel_id,
+        limit=body.limit,
+        dry_run=body.dry_run,
+        state="pending",
     )
 
 
