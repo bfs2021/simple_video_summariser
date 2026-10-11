@@ -6,6 +6,8 @@
 - ``POST /channels/{channel_id}/backfill`` lists a registered channel's newest
   uploads and, unless it is a dry run, enqueues the unknown ones at
   ``PRIORITY_BACKFILL`` (#41; logic in ``services.api.backfill``).
+- ``POST /channels/{channel_id}/backfill/cancel`` deletes one real backfill's
+  still-pending ``ingest`` jobs (#116).
 
 Input is untrusted. It is parsed by ``common.youtube_refs`` before anything
 reaches the database, and a rejection returns a fixed message that never
@@ -16,6 +18,7 @@ Route bodies hold no SQL; they call ``common.repo`` and ``PostgresQueue``.
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -27,7 +30,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from psycopg.pq import TransactionStatus
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from starlette.convertors import Convertor, register_url_convertor
 
 from common.config import get_settings
@@ -52,8 +55,10 @@ from common.youtube_refs import (
 from services.api.backfill import (
     MAX_BACKFILL_LIMIT,
     BackfillResult,
+    CancelResult,
     ChannelNotRegistered,
     backfill,
+    cancel_backfill,
 )
 from services.api.deps import get_catalog, get_conn, rate_limit
 
@@ -83,6 +88,9 @@ register_url_convertor("untrusted", _UntrustedSegment())
 
 router = APIRouter(dependencies=[Depends(rate_limit)])
 
+_BACKFILL_ID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+)
 BAD_VIDEO_REF = "url must be a YouTube video ID or video URL"
 BAD_CHANNEL_REF = "url must be a YouTube channel ID or youtube.com/channel/ URL"
 BAD_BACKFILL_CHANNEL = "channel_id must be a canonical YouTube channel ID (UC + 22 characters)"
@@ -130,6 +138,30 @@ class BackfillResponse(BaseModel):
     video_ids: list[str]
     estimate: BackfillEstimate
     backfill_id: str | None
+
+
+class CancelBackfillRequest(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    backfill_id: str
+
+    @field_validator("backfill_id")
+    @classmethod
+    def _canonical_uuid(cls, value: str) -> str:
+        # A lowercase canonical UUID (what ``backfill`` generates), nothing else.
+        # ``fullmatch`` so a trailing newline cannot slip through ``$``.
+        if _BACKFILL_ID_RE.fullmatch(value) is None:
+            raise ValueError("backfill_id must be a lowercase canonical UUID")
+        return value
+
+
+class CancelBackfillResponse(BaseModel):
+    channel_id: str
+    backfill_id: str
+    cancelled: int
+    videos_removed: int
+    videos_kept: int
+    video_ids: list[str]
 
 
 class VideoSubmission(BaseModel):
@@ -485,4 +517,63 @@ def _backfill_response(result: BackfillResult) -> BackfillResponse:
             assumes=estimate.assumes,
         ),
         backfill_id=result.backfill_id,
+    )
+
+
+def _require_json_content_type(request: Request) -> None:
+    """Refuse a non-JSON body (415) so a cross-site form post cannot trigger a cancel.
+
+    Same rule as ``routes_ops``' check (#44), which is private to that module.
+    """
+    media_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if media_type != "application/json":
+        raise HTTPException(
+            status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, "Content-Type must be application/json"
+        )
+
+
+@router.post(
+    "/channels/{channel_id:untrusted}/backfill/cancel",
+    dependencies=[Depends(_require_json_content_type)],
+)
+def post_channel_backfill_cancel(
+    channel_id: Annotated[str, Depends(_backfill_channel_id)],
+    body: CancelBackfillRequest,
+    conn: Annotated[psycopg.Connection[Any], Depends(get_conn)],
+) -> CancelBackfillResponse:
+    """Cancel one real backfill's still-pending ``ingest`` jobs (#116).
+
+    Deletes only jobs that are ``pending``, ``ingest``, at ``PRIORITY_BACKFILL``,
+    tagged with ``backfill_id`` and belonging to this channel; running jobs,
+    follow-up jobs and jobs from RSS, ``POST /videos`` or another backfill are
+    untouched. An unknown ``backfill_id`` cancels nothing (200, ``cancelled: 0``).
+    Each cancelled job's ``videos`` row is removed too, unless something else
+    depends on it (a transcript, another job); those are ``videos_kept``. A kept
+    video is no longer picked up by backfill, so re-submit it with
+    ``POST /videos``.
+    """
+    _require_idle(conn)
+    try:
+        result = cancel_backfill(conn, channel_id, body.backfill_id)
+    except ChannelNotRegistered:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, CHANNEL_NOT_REGISTERED) from None
+    _log.warning(
+        "backfill.cancelled",
+        channel_id=result.channel_id,
+        backfill_id=result.backfill_id,
+        cancelled=result.cancelled,
+        videos_removed=result.videos_removed,
+        videos_kept=result.videos_kept,
+    )
+    return _cancel_response(result)
+
+
+def _cancel_response(result: CancelResult) -> CancelBackfillResponse:
+    return CancelBackfillResponse(
+        channel_id=result.channel_id,
+        backfill_id=result.backfill_id,
+        cancelled=result.cancelled,
+        videos_removed=result.videos_removed,
+        videos_kept=result.videos_kept,
+        video_ids=list(result.video_ids),
     )

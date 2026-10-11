@@ -294,6 +294,31 @@ def insert_backfill_video(
     return insert_catalog_video(conn, entry, channel_id=channel_id, origin="backfill")
 
 
+def delete_unused_backfill_video(conn: psycopg.Connection[Any], video_id: str) -> bool:
+    """Delete a backfill-origin ``videos`` row nothing else depends on (#116).
+
+    Deleted only when ``origin = 'backfill'`` and no ``transcripts``,
+    ``analyses``, ``media`` or ``jobs`` row (any kind or state) refers to it,
+    so ``ON DELETE CASCADE`` never removes anything. ``jobs.video_id`` has no
+    foreign key, so a job another transaction inserts for the video after this
+    statement's snapshot cannot be waited for; the window is one statement
+    wide. Returns whether the row was deleted. Never commits.
+    """
+    row = conn.execute(
+        """
+        DELETE FROM videos v
+        WHERE v.video_id = %s AND v.origin = 'backfill'
+          AND NOT EXISTS (SELECT 1 FROM transcripts t WHERE t.video_id = v.video_id)
+          AND NOT EXISTS (SELECT 1 FROM analyses a WHERE a.video_id = v.video_id)
+          AND NOT EXISTS (SELECT 1 FROM media m WHERE m.video_id = v.video_id)
+          AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.video_id = v.video_id)
+        RETURNING 1
+        """,
+        (video_id,),
+    ).fetchone()
+    return row is not None
+
+
 # The one definition of a video's processing status (#42). Both list_videos and
 # get_video select from this, so the rules cannot drift apart. ``v`` is the
 # videos row; the LATERAL joins see only that video's jobs and analyses.

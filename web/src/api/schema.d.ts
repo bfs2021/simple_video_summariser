@@ -50,6 +50,35 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/channels/{channel_id}/backfill/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Post Channel Backfill Cancel
+         * @description Cancel one real backfill's still-pending ``ingest`` jobs (#116).
+         *
+         *     Deletes only jobs that are ``pending``, ``ingest``, at ``PRIORITY_BACKFILL``,
+         *     tagged with ``backfill_id`` and belonging to this channel; running jobs,
+         *     follow-up jobs and jobs from RSS, ``POST /videos`` or another backfill are
+         *     untouched. An unknown ``backfill_id`` cancels nothing (200, ``cancelled: 0``).
+         *     Each cancelled job's ``videos`` row is removed too, unless something else
+         *     depends on it (a transcript, another job); those are ``videos_kept``. A kept
+         *     video is no longer picked up by backfill, so re-submit it with
+         *     ``POST /videos``.
+         */
+        post: operations["post_channel_backfill_cancel_channels__channel_id__backfill_cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/healthz": {
         parameters: {
             query?: never;
@@ -377,6 +406,26 @@ export interface components {
             total_count: number | null;
             /** Video Ids */
             video_ids: string[];
+        };
+        /** CancelBackfillRequest */
+        CancelBackfillRequest: {
+            /** Backfill Id */
+            backfill_id: string;
+        };
+        /** CancelBackfillResponse */
+        CancelBackfillResponse: {
+            /** Backfill Id */
+            backfill_id: string;
+            /** Cancelled */
+            cancelled: number;
+            /** Channel Id */
+            channel_id: string;
+            /** Video Ids */
+            video_ids: string[];
+            /** Videos Kept */
+            videos_kept: number;
+            /** Videos Removed */
+            videos_removed: number;
         };
         /** ChannelRegistration */
         ChannelRegistration: {
@@ -780,6 +829,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BackfillResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    post_channel_backfill_cancel_channels__channel_id__backfill_cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                channel_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CancelBackfillRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CancelBackfillResponse"];
                 };
             };
             /** @description Validation Error */

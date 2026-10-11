@@ -33,10 +33,14 @@ from psycopg.pq import TransactionStatus
 
 from common.errors import PermanentSourceError
 from common.models import CatalogEntry, CatalogSource, ChannelCatalog
-from common.queue import PRIORITY_BACKFILL, JobQueue
+from common.queue import PRIORITY_BACKFILL, JobQueue, PostgresQueue
 from common.repo.channels import channel_exists
 from common.repo.transcripts import median_whisper_rtf
-from common.repo.videos import insert_backfill_video, known_video_ids
+from common.repo.videos import (
+    delete_unused_backfill_video,
+    insert_backfill_video,
+    known_video_ids,
+)
 
 _log = structlog.get_logger(__name__)
 
@@ -127,6 +131,46 @@ def backfill(
         video_ids=tuple(e.video_id for e in new),
         estimate=_estimate(new, rtf, rtf_samples),
         backfill_id=backfill_id,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class CancelResult:
+    channel_id: str
+    backfill_id: str
+    cancelled: int
+    videos_removed: int
+    videos_kept: int
+    video_ids: tuple[str, ...]
+
+
+def cancel_backfill(
+    conn: psycopg.Connection[Any], channel_id: str, backfill_id: str
+) -> CancelResult:
+    """Undo one real backfill's still-pending ``ingest`` jobs (#116).
+
+    Deletes the jobs (``PostgresQueue.cancel_backfill``) and, for each, its
+    ``videos`` row when nothing else depends on it, all in one transaction:
+    either the job and its row go together or neither does. A video whose row
+    is kept (a transcript, or another job, exists) is counted in
+    ``videos_kept``. ``conn`` must have no open transaction.
+    Raises ``ChannelNotRegistered`` if the channel has no row. An unknown
+    ``backfill_id`` is not an error: it cancels nothing.
+    """
+    if conn.info.transaction_status != TransactionStatus.IDLE:
+        raise RuntimeError("cancel_backfill expects a connection with no open transaction")
+    with conn.transaction():
+        if not channel_exists(conn, channel_id):
+            raise ChannelNotRegistered(channel_id)
+        jobs = PostgresQueue(conn).cancel_backfill(channel_id, backfill_id)
+        removed = sum(delete_unused_backfill_video(conn, job.video_id) for job in jobs)
+    return CancelResult(
+        channel_id=channel_id,
+        backfill_id=backfill_id,
+        cancelled=len(jobs),
+        videos_removed=removed,
+        videos_kept=len(jobs) - removed,
+        video_ids=tuple(job.video_id for job in jobs),
     )
 
 

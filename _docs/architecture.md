@@ -714,6 +714,7 @@ separated per D13.
 | `POST` | `/videos` | body `{url}`; priority `+10`; returns job id |
 | `POST` | `/channels` | forward-only; sets `monitor_from` |
 | `POST` | `/channels/{id}/backfill` | `{limit, dry_run}`; priority `-10` (D9b) |
+| `POST` | `/channels/{id}/backfill/cancel` | `{backfill_id}`; deletes that backfill's pending `ingest` jobs (#116) |
 | `POST` | `/videos/{id}/reanalyze` | force new `analyze` at current version |
 | `GET` | `/videos` | paginated library view; filters: channel, state, date |
 | `GET` | `/videos/{id}` | latest analysis + job state |

@@ -174,6 +174,14 @@ _RETRY_DEAD_SQL = """
 
 
 @dataclass(frozen=True, slots=True)
+class CancelledJob:
+    """One ``ingest`` job ``PostgresQueue.cancel_backfill`` deleted (#116)."""
+
+    job_id: int
+    video_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class StaleAnalyzeResult:
     """What ``PostgresQueue.resolve_stale_analyze`` did (#100)."""
 
@@ -602,6 +610,46 @@ class PostgresQueue:
             "video_id = %(video_id)s AND priority < %(priority)s",
             {"video_id": video_id, "priority": priority},
         )
+
+    def cancel_backfill(self, channel_id: str, backfill_id: str) -> list[CancelledJob]:
+        """Delete one backfill's still-``pending`` ``ingest`` jobs of a channel (#116).
+
+        A job qualifies only when all of these hold: ``kind = 'ingest'``,
+        ``state = 'pending'``, ``priority = PRIORITY_BACKFILL`` (a job a human
+        re-submitted and #103 raised stays), ``payload->>'backfill_id'`` equals
+        ``backfill_id`` and its video belongs to ``channel_id``. The rows are
+        deleted, not dead-lettered (a dead job would reach the dead list and
+        alerts). Returns them ordered by ``video_id``.
+
+        One ``DELETE`` decides and writes together: ``state = 'pending'`` sits
+        in its own ``WHERE``, so a job a worker claimed while this waited on
+        the row lock is re-checked and skipped. Both arguments are bound
+        parameters; an empty one is refused rather than matched. The caller
+        owns the surrounding transaction (this nests as a savepoint inside
+        it). PostgresQueue only, not on the ``JobQueue`` Protocol.
+        """
+        if not channel_id or not backfill_id:
+            raise ValueError("cancel_backfill needs a channel_id and a backfill_id")
+        with self._conn.transaction(), self._conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM jobs j USING videos v
+                WHERE v.video_id = j.video_id
+                  AND v.channel_id = %(channel_id)s
+                  AND j.kind = 'ingest'
+                  AND j.state = 'pending'
+                  AND j.priority = %(priority)s
+                  AND j.payload->>'backfill_id' = %(backfill_id)s
+                RETURNING j.id, j.video_id
+                """,
+                {
+                    "channel_id": channel_id,
+                    "backfill_id": backfill_id,
+                    "priority": PRIORITY_BACKFILL,
+                },
+            )
+            rows = cur.fetchall()
+        return sorted((CancelledJob(int(r[0]), str(r[1])) for r in rows), key=lambda c: c.video_id)
 
     def _update_pending(self, set_sql: str, where_sql: str, params: dict[str, Any]) -> list[int]:
         """``UPDATE ... RETURNING id`` over ``pending`` jobs, in one transaction.

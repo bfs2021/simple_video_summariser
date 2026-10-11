@@ -325,6 +325,61 @@
         "title": "BackfillResponse",
         "type": "object"
       },
+      "CancelBackfillRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "backfill_id": {
+            "title": "Backfill Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "backfill_id"
+        ],
+        "title": "CancelBackfillRequest",
+        "type": "object"
+      },
+      "CancelBackfillResponse": {
+        "properties": {
+          "backfill_id": {
+            "title": "Backfill Id",
+            "type": "string"
+          },
+          "cancelled": {
+            "title": "Cancelled",
+            "type": "integer"
+          },
+          "channel_id": {
+            "title": "Channel Id",
+            "type": "string"
+          },
+          "video_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Video Ids",
+            "type": "array"
+          },
+          "videos_kept": {
+            "title": "Videos Kept",
+            "type": "integer"
+          },
+          "videos_removed": {
+            "title": "Videos Removed",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "channel_id",
+          "backfill_id",
+          "cancelled",
+          "videos_removed",
+          "videos_kept",
+          "video_ids"
+        ],
+        "title": "CancelBackfillResponse",
+        "type": "object"
+      },
       "ChannelRegistration": {
         "properties": {
           "active": {
@@ -1576,6 +1631,56 @@
           }
         },
         "summary": "Post Channel Backfill"
+      }
+    },
+    "/channels/{channel_id}/backfill/cancel": {
+      "post": {
+        "description": "Cancel one real backfill's still-pending ``ingest`` jobs (#116).\n\nDeletes only jobs that are ``pending``, ``ingest``, at ``PRIORITY_BACKFILL``,\ntagged with ``backfill_id`` and belonging to this channel; running jobs,\nfollow-up jobs and jobs from RSS, ``POST /videos`` or another backfill are\nuntouched. An unknown ``backfill_id`` cancels nothing (200, ``cancelled: 0``).\nEach cancelled job's ``videos`` row is removed too, unless something else\ndepends on it (a transcript, another job); those are ``videos_kept``. A kept\nvideo is no longer picked up by backfill, so re-submit it with\n``POST /videos``.",
+        "operationId": "post_channel_backfill_cancel_channels__channel_id__backfill_cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "channel_id",
+            "required": true,
+            "schema": {
+              "title": "Channel Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CancelBackfillRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CancelBackfillResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Post Channel Backfill Cancel"
       }
     },
     "/healthz": {
