@@ -32,7 +32,8 @@ class FakeSummarizer:
     (as a real adapter that spent tokens on an unusable answer would).
     ``on_call(kind)`` runs at the start of every call. ``costs`` maps a call kind
     (``"roster"``, ``"chunk"``, ``"reduce"``) to the ``cost_usd`` its successful
-    call reports (``None`` = priced unknown); a kind not listed reports no call at
+    call reports, and a failed call of that kind leaves the same cost pending
+    (``None`` = priced unknown); a kind not listed reports no call at
     all (``Usage.calls == 0``), like a summarizer that does not track calls.
     """
 
@@ -80,12 +81,18 @@ class FakeSummarizer:
         if failure is not None:
             self._pending[0] += self.usage_on_fail[0]
             self._pending[1] += self.usage_on_fail[1]
+            # A failed, priced call still spent money; a real summarizer keeps
+            # it pending until the next take_usage() (#102).
+            self._count_cost(kind)
             raise failure
 
     def _succeed(self, kind: str) -> None:
         tokens_in, tokens_out = self.tokens[kind]
         self._pending[0] += tokens_in
         self._pending[1] += tokens_out
+        self._count_cost(kind)
+
+    def _count_cost(self, kind: str) -> None:
         if kind in self.costs:
             self._calls += 1
             cost = self.costs[kind]

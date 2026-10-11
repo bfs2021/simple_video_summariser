@@ -133,7 +133,10 @@ def test_a_second_job_on_a_reused_summarizer_stores_only_its_own_cost(
     )
     rig = rig_factory(summarizer)
     with pytest.raises(LLMUnavailableError):
-        rig.run()  # leaves the roster and chunk-0 cost pending on the summarizer
+        rig.run()
+    # The failed chunk call left its 10.0 pending on the summarizer: only the
+    # job-start take_usage() discard keeps it out of the next job's total.
+    assert summarizer._calls == 1 and summarizer._cost == 10.0
     summarizer.fail_on.clear()
 
     rig.run()
