@@ -11,6 +11,7 @@ from pydantic import SecretStr
 
 from common.config import Settings
 from common.queue import PostgresQueue, StaleAnalyzeResult
+from services.planner.main import build_registry
 from services.planner.stale_analyze import resolve_stale_analyze_jobs
 from services.planner.sweep import run_reanalysis_sweep
 
@@ -374,12 +375,19 @@ def test_a_row_another_transaction_holds_is_skipped_and_picked_up_next_call(
     _video(conn)
     held = _job(conn, "v1:ollama")
     free = _job(conn, "v1:anthropic")
+    # Bounded deadline: a regression to a plain FOR UPDATE would block on the
+    # held row forever; with lock_timeout it fails with a clear message instead.
+    conn.commit()
+    conn.execute("SET lock_timeout = '3s'")
     conn.commit()
 
     with psycopg.connect(head_dsn) as claimer:
         claimer.execute("SELECT id FROM jobs WHERE id = %s FOR UPDATE", (held,))
 
-        result = _resolve(conn)  # returns at once: SKIP LOCKED, no waiting
+        try:
+            result = _resolve(conn)  # returns at once: SKIP LOCKED, no waiting
+        except psycopg.errors.LockNotAvailable:
+            pytest.fail("resolve_stale_analyze waited on a locked row instead of skipping it")
 
         assert result == StaleAnalyzeResult(1, 0)
         assert _row(conn, held)["dedupe_key"] == "v1:ollama"
@@ -408,3 +416,26 @@ def test_the_planner_task_logs_one_info_line_with_the_counts_and_returns_their_s
     assert _row(conn, kept)["dedupe_key"] == "v3:ollama"
     assert total == 2
     assert len(caplog.records) == 1  # nothing per row
+
+
+def test_the_planner_task_persists_its_rekeys_and_supersedes_on_a_fresh_connection(
+    conn: psycopg.Connection[Any], head_dsn: str
+) -> None:
+    # The planner closes a task's connection without committing (#199), so the
+    # resolve must be durable by itself: read back from a different connection.
+    _video(conn)
+    rekeyed = _job(conn, "v1:ollama", priority=3)
+    superseded = _job(conn, "v1:anthropic")
+    _job(conn, "v2:anthropic")  # active at the target key, so v1:anthropic is superseded
+    conn.commit()
+    settings = Settings(DATABASE_URL=SecretStr(head_dsn), PROMPT_VERSION="v2")
+    task = {t.name: t for t in build_registry(settings, lambda: psycopg.connect(head_dsn))}[
+        "stale_analyze"
+    ]
+
+    assert task.fn() == 2
+
+    with psycopg.connect(head_dsn) as fresh:
+        assert _row(fresh, rekeyed)["dedupe_key"] == "v2:ollama"
+        gone = _row(fresh, superseded)
+        assert (gone["state"], gone["last_error"]) == ("dead", SUPERSEDED)
