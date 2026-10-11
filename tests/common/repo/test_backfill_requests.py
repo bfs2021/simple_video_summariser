@@ -112,7 +112,8 @@ def test_claim_next_skips_a_request_another_session_holds_locked(
     with psycopg.connect(head_dsn) as holder:
         holder.execute("SELECT 1 FROM backfill_requests WHERE id = %s FOR UPDATE", (oldest,))
 
-        claimed = claim_next(conn)  # would block, not skip, without SKIP LOCKED
+        conn.execute("SET LOCAL lock_timeout = '3s'")  # without SKIP LOCKED: fail, not hang
+        claimed = claim_next(conn)
 
         assert claimed is not None and claimed.id == newer
 
