@@ -4,8 +4,8 @@
 
 The API does no processing of its own: it imports only ``common.*`` (never
 ``adapters.*``, yt-dlp or faster-whisper), opens no database connection at
-import or startup, and never runs migrations. Routes that touch the database
-are sync ``def``, so their blocking psycopg calls run in the threadpool.
+import (its pool opens in the lifespan without waiting, #95), and never runs
+migrations. Routes that touch the database are sync ``def``, so their blocking psycopg calls run in the threadpool.
 
 Every route passes through ``deps.require_auth`` (attached once, here); write
 routes also pass through ``deps.rate_limit``. Errors never reflect input: an
@@ -39,10 +39,13 @@ from pydantic import ValidationError
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from common.config import get_settings
+from common.db import create_pool
 from common.logging import bound_context, configure_logging
 from services.api import routes_ops, routes_read, routes_write
 from services.api.deps import (
+    CONNECT_TIMEOUT_SEC,
     READ_UNAVAILABLE_BODY,
+    STATEMENT_TIMEOUT_MS,
     UNAVAILABLE_BODY,
     DatabaseUnavailable,
     ReadDatabaseUnavailable,
@@ -121,7 +124,17 @@ class RequestContextMiddleware:
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     configure_logging(get_settings())
-    yield
+    pool = create_pool(
+        connect_timeout=CONNECT_TIMEOUT_SEC, statement_timeout_ms=STATEMENT_TIMEOUT_MS
+    )
+    # wait=False: the app starts, and /healthz answers 503, while Postgres is
+    # unreachable; the pool keeps retrying in the background.
+    pool.open(wait=False)
+    app.state.pool = pool
+    try:
+        yield
+    finally:
+        pool.close()
 
 
 async def _validation_error(request: Request, exc: Exception) -> JSONResponse:

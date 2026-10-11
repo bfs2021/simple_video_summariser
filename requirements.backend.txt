@@ -32,6 +32,10 @@ alembic==1.20.0
 # migrations/env.py rewrites it to postgresql+psycopg:// (task #7).
 psycopg[binary]==3.3.6
 
+# Connection pool for the API only (task #95): sync ConnectionPool, pinned to
+# the release that resolves with psycopg 3.3.6.
+psycopg-pool==3.3.3
+
 # HTTP API (architecture.md 8.3, 16.10; task #39). Plain uvicorn, without the
 # [standard] extras: the API serves a single operator, so uvloop/httptools
 # buy nothing measurable.

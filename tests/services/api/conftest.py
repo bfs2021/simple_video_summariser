@@ -11,6 +11,7 @@ import io
 import json
 import logging
 from collections.abc import Iterator
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -61,6 +62,55 @@ def _restore_logging() -> Iterator[None]:
     root.setLevel(level)
     structlog.reset_defaults()
     structlog.contextvars.clear_contextvars()
+
+
+class FakePool:
+    """Stands in for ``psycopg_pool.ConnectionPool``: records every call.
+
+    ``getconn`` hands out ``conns`` in order, or raises ``getconn_error``.
+    """
+
+    def __init__(
+        self, conns: list[Any] | None = None, getconn_error: Exception | None = None
+    ) -> None:
+        self.conns = list(conns or [])
+        self.getconn_error = getconn_error
+        self.open_calls: list[dict[str, Any]] = []
+        self.getconn_calls = 0
+        self.returned: list[Any] = []
+        self.closed = False
+
+    def open(self, wait: bool = False, **kwargs: Any) -> None:
+        self.open_calls.append({"wait": wait, **kwargs})
+
+    def getconn(self, timeout: float | None = None) -> Any:
+        self.getconn_calls += 1
+        if self.getconn_error is not None:
+            raise self.getconn_error
+        return self.conns.pop(0)
+
+    def putconn(self, conn: Any) -> None:
+        self.returned.append(conn)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def request_with(pool: Any) -> Any:
+    """The part of a ``Request`` that ``deps.get_conn`` reads: ``app.state.pool``."""
+    state = SimpleNamespace() if pool is None else SimpleNamespace(pool=pool)
+    return SimpleNamespace(app=SimpleNamespace(state=state))
+
+
+@pytest.fixture
+def use_pool(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """``use_pool(FakePool(...))`` makes the app's lifespan use that pool."""
+
+    def install(pool: FakePool) -> FakePool:
+        monkeypatch.setattr(api_main, "create_pool", lambda **kwargs: pool)
+        return pool
+
+    return install
 
 
 @pytest.fixture

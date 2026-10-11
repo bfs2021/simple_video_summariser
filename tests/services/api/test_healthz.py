@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from services.api import deps
-from tests.services.api.conftest import UNREACHABLE_DSN, LogSink
+from tests.services.api.conftest import UNREACHABLE_DSN, FakePool, LogSink, request_with
 
 KINDS = ("ingest", "transcribe", "analyze")
 STATES = ("pending", "running", "done", "dead")
@@ -123,13 +123,10 @@ def test_a_database_error_returns_503_without_details_and_is_logged(
     assert failures and "exception" in failures[0]
 
 
-def test_a_failing_connect_returns_503_and_logs_the_traceback(
-    app: FastAPI, logs: LogSink, monkeypatch: pytest.MonkeyPatch
+def test_a_failing_pool_checkout_returns_503_and_logs_the_traceback(
+    app: FastAPI, logs: LogSink, use_pool: Any
 ) -> None:
-    def refuse(**kwargs: Any) -> Any:
-        raise psycopg.OperationalError(f"could not connect to {UNREACHABLE_DSN}")
-
-    monkeypatch.setattr(deps, "connect", refuse)
+    use_pool(FakePool(getconn_error=psycopg.OperationalError(f"could not connect to {UNREACHABLE_DSN}")))
 
     with TestClient(app) as client:
         response = client.get("/healthz")
@@ -140,22 +137,15 @@ def test_a_failing_connect_returns_503_and_logs_the_traceback(
     assert failures and "OperationalError" in str(failures[0].get("exception"))
 
 
-def test_get_conn_closes_the_connection_after_a_normal_request(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    closed: list[bool] = []
+def test_get_conn_returns_the_connection_to_the_pool_after_a_normal_request() -> None:
+    conn = object()
+    pool = FakePool([conn])
 
-    class Conn:
-        def close(self) -> None:
-            closed.append(True)
-
-    monkeypatch.setattr(deps, "connect", lambda **kwargs: Conn())
-
-    gen = deps.get_conn()
-    next(gen)
+    gen = deps.get_conn(request_with(pool))
+    assert next(gen) is conn
     gen.close()
 
-    assert closed == [True]
+    assert pool.returned == [conn]
 
 
 def test_an_unreachable_database_answers_503_quickly(app: FastAPI) -> None:
@@ -168,34 +158,21 @@ def test_an_unreachable_database_answers_503_quickly(app: FastAPI) -> None:
     assert elapsed < 5
 
 
-def test_get_conn_bounds_connect_and_statement_time_and_always_closes(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    opened: list[dict[str, Any]] = []
-    closed: list[bool] = []
+def test_get_conn_returns_the_connection_even_when_the_handler_raises() -> None:
+    conn = object()
+    pool = FakePool([conn])
 
-    class Conn:
-        def close(self) -> None:
-            closed.append(True)
-
-    def fake_connect(**kwargs: Any) -> Conn:
-        opened.append(kwargs)
-        return Conn()
-
-    monkeypatch.setattr(deps, "connect", fake_connect)
-
-    gen = deps.get_conn()
+    gen = deps.get_conn(request_with(pool))
     next(gen)
     with pytest.raises(RuntimeError):
         gen.throw(RuntimeError("handler failed"))
 
-    assert closed == [True]
-    [kwargs] = opened
-    assert 0 < int(kwargs["connect_timeout"]) <= 2
-    options = str(kwargs["options"])
-    assert "statement_timeout=" in options
-    timeout_ms = int(options.split("statement_timeout=")[1].split()[0])
-    assert 0 < timeout_ms <= 2000
+    assert pool.returned == [conn]
+
+
+def test_get_conn_without_a_pool_is_database_unavailable() -> None:
+    with pytest.raises(deps.DatabaseUnavailable):
+        next(deps.get_conn(request_with(None)))
 
 
 @pytest.mark.integration

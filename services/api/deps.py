@@ -5,9 +5,11 @@ it; in v1 it does nothing. ``rate_limit`` is attached to the write router
 only. Both are seams: real auth or throttling is one change here, not an
 audit of every endpoint.
 
-``get_conn`` is the only way a route reaches Postgres. It opens a short-lived,
-time-bounded connection through ``common.db.connect()`` and always closes it.
-Tests override it rather than patching internals. ``get_read_conn`` wraps it
+``get_conn`` is the only way a route reaches Postgres. It borrows a connection
+from the pool the app's lifespan opened (``app.state.pool``, #95) and always
+returns it; the pool rolls back an unfinished transaction and replaces a
+connection that went bad while idle. Tests override it rather than patching
+internals. ``get_read_conn`` wraps it
 for the read routes (#42).
 
 ``get_catalog`` hands the backfill route its ``CatalogSource`` (#41).
@@ -19,11 +21,13 @@ from collections.abc import Generator
 from typing import Annotated, Any
 
 import psycopg
-from fastapi import Depends
+import structlog
+from fastapi import Depends, Request
 
 from common.config import get_settings
-from common.db import connect
 from common.models import CatalogSource
+
+_log = structlog.get_logger(__name__)
 
 #: Both stay well under the compose healthcheck's 5 s timeout (§11.4).
 CONNECT_TIMEOUT_SEC = 2
@@ -53,18 +57,26 @@ def rate_limit() -> None:
     """No-op in v1. The one place write throttling will go."""
 
 
-def get_conn() -> Generator[psycopg.Connection[Any]]:
+def get_conn(request: Request) -> Generator[psycopg.Connection[Any]]:
+    pool = getattr(request.app.state, "pool", None)
+    if pool is None:
+        # The lifespan did not run (or has ended): nothing to borrow from.
+        raise DatabaseUnavailable
     try:
-        conn = connect(
-            connect_timeout=CONNECT_TIMEOUT_SEC,
-            options=f"-c statement_timeout={STATEMENT_TIMEOUT_MS}",
-        )
+        # ``DB_POOL_TIMEOUT_SEC`` is the pool's own wait bound; PoolTimeout,
+        # TooManyRequests and PoolClosed are all psycopg errors. The caller
+        # sees only the 503 body: the exception goes to the log, whose
+        # message carries no DSN (the pool never formats one).
+        conn = pool.getconn()
     except psycopg.Error as exc:
+        _log.warning("db.pool_unavailable", error=type(exc).__name__)
         raise DatabaseUnavailable from exc
     try:
         yield conn
     finally:
-        conn.close()
+        # putconn rolls back an open or aborted transaction before the
+        # connection is reused, and discards a broken one.
+        pool.putconn(conn)
 
 
 def get_read_conn(

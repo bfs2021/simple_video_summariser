@@ -16,6 +16,7 @@ from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
 import services.api.main as api_main
+from common import db as common_db
 from services.api import deps, routes_ops, routes_read, routes_write
 from tests.services.api.conftest import LogSink
 
@@ -109,7 +110,7 @@ def test_starting_the_app_opens_no_database_connection(
     app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[object] = []
-    monkeypatch.setattr(deps, "connect", lambda **kw: calls.append(kw))
+    monkeypatch.setattr(common_db, "connect", lambda **kw: calls.append(kw))
     monkeypatch.setattr(psycopg, "connect", lambda *a, **kw: calls.append((a, kw)))
 
     with TestClient(app):

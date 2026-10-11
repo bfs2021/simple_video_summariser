@@ -147,6 +147,13 @@ class Settings(BaseSettings):
     # At most one alert per error class in this window; the rest are counted.
     ALERT_MIN_INTERVAL_SEC: PositiveInt = 3600
 
+    # The API's Postgres connection pool (#95). The timeout is a float so a
+    # test can use a fraction of a second; the 4 s ceiling keeps a pool wait
+    # inside the 5 s compose healthcheck timeout (architecture.md 11.4).
+    DB_POOL_MIN_SIZE: PositiveInt = 1
+    DB_POOL_MAX_SIZE: PositiveInt = 5
+    DB_POOL_TIMEOUT_SEC: PositiveFloat = Field(default=2, le=4)
+
     LOG_LEVEL: LogLevel = "INFO"
     LOG_FORMAT: Literal["json", "console"] = "json"
 
@@ -237,6 +244,16 @@ class Settings(BaseSettings):
         if chunk is not None and value >= chunk:
             raise ValueError(
                 f"OVERLAP_SEC ({value}) must be less than CHUNK_SEC ({chunk})"
+            )
+        return value
+
+    @field_validator("DB_POOL_MAX_SIZE")
+    @classmethod
+    def _pool_max_not_below_min(cls, value: int, info: ValidationInfo) -> int:
+        minimum = info.data.get("DB_POOL_MIN_SIZE")
+        if minimum is not None and value < minimum:
+            raise ValueError(
+                f"DB_POOL_MAX_SIZE ({value}) must be at least DB_POOL_MIN_SIZE ({minimum})"
             )
         return value
 

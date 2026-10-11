@@ -164,6 +164,7 @@ def test_every_architecture_variable_is_a_field_except_transcriber_cpus() -> Non
         "ALERT_WEBHOOK_URL", "ALERT_WEBHOOK_FORMAT", "ALERT_MIN_INTERVAL_SEC",
         "UPCOMING_MAX_WAIT_DAYS", "RECONCILE_INTERVAL_SEC", "AUDIO_MIN_FREE_GB", "AUDIO_MIN_FREE_PCT",
         "SWEEP_MAX_JOBS_ANTHROPIC",
+        "DB_POOL_MIN_SIZE", "DB_POOL_MAX_SIZE", "DB_POOL_TIMEOUT_SEC",
     }  # fmt: skip
 
     assert set(Settings.model_fields) == expected

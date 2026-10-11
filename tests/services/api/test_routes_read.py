@@ -15,7 +15,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from services.api import deps, routes_read
-from tests.services.api.conftest import UNREACHABLE_DSN, LogSink
+from tests.services.api.conftest import UNREACHABLE_DSN, FakePool, LogSink
 
 MARKER = "ZZMARKER42"
 VID = "dQw4w9WgXcQ"
@@ -206,12 +206,9 @@ def test_an_operational_error_is_503_with_a_fixed_body_and_logged(
 
 @pytest.mark.parametrize("path", ["/videos", f"/videos/{VID}"])
 def test_a_failing_connect_is_503_with_the_read_body(
-    app: FastAPI, logs: LogSink, monkeypatch: pytest.MonkeyPatch, path: str
+    app: FastAPI, logs: LogSink, use_pool: Any, path: str
 ) -> None:
-    def refuse(**kwargs: Any) -> Any:
-        raise psycopg.OperationalError(f"could not connect to {UNREACHABLE_DSN}")
-
-    monkeypatch.setattr(deps, "connect", refuse)
+    use_pool(FakePool(getconn_error=psycopg.OperationalError(f"could not connect to {UNREACHABLE_DSN}")))
     with TestClient(app) as client:
         response = client.get(path)
 
@@ -232,12 +229,9 @@ def test_any_other_exception_keeps_the_generic_500(app: FastAPI, logs: LogSink) 
 
 
 def test_healthz_keeps_its_own_unavailable_body(
-    app: FastAPI, logs: LogSink, monkeypatch: pytest.MonkeyPatch
+    app: FastAPI, logs: LogSink, use_pool: Any
 ) -> None:
-    def refuse(**kwargs: Any) -> Any:
-        raise psycopg.OperationalError("no")
-
-    monkeypatch.setattr(deps, "connect", refuse)
+    use_pool(FakePool(getconn_error=psycopg.OperationalError("no")))
     with TestClient(app) as client:
         assert client.get("/healthz").json() == {"status": "unavailable"}
 

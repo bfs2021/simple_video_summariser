@@ -10,6 +10,7 @@ from typing import Any
 
 import psycopg
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
 from psycopg.pq import TransactionStatus
 
@@ -134,8 +135,8 @@ def test_the_catalog_runs_on_an_idle_request_connection(
     seen: list[TransactionStatus] = []
     holder: list[psycopg.Connection[Any]] = []
 
-    def capture_conn() -> Iterator[psycopg.Connection[Any]]:
-        for conn in deps.get_conn():
+    def capture_conn(request: Request) -> Iterator[psycopg.Connection[Any]]:
+        for conn in deps.get_conn(request):
             holder.append(conn)
             yield conn
 

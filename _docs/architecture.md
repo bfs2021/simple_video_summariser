@@ -924,7 +924,11 @@ than reading `os.environ` directly.
 | `ALERT_WEBHOOK_URL` | unset (no channel) | planner: secret; `TOOL_FAILURE` / `RESOURCE` dead-letters are POSTed here (#67) |
 | `ALERT_WEBHOOK_FORMAT` | `json` | planner: `json` (`{"text": ...}`, Slack-compatible) or `text` (plain body plus `Title` header, ntfy) |
 | `ALERT_MIN_INTERVAL_SEC` | `3600` | planner: at most one alert per error class in this window; later dead-letters are counted into the next one |
+| `DB_POOL_MIN_SIZE` / `DB_POOL_MAX_SIZE` | `1` / `5` | api: bounds of the Postgres connection pool opened at startup (#95); positive, and `MIN <= MAX` (equal is fine) |
+| `DB_POOL_TIMEOUT_SEC` | `2` | api: how long a request waits for a pooled connection before `503`; positive, at most `4` so the wait fits inside the 5 s healthcheck timeout (11.4) |
 | `LOG_LEVEL` / `LOG_FORMAT` | `INFO` / `json` | all |
+
+Pool sizing rule: `api replicas x DB_POOL_MAX_SIZE + workers + planner + migrate` must stay below Postgres `max_connections` (default 100). Only the api pools; workers, planner, CLI and migrate open one connection each through `common.db.connect()`.
 
 ---
 
