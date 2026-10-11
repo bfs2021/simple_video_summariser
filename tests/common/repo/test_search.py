@@ -14,7 +14,13 @@ import pytest
 
 from common.models import Analysis, Claim, FeedEntry, Segment, Topic, VideoMeta
 from common.repo.analyses import save_analysis
-from common.repo.search import SEARCH_SQL, SearchPage, Span, search_transcripts
+from common.repo.search import (
+    RANK_WEIGHTS,
+    SEARCH_SQL,
+    SearchPage,
+    Span,
+    search_transcripts,
+)
 from common.repo.transcripts import save_transcript
 from common.repo.videos import insert_discovered_video, record_unavailable, upsert_video
 
@@ -261,6 +267,25 @@ def test_two_transcripts_of_the_same_unrecognised_rank_still_give_one_result(
     assert len(page.results) == 1
 
 
+def test_equally_ranked_transcripts_resolve_to_the_lowest_id_whatever_the_heap_order(
+    conn: psycopg.Connection[Any],
+) -> None:
+    # Unrecognised sources tie on transcript_rank(). Rewriting the first row's
+    # indexed text makes a new tuple version, so it sits after the second in
+    # the heap: only an explicit ``id`` tie-break returns it first.
+    _video(conn, "tieheap0001")
+    conn.execute(
+        "INSERT INTO transcripts (video_id, source, segments, full_text) VALUES"
+        " (%s, 'bogus_a', '[]', 'alpha'), (%s, 'bogus_b', '[]', 'beta')",
+        ("tieheap0001", "tieheap0001"),
+    )
+    conn.execute("UPDATE transcripts SET full_text = 'alpha gamma' WHERE source = 'bogus_a'")
+
+    assert _ids(_search(conn, "gamma")) == ["tieheap0001"]
+    assert _search(conn, "beta").results == ()
+    assert _search(conn, "gamma").results[0].transcript_source == "bogus_a"
+
+
 def test_the_search_writes_nothing(conn: psycopg.Connection[Any]) -> None:
     _seed(conn, "rw000000001", "zebra")
 
@@ -302,6 +327,18 @@ def test_a_short_transcript_outranks_a_long_one_with_the_same_hits(
     _seed(conn, "long0000001", long, published=datetime(2026, 1, 1, tzinfo=UTC))
 
     assert _ids(_search(conn, "zebra")) == ["short000001", "long0000001"]
+
+
+def test_pages_cut_through_tied_ranks_in_video_id_order(conn: psycopg.Connection[Any]) -> None:
+    # Identical documents, inserted in descending id order: only the page's
+    # own ``video_id`` tie-break makes LIMIT/OFFSET cut them in id order.
+    ids = [f"tied{i:07d}" for i in range(6)]
+    for vid in reversed(ids):
+        _seed(conn, vid, "zebra horse")
+
+    walked = [_ids(_search(conn, "zebra", limit=2, offset=o)) for o in (0, 2, 4)]
+
+    assert walked == [ids[0:2], ids[2:4], ids[4:6]]
 
 
 def test_has_more_boundaries(conn: psycopg.Connection[Any]) -> None:
@@ -580,6 +617,31 @@ def test_title_outranks_tldr_outranks_claim_outranks_transcript(
     assert _ids(_search(conn, "zebra")) == [
         "src_title__", "src_tldr___", "src_claim__", "src_transcr",
     ]
+
+
+def test_topics_and_claims_share_the_weight_below_the_tldr(
+    conn: psycopg.Connection[Any],
+) -> None:
+    _full(conn, "wt_topic_ti", topic=("zebra topic", "words"))
+    _full(conn, "wt_topic_su", topic=("plain topic", "zebra"))
+    _full(conn, "wt_claim___", claim="zebra claim words")
+    _full(conn, "wt_tldr____", tldr="zebra tldr words")
+    _full(conn, "wt_transcr_", transcript="zebra transcript words")
+
+    ranks = dict(
+        conn.execute(
+            f"SELECT video_id, ts_rank_cd('{RANK_WEIGHTS}', fts,"
+            " websearch_to_tsquery('english', 'zebra'), 1) FROM search_docs"
+            " WHERE video_id LIKE 'wt\\_%%'"
+        ).fetchall()
+    )
+
+    assert ranks["wt_topic_ti"] == pytest.approx(ranks["wt_claim___"], rel=0.05)
+    assert ranks["wt_topic_su"] == pytest.approx(ranks["wt_claim___"], rel=0.05)
+    assert ranks["wt_tldr____"] > ranks["wt_claim___"] > ranks["wt_transcr_"]
+    assert _ids(_search(conn, "zebra"))[0] == "wt_tldr____"
+    hits = {h.video_id: h.matched_in for h in _search(conn, "zebra").results}
+    assert hits["wt_topic_ti"] == hits["wt_topic_su"] == ("analysis",)
 
 
 def test_ties_in_rank_fall_back_to_published_then_video_id(
@@ -921,7 +983,7 @@ def test_five_matching_segments_give_three_excerpts_in_start_order(
 ) -> None:
     _segments(conn, "seg00000006", [(i * 10, f"zebra number{i}") for i in range(5)])
 
-    starts = [start for start, _ in _windows(conn, "zebra")]
+    starts = [start for start, _ in _windows(conn, "zebra") if start is not None]
 
     assert starts == sorted(starts)
     assert len(starts) == 3
@@ -1058,3 +1120,56 @@ def test_ordering_and_paging_do_not_depend_on_the_excerpts(conn: psycopg.Connect
 
     assert _ids(_search(conn, "zebra")) == [f"pg_seg{i:05d}" for i in range(4)]
     assert _search(conn, "zebra", limit=3).has_more is True
+
+
+def test_the_rank_uses_the_rows_own_configuration_not_the_english_one(
+    conn: psycopg.Connection[Any],
+) -> None:
+    # "Häuser" stems to "haus" in German but to "häus" in English, so only the
+    # row's own query scores these hits. The older, weaker row is also the newer
+    # one, so a rank collapsed to zero would put it first.
+    _lang(conn, "own_many001", "Häuser Häuser Häuser alt", "de",
+          published=datetime(2020, 1, 1, tzinfo=UTC))
+    _lang(conn, "own_one0001", "Häuser alt neu klein", "de",
+          published=datetime(2026, 1, 1, tzinfo=UTC))
+
+    assert _ids(_search(conn, "Häuser")) == ["own_many001", "own_one0001"]
+
+
+def test_the_full_text_fallback_headline_uses_the_rows_configuration(
+    conn: psycopg.Connection[Any],
+) -> None:
+    _video(conn, "fallbackde01")
+    conn.execute(
+        "INSERT INTO transcripts (video_id, source, language, segments, full_text)"
+        " VALUES ('fallbackde01', 'whisper', 'de', '[]', 'Die Häuser sind alt')"
+    )
+
+    [hit] = _search(conn, "Haus").results
+
+    assert [e.start_sec for e in hit.excerpts] == [None]
+    assert Span("Häuser", True) in hit.excerpts[0].spans
+
+
+def test_a_word_matched_through_the_english_arm_is_still_a_transcript_match(
+    conn: psycopg.Connection[Any],
+) -> None:
+    # The Polish row is indexed with "simple", so "run" is a lexeme of it; the
+    # English stem of "running" finds it, and the hit says where and shows it.
+    _lang(conn, "arm00000001", "she will run home", "pl")
+
+    [hit] = _search(conn, "running").results
+
+    assert hit.matched_in == ("transcript",)
+    assert Span("run", True) in [s for e in hit.excerpts for s in e.spans]
+
+
+def test_the_sql_itself_returns_at_most_three_windows(conn: psycopg.Connection[Any]) -> None:
+    # The Python side also slices to 3; this pins the SQL's own limit.
+    _segments(conn, "sqlwin00001", [(i, f"zebra n{i}") for i in range(7)])
+    [row] = conn.execute(SEARCH_SQL, {"q": "zebra", "offset": 0, "limit": 5}).fetchall()
+
+    windows = row[-2]
+
+    assert [w[0] for w in windows] == sorted(w[0] for w in windows)
+    assert len(windows) == 3
