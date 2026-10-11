@@ -10,7 +10,7 @@ Roles
 
 Orchestrator
 
-The main session is the orchestrator. Use Sonnet model with Medium effort for it, as it is just a controller that process goes smoothly. It launches the PM, the engineer and QA as subagents. It does not groom, implement or test itself.
+The main session is the orchestrator. Use Sonnet model with Low or Medium effort for it, as it is just a controller that process goes smoothly. It launches the PM, the engineer and QA as subagents. It does not groom, implement or test itself.
 
 While a subagent is running, check on it about every 5 minutes rather than
 waiting for its completion notification. Decide which of three states it is
@@ -41,8 +41,8 @@ Lifecycle
 
 1. Pick the next open issue from the backlog
 2. PM grooms it. Use Opus 5 model with high effort for it
-3. Engineer implements it. Use Sonnet 5 model with high effort for it
-4. QA verifies it. Use Sonnet 5 model with medium effort for it
+3. Engineer implements it. Use Sonnet 5 model with medium effort for it
+4. QA verifies it. Use Sonnet 5 model with low effort for it
 5. On FAIL, back to step 3 with the QA comment as input
 6. On PASS, close the issue
 7. Repeat until the backlog is empty
