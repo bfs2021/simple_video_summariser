@@ -570,10 +570,17 @@ export interface components {
             /** Duration Sec */
             duration_sec: number | null;
             /** Excerpts */
-            excerpts: components["schemas"]["SpanOut"][][];
+            excerpts: components["schemas"]["ExcerptOut"][];
             /** Matched In */
             matched_in: ("title" | "analysis" | "transcript")[];
             /** Published At */
+        /** ExcerptOut */
+        ExcerptOut: {
+            /** Spans */
+            spans: components["schemas"]["SpanOut"][];
+            /** Start Sec */
+            start_sec: number | null;
+        };
             published_at: string | null;
             /** Title */
             title: string | null;

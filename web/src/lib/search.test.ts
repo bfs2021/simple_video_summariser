@@ -8,6 +8,7 @@ import {
   offsetForPage,
   parseSearchParams,
   searchHref,
+  timestampHref,
   validateQuery,
 } from './search'
 
@@ -145,39 +146,64 @@ describe('request and URL construction', () => {
 })
 
 describe('excerptFragments', () => {
-  it('keeps spans in order with whitespace intact', () => {
-    expect(
-      excerptFragments([
-        [
-          { text: 'the ', match: false },
-          { text: 'zebra', match: true },
-          { text: ' ran', match: false },
-        ],
-      ]),
-    ).toEqual([
-      [
-        { text: 'the ', match: false },
-        { text: 'zebra', match: true },
-        { text: ' ran', match: false },
-      ],
-    ])
+  const spans = [
+    { text: 'the ', match: false },
+    { text: 'zebra', match: true },
+    { text: ' ran', match: false },
+  ]
+
+  it('keeps spans in order with whitespace intact, and the start', () => {
+    expect(excerptFragments([{ spans, start_sec: 12.5 }])).toEqual([{ spans, startSec: 12.5 }])
   })
 
-  it('drops empty spans and fragments with no text left', () => {
+  it('drops empty spans and excerpts with no text left', () => {
     expect(
       excerptFragments([
-        [{ text: '', match: true }],
-        [],
-        [
-          { text: '', match: false },
-          { text: 'x', match: true },
-        ],
+        { spans: [{ text: '', match: true }], start_sec: 1 },
+        { spans: [], start_sec: 2 },
+        {
+          spans: [
+            { text: '', match: false },
+            { text: 'x', match: true },
+          ],
+          start_sec: null,
+        },
       ]),
-    ).toEqual([[{ text: 'x', match: true }]])
+    ).toEqual([{ spans: [{ text: 'x', match: true }], startSec: null }])
+  })
+
+  it('keeps 0 and treats a negative or non-finite start as absent', () => {
+    const starts = [0, -1, Number.NaN, Number.POSITIVE_INFINITY, null]
+    expect(
+      excerptFragments(starts.map((start_sec) => ({ spans, start_sec }))).map((e) => e.startSec),
+    ).toEqual([0, null, null, null, null])
   })
 
   it('returns nothing for no excerpts', () => {
     expect(excerptFragments([])).toEqual([])
+  })
+})
+
+describe('timestampHref', () => {
+  it.each([
+    [12.5, '/videos/abc?t=12'],
+    [0, '/videos/abc?t=0'],
+    [3723, '/videos/abc?t=3723'],
+    [0.999, '/videos/abc?t=0'],
+    [1_000_000_000, '/videos/abc?t=1000000000'],
+  ])('%s -> %s', (sec, href) => {
+    expect(timestampHref('abc', sec)).toBe(href)
+  })
+
+  it.each([null, -0.5, Number.NaN, Number.POSITIVE_INFINITY, 1_000_000_001, 1e21])(
+    '%s -> no link',
+    (sec) => {
+      expect(timestampHref('abc', sec)).toBeNull()
+    },
+  )
+
+  it('encodes the video id', () => {
+    expect(timestampHref('a/b c', 1)).toBe('/videos/a%2Fb%20c?t=1')
   })
 })
 
@@ -193,7 +219,7 @@ describe('isSearchPage', () => {
         duration_sec: null,
         unavailable: null,
         transcript_source: 'whisper',
-        excerpts: [[{ text: 'a', match: true }]],
+        excerpts: [{ spans: [{ text: 'a', match: true }], start_sec: 3 }],
       },
     ],
     limit: 20,
@@ -218,9 +244,11 @@ describe('isSearchPage', () => {
     ['video_id number', { ...ok, results: [{ ...ok.results[0], video_id: 5 }] }],
     ['title number', { ...ok, results: [{ ...ok.results[0], title: 5 }] }],
     ['excerpts missing', { ...ok, results: [{ ...ok.results[0], excerpts: undefined }] }],
-    ['fragment not array', { ...ok, results: [{ ...ok.results[0], excerpts: ['x'] }] }],
-    ['span text number', { ...ok, results: [{ ...ok.results[0], excerpts: [[{ text: 1, match: true }]] }] }],
-    ['span match string', { ...ok, results: [{ ...ok.results[0], excerpts: [[{ text: 'a', match: 'y' }]] }] }],
+    ['excerpt not an object', { ...ok, results: [{ ...ok.results[0], excerpts: ['x'] }] }],
+    ['start_sec a string', { ...ok, results: [{ ...ok.results[0], excerpts: [{ spans: [], start_sec: '1' }] }] }],
+    ['start_sec missing', { ...ok, results: [{ ...ok.results[0], excerpts: [{ spans: [] }] }] }],
+    ['span text number', { ...ok, results: [{ ...ok.results[0], excerpts: [{ spans: [{ text: 1, match: true }], start_sec: null }] }] }],
+    ['span match string', { ...ok, results: [{ ...ok.results[0], excerpts: [{ spans: [{ text: 'a', match: 'y' }], start_sec: null }] }] }],
   ])('rejects %s', (_name, body) => {
     expect(isSearchPage(body)).toBe(false)
   })

@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useId, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
+import { formatTimestamp } from '../components/Timestamp'
 import { SearchError, useSearch, type SearchPage } from '../hooks/useSearch'
 import { publishedDate } from '../lib/library'
 import {
@@ -8,6 +9,7 @@ import {
   nextEnabled,
   parseSearchParams,
   searchHref,
+  timestampHref,
   validateQuery,
 } from '../lib/search'
 
@@ -207,13 +209,30 @@ function ResultItem({ result: r }: { result: Result }) {
           {fragments.map((fragment, i) => (
             <Fragment key={i}>
               {i > 0 && ' … '}
-              {fragment.map((span, j) =>
+              {fragment.spans.map((span, j) =>
                 span.match ? <mark key={j}>{span.text}</mark> : <Fragment key={j}>{span.text}</Fragment>,
               )}
+              <TimestampLink videoId={r.video_id} startSec={fragment.startSec} />
             </Fragment>
           ))}
         </p>
       )}
     </li>
+  )
+}
+
+// The link form of a timestamp: opens the detail view at that moment (#110).
+// #129 owns the `?t=` route and should take this over with its own helper.
+function TimestampLink({ videoId, startSec }: { videoId: string; startSec: number | null }) {
+  const href = timestampHref(videoId, startSec)
+  if (href === null || startSec === null) return null
+  const label = formatTimestamp(startSec)
+  return (
+    <>
+      {' '}
+      <Link to={href} aria-label={`Open at ${label}`}>
+        <time>{label}</time>
+      </Link>
+    </>
   )
 }

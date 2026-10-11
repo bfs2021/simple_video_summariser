@@ -6,6 +6,7 @@ import type { components, operations } from '../api'
 
 type SearchPage = components['schemas']['SearchPage']
 type Span = components['schemas']['SpanOut']
+type Excerpt = components['schemas']['ExcerptOut']
 
 /** Fixed page size: #43's default `limit`. */
 export const SEARCH_PAGE_SIZE = 20
@@ -104,13 +105,36 @@ export function buildSearchRequest(q: string, page: number): URLSearchParams {
 
 // ---- response -------------------------------------------------------------
 
-export type ExcerptFragment = Span[]
+/** The most seconds a hit link carries; #43 stores segment starts up to 1e9. */
+export const MAX_LINK_SEC = 1_000_000_000
 
-/** Drop empty spans, then fragments with nothing left. Order and whitespace are kept. */
-export function excerptFragments(excerpts: Span[][]): ExcerptFragment[] {
+/** `/videos/{id}?t=<whole seconds>` for a usable segment start; null otherwise. */
+export function timestampHref(videoId: string, startSec: number | null): string | null {
+  if (typeof startSec !== 'number' || !Number.isFinite(startSec)) return null
+  if (startSec < 0 || startSec > MAX_LINK_SEC) return null
+  return `/videos/${encodeURIComponent(videoId)}?t=${Math.floor(startSec)}`
+}
+
+export interface ExcerptFragment {
+  spans: Span[]
+  /** The excerpt's start in seconds, or null when it has no usable one. */
+  startSec: number | null
+}
+
+/**
+ * Drop empty spans, then excerpts with nothing left. Order and whitespace are
+ * kept. A negative or non-finite `start_sec` is treated as absent.
+ */
+export function excerptFragments(excerpts: Excerpt[]): ExcerptFragment[] {
   return excerpts
-    .map((fragment) => fragment.filter((s) => s.text !== ''))
-    .filter((fragment) => fragment.length > 0)
+    .map((e) => ({
+      spans: e.spans.filter((s) => s.text !== ''),
+      startSec:
+        typeof e.start_sec === 'number' && Number.isFinite(e.start_sec) && e.start_sec >= 0
+          ? e.start_sec
+          : null,
+    }))
+    .filter((e) => e.spans.length > 0)
 }
 
 function isObject(v: unknown): v is Record<string, unknown> {
@@ -125,6 +149,15 @@ function isSpan(v: unknown): boolean {
   return isObject(v) && typeof v.text === 'string' && typeof v.match === 'boolean'
 }
 
+function isExcerpt(v: unknown): boolean {
+  return (
+    isObject(v) &&
+    Array.isArray(v.spans) &&
+    v.spans.every(isSpan) &&
+    (v.start_sec === null || typeof v.start_sec === 'number')
+  )
+}
+
 function isResult(v: unknown): boolean {
   return (
     isObject(v) &&
@@ -135,7 +168,7 @@ function isResult(v: unknown): boolean {
     isStringOrNull(v.published_at) &&
     isStringOrNull(v.unavailable) &&
     Array.isArray(v.excerpts) &&
-    v.excerpts.every((f) => Array.isArray(f) && f.every(isSpan))
+    v.excerpts.every(isExcerpt)
   )
 }
 

@@ -19,7 +19,7 @@ from hypothesis import strategies as st
 from psycopg.pq import TransactionStatus
 
 from common.config import get_settings
-from common.repo.search import SearchHit, SearchPage, Span
+from common.repo.search import Excerpt, SearchHit, SearchPage, Span
 from services.api import deps, routes_read
 from services.api.main import create_app
 from tests.services.api.conftest import UNREACHABLE_DSN, FakePool, LogSink
@@ -77,7 +77,9 @@ def _hit(**overrides: Any) -> SearchHit:
         "unavailable": None,
         "transcript_source": "whisper",
         "matched_in": ("transcript",),
-        "excerpts": ((Span("the ", False), Span("zebra", True), Span(" ran", False)),),
+        "excerpts": (
+            Excerpt((Span("the ", False), Span("zebra", True), Span(" ran", False)), 12.5),
+        ),
     }
     values.update(overrides)
     return SearchHit(**values)
@@ -191,11 +193,14 @@ def test_the_response_shape(api: TestClient, recorder: Recorder) -> None:
                 "transcript_source": "whisper",
                 "matched_in": ["transcript"],
                 "excerpts": [
-                    [
-                        {"text": "the ", "match": False},
-                        {"text": "zebra", "match": True},
-                        {"text": " ran", "match": False},
-                    ]
+                    {
+                        "spans": [
+                            {"text": "the ", "match": False},
+                            {"text": "zebra", "match": True},
+                            {"text": " ran", "match": False},
+                        ],
+                        "start_sec": 12.5,
+                    }
                 ],
             }
         ],
@@ -218,6 +223,29 @@ def test_nullable_columns_are_null(api: TestClient, recorder: Recorder) -> None:
             result["published_at"], result["duration_sec"], result["unavailable"]) == (
         None, None, None, None, None, "removed",
     )
+
+
+def test_start_sec_is_a_float_or_null(api: TestClient, recorder: Recorder) -> None:
+    spans = (Span("zebra", True),)
+    recorder.page = SearchPage(
+        (_hit(excerpts=(Excerpt(spans, 0.0), Excerpt(spans, 3723.0), Excerpt(spans, None))),),
+        False,
+    )
+
+    [result] = api.get("/search", params={"q": "zebra"}).json()["results"]
+
+    assert [e["start_sec"] for e in result["excerpts"]] == [0.0, 3723.0, None]
+
+
+def test_the_response_model_rejects_a_negative_start_sec() -> None:
+    from pydantic import ValidationError
+
+    from services.api.schemas import ExcerptOut
+
+    assert ExcerptOut(spans=[], start_sec=1.5).start_sec == 1.5
+    assert ExcerptOut(spans=[], start_sec=None).start_sec is None
+    with pytest.raises(ValidationError):
+        ExcerptOut(spans=[], start_sec=-1)
 
 
 def test_a_title_only_match_has_no_transcript_and_no_excerpts(
@@ -365,7 +393,7 @@ def test_a_real_search_end_to_end_writes_nothing(
     assert counts() == before
     [result] = body["results"]
     assert result["video_id"] == "dbsearch001"
-    spans = [s for fragment in result["excerpts"] for s in fragment]
+    spans = [s for e in result["excerpts"] for s in e["spans"]]
     assert {"text": "zebra", "match": True} in spans
     assert "<b>tags</b>" in "".join(s["text"] for s in spans)
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal, cast
 
-from pydantic import AfterValidator, BaseModel, JsonValue
+from pydantic import AfterValidator, BaseModel, Field, JsonValue
 
 from common.models import (
     Analysis,
@@ -158,11 +158,18 @@ class SpanOut(BaseModel):
     match: bool
 
 
+class ExcerptOut(BaseModel):
+    spans: list[SpanOut]
+    #: Seconds from the start of the video of the transcript segment the match
+    #: is in; ``None`` for a ``full_text`` fallback excerpt (#110).
+    start_sec: Annotated[float, Field(ge=0)] | None
+
+
 class SearchResult(VideoFields):
     #: ``None`` when the video matched on its title or analysis and has no transcript.
     transcript_source: str | None
     matched_in: list[Literal["title", "analysis", "transcript"]]
-    excerpts: list[list[SpanOut]]
+    excerpts: list[ExcerptOut]
 
 
 class SearchPage(BaseModel):
@@ -186,8 +193,11 @@ def search_page(page: RepoSearchPage, *, limit: int, offset: int) -> SearchPage:
                 transcript_source=hit.transcript_source,
                 matched_in=list(hit.matched_in),
                 excerpts=[
-                    [SpanOut(text=span.text, match=span.match) for span in fragment]
-                    for fragment in hit.excerpts
+                    ExcerptOut(
+                        spans=[SpanOut(text=span.text, match=span.match) for span in e.spans],
+                        start_sec=e.start_sec,
+                    )
+                    for e in hit.excerpts
                 ],
             )
             for hit in page.results

@@ -469,6 +469,35 @@
         "title": "ClaimOut",
         "type": "object"
       },
+      "ExcerptOut": {
+        "properties": {
+          "spans": {
+            "items": {
+              "$ref": "#/components/schemas/SpanOut"
+            },
+            "title": "Spans",
+            "type": "array"
+          },
+          "start_sec": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Sec"
+          }
+        },
+        "required": [
+          "spans",
+          "start_sec"
+        ],
+        "title": "ExcerptOut",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -819,10 +848,7 @@
           },
           "excerpts": {
             "items": {
-              "items": {
-                "$ref": "#/components/schemas/SpanOut"
-              },
-              "type": "array"
+              "$ref": "#/components/schemas/ExcerptOut"
             },
             "title": "Excerpts",
             "type": "array"

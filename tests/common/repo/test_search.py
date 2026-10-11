@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
+import psycopg.types.json
 import pytest
 
 from common.models import Analysis, Claim, FeedEntry, Segment, Topic, VideoMeta
@@ -224,7 +225,9 @@ def test_the_search_uses_the_gin_index(conn: psycopg.Connection[Any]) -> None:
     ).fetchall()
 
     assert "search_docs_fts_idx" in "\n".join(row[0] for row in plan)
-    assert "to_tsvector" not in SEARCH_SQL
+    # The match itself never builds a vector per row (the segment windows,
+    # which run for the returned page only, legitimately do).
+    assert "to_tsvector" not in SEARCH_SQL.partition("SELECT page.video_id")[0]
     assert "websearch_to_tsquery('english'" in SEARCH_SQL
 
 
@@ -342,10 +345,10 @@ def test_matched_words_are_marked(conn: psycopg.Connection[Any]) -> None:
     [hit] = _search(conn, "zebra").results
 
     assert 1 <= len(hit.excerpts) <= 3
-    spans = [s for fragment in hit.excerpts for s in fragment]
+    spans = [s for ex in hit.excerpts for s in ex.spans]
     assert Span("zebra", True) in spans
     assert all(s.text for s in spans)
-    assert "".join(s.text for s in hit.excerpts[0]) == "the zebra ran"
+    assert "".join(s.text for s in hit.excerpts[0].spans) == "the zebra ran"
 
 
 def test_html_in_a_transcript_is_literal_unmarked_text(conn: psycopg.Connection[Any]) -> None:
@@ -353,7 +356,7 @@ def test_html_in_a_transcript_is_literal_unmarked_text(conn: psycopg.Connection[
 
     [hit] = _search(conn, "zebra").results
 
-    spans = [s for fragment in hit.excerpts for s in fragment]
+    spans = [s for ex in hit.excerpts for s in ex.spans]
     text = "".join(s.text for s in spans)
     assert "<script>alert(1)</script>" in text
     assert "<b>fake</b>" in text
@@ -368,7 +371,7 @@ def test_marker_characters_in_a_transcript_cannot_forge_matches(
 
     [hit] = _search(conn, "zebra").results
 
-    spans = [s for fragment in hit.excerpts for s in fragment]
+    spans = [s for ex in hit.excerpts for s in ex.spans]
     assert [s.text for s in spans if s.match] == ["zebra"]
     assert len(hit.excerpts) == 1
     for span in spans:
@@ -384,10 +387,10 @@ def test_long_transcripts_give_at_most_three_short_fragments(
     [hit] = _search(conn, "zebra").results
 
     assert 1 <= len(hit.excerpts) <= 3
-    for fragment in hit.excerpts:
-        words = "".join(s.text for s in fragment).split()
+    for excerpt in hit.excerpts:
+        words = "".join(s.text for s in excerpt.spans).split()
         assert len(words) <= 36
-        assert any(s.match for s in fragment)
+        assert any(s.match for s in excerpt.spans)
 
 
 def test_headline_is_computed_only_for_the_page(conn: psycopg.Connection[Any]) -> None:
@@ -476,7 +479,7 @@ def test_matching_works_across_sources(conn: psycopg.Connection[Any]) -> None:
     [hit] = _search(conn, "fridman nuclear").results
 
     assert (hit.video_id, hit.matched_in) == ("cross000001", ("title", "transcript"))
-    assert any(s.match for fragment in hit.excerpts for s in fragment)
+    assert any(s.match for ex in hit.excerpts for s in ex.spans)
 
 
 def test_exclusion_applies_to_the_whole_document(conn: psycopg.Connection[Any]) -> None:
@@ -791,7 +794,7 @@ def test_the_headline_uses_the_rows_configuration(conn: psycopg.Connection[Any])
 
     [hit] = _search(conn, "Haus").results
 
-    assert Span("Häuser", True) in [s for fragment in hit.excerpts for s in fragment]
+    assert Span("Häuser", True) in [s for ex in hit.excerpts for s in ex.spans]
 
 
 def test_the_preferred_transcript_decides_the_language(conn: psycopg.Connection[Any]) -> None:
@@ -845,3 +848,213 @@ def test_the_rank_of_a_non_english_row_uses_its_own_configuration(
     _lang(conn, "own_en00001", "Haus alt neu", "en")
 
     assert _ids(_search(conn, "Haus"))[0] == "own_de00001"
+
+
+# --- timestamps from segments (#110) -------------------------------------------------
+
+
+def _segments(
+    conn: psycopg.Connection[Any], vid: str, segments: list[tuple[Any, str]],
+    *, language: str | None = "en", title: str = "T"
+) -> None:
+    """A transcript whose ``segments`` JSON is written verbatim (start may be junk)."""
+    _video(conn, vid, title=title)
+    items = [{"start": start, "end": 1, "text": text} for start, text in segments]
+    conn.execute(
+        "INSERT INTO transcripts (video_id, source, language, segments, full_text)"
+        " VALUES (%s, 'whisper', %s, %s, %s)",
+        (vid, language, psycopg.types.json.Jsonb(items), " ".join(t for _, t in segments)),
+    )
+
+
+def _windows(conn: psycopg.Connection[Any], q: str) -> list[tuple[float | None, str]]:
+    [hit] = _search(conn, q).results
+    return [(e.start_sec, "".join(s.text for s in e.spans)) for e in hit.excerpts]
+
+
+def test_a_matching_segment_gives_its_start(conn: psycopg.Connection[Any]) -> None:
+    _segments(conn, "seg00000001", [(0, "hello there"), (12.5, "the zebra ran")])
+
+    [hit] = _search(conn, "zebra").results
+
+    [excerpt] = hit.excerpts
+    assert excerpt.start_sec == 12.5
+    assert excerpt.spans == (Span("the ", False), Span("zebra", True), Span(" ran", False))
+
+
+def test_stemming_applies_to_segments(conn: psycopg.Connection[Any]) -> None:
+    _segments(conn, "seg00000002", [(3, "go"), (40, "running late")])
+
+    assert _windows(conn, "runs") == [(40.0, "running late")]
+
+
+def test_start_zero_is_a_real_timestamp(conn: psycopg.Connection[Any]) -> None:
+    _segments(conn, "seg00000003", [(0, "zebra first")])
+
+    assert _windows(conn, "zebra") == [(0.0, "zebra first")]
+
+
+def test_a_phrase_split_across_a_boundary_is_one_window(conn: psycopg.Connection[Any]) -> None:
+    _segments(conn, "seg00000004", [(1, "intro"), (5, "we use machine"), (8, "learning daily")])
+
+    [hit] = _search(conn, '"machine learning"').results
+
+    [excerpt] = hit.excerpts
+    assert excerpt.start_sec == 5.0
+    assert [s.text for s in excerpt.spans if s.match] == ["machine", "learning"]
+
+
+def test_a_phrase_over_three_segments_falls_back_to_full_text_without_a_timestamp(
+    conn: psycopg.Connection[Any],
+) -> None:
+    _segments(conn, "seg00000005", [(1, "deep"), (2, "machine"), (3, "learning")])
+
+    [hit] = _search(conn, '"deep machine learning"').results
+
+    assert len(hit.excerpts) >= 1
+    assert all(e.start_sec is None for e in hit.excerpts)
+    assert any(s.match for e in hit.excerpts for s in e.spans)
+
+
+def test_five_matching_segments_give_three_excerpts_in_start_order(
+    conn: psycopg.Connection[Any],
+) -> None:
+    _segments(conn, "seg00000006", [(i * 10, f"zebra number{i}") for i in range(5)])
+
+    starts = [start for start, _ in _windows(conn, "zebra")]
+
+    assert starts == sorted(starts)
+    assert len(starts) == 3
+
+
+def test_the_best_ranked_windows_win_and_ties_go_to_the_earlier_start(
+    conn: psycopg.Connection[Any],
+) -> None:
+    # Segment 20 holds two hits, so it outranks the single-hit segments; of
+    # those, equal ranks go to the earliest starts.
+    _segments(conn, "seg00000007", [
+        (50, "zebra one"), (40, "zebra two"), (30, "zebra three"), (20, "zebra zebra"),
+        (10, "zebra four"),
+    ])
+
+    assert [start for start, _ in _windows(conn, "zebra")] == [10.0, 20.0, 30.0]
+
+
+def test_pairs_never_share_a_segment(conn: psycopg.Connection[Any]) -> None:
+    # machine | learning | machine | learning: the pairs (0,1) and (2,3) are
+    # windows; (1,2) reads "learning machine", which is not the phrase.
+    _segments(conn, "seg00000008", [
+        (1, "machine"), (2, "learning"), (3, "machine"), (4, "learning"),
+    ])
+
+    assert [start for start, _ in _windows(conn, '"machine learning"')] == [1.0, 3.0]
+
+
+def test_a_run_of_overlapping_pairs_keeps_every_other_one(conn: psycopg.Connection[Any]) -> None:
+    # Every adjacent join of a b a b a is a match for "a b | b a", so the pairs
+    # (0,1) (1,2) (2,3) (3,4) qualify; a left-to-right pass keeps (0,1) and (2,3).
+    _segments(conn, "seg00000009", [(1, "alpha"), (2, "beta"), (3, "alpha"), (4, "beta"),
+                                    (5, "alpha")])
+
+    starts = [s for s, _ in _windows(conn, '"alpha beta" or "beta alpha"')]
+
+    assert starts == [1.0, 3.0]
+
+
+@pytest.mark.parametrize("start", [None, -1, "soon", [1], {"a": 1}, True])
+def test_an_invalid_start_never_yields_a_timestamp(
+    conn: psycopg.Connection[Any], start: Any
+) -> None:
+    _segments(conn, "seg00000010", [(start, "a zebra here")])
+
+    [hit] = _search(conn, "zebra").results
+
+    assert hit.excerpts  # the full_text fallback still answers
+    assert all(e.start_sec is None for e in hit.excerpts)
+
+
+def test_valid_windows_survive_next_to_an_invalid_one(conn: psycopg.Connection[Any]) -> None:
+    _segments(conn, "seg00000011", [(-5, "zebra bad"), (7, "zebra good")])
+
+    assert _windows(conn, "zebra") == [(7.0, "zebra good")]
+
+
+def test_empty_segments_use_the_full_text_fallback(conn: psycopg.Connection[Any]) -> None:
+    _video(conn, "seg00000012")
+    conn.execute(
+        "INSERT INTO transcripts (video_id, source, segments, full_text)"
+        " VALUES ('seg00000012', 'whisper', '[]', 'a zebra appears')"
+    )
+
+    [hit] = _search(conn, "zebra").results
+
+    assert [e.start_sec for e in hit.excerpts] == [None]
+    assert Span("zebra", True) in hit.excerpts[0].spans
+
+
+@pytest.mark.parametrize("segments", ["{}", '"text"', "7", "[1, null, \"x\", {\"start\": 1}]"])
+def test_malformed_segments_do_not_raise(conn: psycopg.Connection[Any], segments: str) -> None:
+    _video(conn, "seg00000013")
+    conn.execute(
+        "INSERT INTO transcripts (video_id, source, segments, full_text)"
+        " VALUES ('seg00000013', 'whisper', %s::jsonb, 'a zebra appears')",
+        (segments,),
+    )
+
+    [hit] = _search(conn, "zebra").results
+
+    assert all(e.start_sec is None for e in hit.excerpts)
+
+
+def test_a_huge_start_is_not_a_timestamp(conn: psycopg.Connection[Any]) -> None:
+    _video(conn, "seg00000014")
+    conn.execute(
+        "INSERT INTO transcripts (video_id, source, segments, full_text) VALUES"
+        " ('seg00000014', 'whisper', '[{\"start\": 1e400, \"text\": \"zebra\"}]', 'zebra')"
+    )
+
+    [hit] = _search(conn, "zebra").results
+
+    assert all(e.start_sec is None for e in hit.excerpts)
+
+
+def test_operators_apply_to_segments(conn: psycopg.Connection[Any]) -> None:
+    _segments(conn, "seg00000015", [(1, "just cats"), (2, "only birds"), (3, "more cats")])
+    _segments(conn, "seg00000018", [(1, "cats and dogs"), (2, "only dogs")])
+
+    [hit] = _search(conn, "cats -dogs").results  # the second video holds "dogs"
+    assert (hit.video_id, [e.start_sec for e in hit.excerpts]) == ("seg00000015", [1.0, 3.0])
+    hits = {h.video_id: h for h in _search(conn, "cats or dogs").results}
+    assert [e.start_sec for e in hits["seg00000018"].excerpts] == [1.0, 2.0]
+    assert [e.start_sec for e in hits["seg00000015"].excerpts] == [1.0, 3.0]
+
+
+def test_marker_characters_in_a_segment_cannot_forge_matches(
+    conn: psycopg.Connection[Any],
+) -> None:
+    _segments(conn, "seg00000016", [(4, "zebra \x01fake\x02 \x03 <script>alert(1)</script> & \ue000x")])
+
+    [hit] = _search(conn, "zebra").results
+
+    [excerpt] = hit.excerpts
+    assert excerpt.start_sec == 4.0
+    assert [s.text for s in excerpt.spans if s.match] == ["zebra"]
+    text = "".join(s.text for s in excerpt.spans)
+    assert "<script>alert(1)</script>" in text and "&" in text
+    assert not any(c in text for c in "\x01\x02\x03\ue000\ue001\ue002")
+
+
+def test_segment_windows_are_found_in_the_rows_own_language(
+    conn: psycopg.Connection[Any],
+) -> None:
+    _segments(conn, "seg00000017", [(0, "Willkommen"), (21, "Die Häuser sind alt")], language="de")
+
+    assert _windows(conn, "Haus") == [(21.0, "Die Häuser sind alt")]
+
+
+def test_ordering_and_paging_do_not_depend_on_the_excerpts(conn: psycopg.Connection[Any]) -> None:
+    for i in range(4):
+        _segments(conn, f"pg_seg{i:05d}", [(i, "zebra")])
+
+    assert _ids(_search(conn, "zebra")) == [f"pg_seg{i:05d}" for i in range(4)]
+    assert _search(conn, "zebra", limit=3).has_more is True

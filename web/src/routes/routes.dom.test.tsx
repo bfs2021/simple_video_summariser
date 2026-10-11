@@ -152,3 +152,78 @@ describe('trailing slash on a video id', () => {
     }
   })
 })
+
+// #110: a search hit links to the moment it was said. This goes through the
+// SHARED route table (not a local router), so it proves that the registered
+// routes deliver the link's `?t=` to the detail route and that nothing strips it
+// once the destination view has rendered and run its effects. The seek itself
+// (player ready, once) belongs to the `?t=` deep-link work (#129).
+describe('search hit timestamp links through the shared route table', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(String(input), 'http://localhost')
+        if (url.pathname.endsWith('/search')) {
+          return new Response(
+            JSON.stringify({
+              results: [
+                {
+                  video_id: '-wNyEUrxzFU',
+                  title: 'The Zebra',
+                  channel_id: null,
+                  channel_title: null,
+                  published_at: null,
+                  duration_sec: null,
+                  unavailable: null,
+                  transcript_source: 'whisper',
+                  matched_in: ['transcript'],
+                  excerpts: [
+                    { spans: [{ text: 'a zebra', match: true }], start_sec: 3723.9 },
+                    { spans: [{ text: 'no time', match: false }], start_sec: null },
+                  ],
+                },
+              ],
+              limit: 20,
+              offset: 0,
+              has_more: false,
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          )
+        }
+        return new Response('{}', { status: 500, headers: { 'content-type': 'application/json' } })
+      }),
+    )
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+  })
+
+  async function settle() {
+    for (let i = 0; i < 3; i++) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(50)
+      })
+    }
+  }
+
+  it('clicking a hit time opens the detail route with ?t= intact after effects ran', async () => {
+    const router = mount('/search?q=zebra')
+    await settle()
+    const link = screen.getByRole('link', { name: 'Open at 1:02:03' })
+    expect(link.getAttribute('href')).toBe('/videos/-wNyEUrxzFU?t=3723')
+    expect(screen.getAllByRole('link', { name: /^Open at/ })).toHaveLength(1)
+
+    fireEvent.click(link)
+    await settle()
+
+    expect(router.state.location.pathname).toBe('/videos/-wNyEUrxzFU')
+    expect(router.state.location.search).toBe('?t=3723')
+    // The destination is the real VideoDetail (not Search, not Page not found).
+    expect(screen.queryByRole('heading', { name: 'Search' })).toBeNull()
+    expect(screen.queryByText('Page not found')).toBeNull()
+  })
+})

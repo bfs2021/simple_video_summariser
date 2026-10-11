@@ -19,7 +19,7 @@ function hit(n: number, over: Partial<SearchResult> = {}): SearchResult {
     unavailable: null,
     transcript_source: 'whisper',
     matched_in: ['transcript'],
-    excerpts: [[{ text: `excerpt ${n}`, match: false }]],
+    excerpts: [{ spans: [{ text: `excerpt ${n}`, match: false }], start_sec: null }],
     ...over,
   }
 }
@@ -336,15 +336,21 @@ describe('a result', () => {
           channel_title: 'Wildlife',
           published_at: '2026-09-01T23:30:00Z',
           excerpts: [
-            [
-              { text: 'the ', match: false },
-              { text: 'zebra', match: true },
-              { text: ' ran fast', match: false },
-            ],
-            [
-              { text: 'another ', match: false },
-              { text: 'zebra', match: true },
-            ],
+            {
+              spans: [
+                { text: 'the ', match: false },
+                { text: 'zebra', match: true },
+                { text: ' ran fast', match: false },
+              ],
+              start_sec: null,
+            },
+            {
+              spans: [
+                { text: 'another ', match: false },
+                { text: 'zebra', match: true },
+              ],
+              start_sec: null,
+            },
           ],
         }),
       ]),
@@ -434,12 +440,15 @@ describe('a result', () => {
       page([
         hit(1, {
           excerpts: [
-            [{ text: '', match: true }],
-            [],
-            [
-              { text: '', match: false },
-              { text: 'solo', match: false },
-            ],
+            { spans: [{ text: '', match: true }], start_sec: null },
+            { spans: [], start_sec: null },
+            {
+              spans: [
+                { text: '', match: false },
+                { text: 'solo', match: false },
+              ],
+              start_sec: null,
+            },
           ],
         }),
       ]),
@@ -451,7 +460,7 @@ describe('a result', () => {
   })
 
   it('renders a fragment with no matched span as plain text', async () => {
-    stubFetch(() => page([hit(1, { excerpts: [[{ text: 'plain words', match: false }]] })]))
+    stubFetch(() => page([hit(1, { excerpts: [{ spans: [{ text: 'plain words', match: false }], start_sec: null }] })]))
     await mount('/search?q=a')
     expect(screen.getByText('plain words')).toBeTruthy()
     expect(document.querySelector('mark')).toBeNull()
@@ -465,10 +474,13 @@ describe('a result', () => {
           title: evil,
           channel_title: '<b>fake</b>',
           excerpts: [
-            [
-              { text: evil, match: false },
-              { text: '<b>fake</b>', match: true },
-            ],
+            {
+              spans: [
+                { text: evil, match: false },
+                { text: '<b>fake</b>', match: true },
+              ],
+              start_sec: null,
+            },
           ],
         }),
       ]),
@@ -490,10 +502,77 @@ describe('a result', () => {
     expect(document.body.textContent).not.toContain('onerror')
   })
 
-  it('renders no Timestamp control for excerpts', async () => {
+  it('renders no timestamp link for an excerpt with start_sec: null', async () => {
     stubFetch(() => page([hit(1)]))
     await mount('/search?q=a')
     expect(screen.getAllByRole('link')).toHaveLength(1)
+    expect(document.querySelector('time')).toBeNull()
+  })
+
+  const withStarts = (starts: (number | null)[]) =>
+    hit(1, {
+      video_id: 'abc-_Z09xyz',
+      excerpts: starts.map((start_sec, i) => ({
+        spans: [{ text: `part ${i}`, match: i === 0 }],
+        start_sec,
+      })),
+    })
+
+  it('links each excerpt with a start to ?t= whole seconds, labelled by its time', async () => {
+    stubFetch(() => page([withStarts([12.5, 600, 3723])]))
+    await mount('/search?q=a')
+    const item = screen.getByRole('listitem')
+    const links = within(item).getAllByRole('link', { name: /^Open at/ })
+    expect(links.map((l) => l.getAttribute('href'))).toEqual([
+      '/videos/abc-_Z09xyz?t=12',
+      '/videos/abc-_Z09xyz?t=600',
+      '/videos/abc-_Z09xyz?t=3723',
+    ])
+    expect(links.map((l) => l.textContent)).toEqual(['0:12', '10:00', '1:02:03'])
+    expect(links.map((l) => l.getAttribute('aria-label'))).toEqual([
+      'Open at 0:12',
+      'Open at 10:00',
+      'Open at 1:02:03',
+    ])
+    // The title link is still the plain detail route.
+    expect(within(item).getByRole('link', { name: 'Title 1' }).getAttribute('href')).toBe(
+      '/videos/abc-_Z09xyz',
+    )
+  })
+
+  it('start_sec: 0 is a link with t=0; a null one next to it has none', async () => {
+    stubFetch(() => page([withStarts([0, null])]))
+    await mount('/search?q=a')
+    const links = screen.getAllByRole('link', { name: /^Open at/ })
+    expect(links.map((l) => l.getAttribute('href'))).toEqual(['/videos/abc-_Z09xyz?t=0'])
+    expect(document.querySelector('li p')?.textContent).toContain('part 1')
+  })
+
+  it.each([-1, Number.NaN, Number.POSITIVE_INFINITY, 1e12])(
+    'start_sec %s renders the excerpt without a link',
+    async (bad) => {
+      stubFetch(() => page([withStarts([bad])]))
+      await mount('/search?q=a')
+      expect(screen.queryAllByRole('link', { name: /^Open at/ })).toHaveLength(0)
+      expect(screen.getByText('part 0')).toBeTruthy()
+    },
+  )
+
+  it('clicking a timestamp link navigates to the detail route with t intact', async () => {
+    stubFetch(() => page([withStarts([3723.9])]))
+    const router = await mount('/search?q=zebra')
+    fireEvent.click(screen.getByRole('link', { name: 'Open at 1:02:03' }))
+    await settle()
+    expect(router.state.location.pathname).toBe('/videos/abc-_Z09xyz')
+    expect(router.state.location.search).toBe('?t=3723')
+  })
+
+  it('encodes a video id in the link path', async () => {
+    stubFetch(() => page([hit(1, { video_id: 'a/b?c', excerpts: [{ spans: [{ text: 'x', match: true }], start_sec: 5 }] })]))
+    await mount('/search?q=a')
+    expect(screen.getByRole('link', { name: 'Open at 0:05' }).getAttribute('href')).toBe(
+      '/videos/a%2Fb%3Fc?t=5',
+    )
   })
 })
 
@@ -655,7 +734,7 @@ describe('states', () => {
   it.each([
     ['not json', new Response('<html>SECRET</html>', { status: 200 })],
     ['wrong shape', json({ results: 'nope' })],
-    ['bad span', json({ results: [{ ...hit(1), excerpts: [[{ text: 1 }]] }], limit: 20, offset: 0, has_more: false })],
+    ['bad span', json({ results: [{ ...hit(1), excerpts: [{ spans: [{ text: 1 }], start_sec: null }] }], limit: 20, offset: 0, has_more: false })],
   ])('malformed 200 body (%s): generic error, nothing rendered', async (_n, res) => {
     stubFetch(() => res)
     await mount('/search?q=a')
@@ -707,7 +786,7 @@ describe('states', () => {
 
 describe('accessibility', () => {
   it('has a labelled input, a polite live region and mark elements for matches', async () => {
-    stubFetch(() => page([hit(1, { excerpts: [[{ text: 'hit', match: true }]] })]))
+    stubFetch(() => page([hit(1, { excerpts: [{ spans: [{ text: 'hit', match: true }], start_sec: null }] })]))
     await mount('/search?q=hit')
     expect(screen.getByLabelText(/search/i)).toBe(input())
     expect(live()).not.toBeNull()

@@ -48,6 +48,8 @@ _RESTORE = str.maketrans({v: k for k, v in _PROTECT.items()})
 
 #: The ts_headline options: at most 3 fragments of about 35 words.
 HEADLINE_OPTIONS = "MaxFragments=3, MaxWords=35, MinWords=15, ShortWord=0"
+#: A segment window is one short text: a single fragment of the same size.
+WINDOW_OPTIONS = "MaxFragments=0, MaxWords=35, MinWords=15, ShortWord=0"
 
 # chr(1)..chr(3) are the markers; chr(57344)..chr(57346) are U+E000..U+E002.
 _STRIPPED = "chr(1) || chr(2) || chr(3) || chr(57344) || chr(57345) || chr(57346)"
@@ -56,6 +58,75 @@ _PROTECTED = "chr(57344) || chr(57345) || chr(57346)"
 #: ``ts_rank_cd`` weights in the order D, C, B, A (title A > TL;DR B > topics
 #: and claims C > transcript D).
 RANK_WEIGHTS = "{0.1, 0.2, 0.4, 1.0}"
+
+#: Segment windows for one page row (#110), a scalar subquery over ``t``,
+#: ``page.cfg`` and ``r.own`` of the outer query: a JSON array of
+#: ``[start_sec, headline]``, at most 3, ascending by start. A window is one
+#: segment whose own text matches, or two adjacent segments that match only
+#: when joined (a phrase split at a boundary). Windows never share a segment:
+#: of a run of consecutive qualifying pairs, every other one (starting with the
+#: first) is kept, which is what a left-to-right greedy pass keeps. Segments
+#: without text, and windows whose first segment has no valid ``start``
+#: (missing, not a number, negative, above 1e9), are skipped. Evaluated only
+#: for the rows of the returned page that matched in the transcript.
+WINDOWS_SQL = f"""
+    SELECT coalesce(
+        jsonb_agg(jsonb_build_array(top.start, top.headline) ORDER BY top.start, top.ord),
+        '[]'::jsonb) AS windows
+    FROM (
+        WITH segs AS (
+            SELECT e.ord,
+                   CASE WHEN jsonb_typeof(e.seg -> 'text') = 'string'
+                        THEN e.seg ->> 'text' ELSE '' END AS text,
+                   CASE WHEN jsonb_typeof(e.seg -> 'start') = 'number'
+                        THEN CASE WHEN (e.seg ->> 'start')::numeric BETWEEN 0 AND 1000000000
+                                  THEN (e.seg ->> 'start')::numeric END END AS start
+            FROM jsonb_array_elements(
+                     CASE WHEN m.in_transcript AND jsonb_typeof(t.segments) = 'array'
+                          THEN t.segments ELSE '[]'::jsonb END
+                 ) WITH ORDINALITY AS e(seg, ord)
+        ),
+        hits AS (
+            SELECT segs.*, to_tsvector(page.cfg, segs.text) @@ r.own AS hit FROM segs
+        ),
+        adj AS (
+            SELECT hits.*, lead(hit) OVER o AS nhit, lead(text) OVER o AS ntext
+            FROM hits WINDOW o AS (ORDER BY ord)
+        ),
+        singles AS (
+            SELECT ord, start, text AS wtext FROM adj WHERE hit AND start IS NOT NULL
+        ),
+        pairs AS (
+            SELECT ord, start, text || ' ' || ntext AS wtext,
+                   ord - row_number() OVER (ORDER BY ord) AS run
+            FROM adj
+            WHERE NOT hit AND nhit IS NOT NULL AND NOT nhit
+              AND text <> '' AND ntext <> '' AND start IS NOT NULL
+              AND to_tsvector(page.cfg, text || ' ' || ntext) @@ r.own
+        ),
+        windows AS (
+            SELECT ord, start, wtext FROM singles
+            UNION ALL
+            SELECT ord, start, wtext FROM (
+                SELECT pairs.*, row_number() OVER (PARTITION BY run ORDER BY ord) AS k FROM pairs
+            ) AS kept WHERE k %% 2 = 1
+        ),
+        ranked AS (
+            SELECT windows.*, row_number() OVER (
+                       ORDER BY ts_rank(to_tsvector(page.cfg, wtext), r.own) DESC, start, ord
+                   ) AS pick
+            FROM windows
+        )
+        SELECT ord, start,
+               ts_headline(
+                   page.cfg,
+                   translate(translate(wtext, {_STRIPPED}, ''), '<>&', {_PROTECTED}),
+                   r.own,
+                   'StartSel=' || chr(1) || ', StopSel=' || chr(2) || ', {WINDOW_OPTIONS}'
+               ) AS headline
+        FROM ranked WHERE pick <= 3
+    ) AS top
+"""
 
 SEARCH_SQL = f"""
 WITH q AS (
@@ -86,8 +157,8 @@ page AS (
 )
 SELECT page.video_id, page.title, page.channel_id, page.channel_title,
        page.published_at, page.duration_sec, page.unavailable, t.source,
-       m.in_title, m.in_analysis, m.in_transcript,
-       CASE WHEN m.in_transcript THEN ts_headline(
+       m.in_title, m.in_analysis, m.in_transcript, w.windows,
+       CASE WHEN m.in_transcript AND jsonb_array_length(w.windows) = 0 THEN ts_headline(
            page.cfg,
            translate(translate(t.full_text, {_STRIPPED}, ''), '<>&', {_PROTECTED}),
            r.own,
@@ -109,6 +180,7 @@ CROSS JOIN LATERAL (
            tsvector_to_array(ts_filter(page.fts, '{{d}}')) && lx.own AS in_transcript
 ) m
 LEFT JOIN transcripts t ON t.id = page.transcript_id
+CROSS JOIN LATERAL ({WINDOWS_SQL}) w
 ORDER BY page.rank DESC, page.published_at DESC NULLS LAST, page.video_id ASC
 """
 
@@ -119,6 +191,18 @@ class Span:
 
     text: str
     match: bool
+
+
+@dataclass(frozen=True, slots=True)
+class Excerpt:
+    """One excerpt: its spans and where in the video it was said (#110).
+
+    ``start_sec`` is the start of the transcript segment the match is in, or
+    ``None`` for a ``full_text`` fallback excerpt.
+    """
+
+    spans: tuple[Span, ...]
+    start_sec: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,7 +217,7 @@ class SearchHit:
     transcript_source: str | None
     #: Where the query matched, in the fixed order title, analysis, transcript.
     matched_in: tuple[Literal["title", "analysis", "transcript"], ...]
-    excerpts: tuple[tuple[Span, ...], ...]
+    excerpts: tuple[Excerpt, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,7 +256,7 @@ def _has_positive_term(conn: psycopg.Connection[Any], query: str) -> bool:
 
 def _hit(row: tuple[Any, ...]) -> SearchHit:
     (video_id, title, channel_id, channel_title, published_at, duration_sec, unavailable,
-     source, in_title, in_analysis, in_transcript, headline) = row
+     source, in_title, in_analysis, in_transcript, windows, headline) = row
     matched_in: list[Literal["title", "analysis", "transcript"]] = []
     if in_title:
         matched_in.append("title")
@@ -190,16 +274,27 @@ def _hit(row: tuple[Any, ...]) -> SearchHit:
         unavailable=unavailable,
         transcript_source=source,
         matched_in=tuple(matched_in),
-        excerpts=_excerpts(headline or ""),
+        excerpts=_window_excerpts(windows) or _excerpts(headline or ""),
     )
 
 
-def _excerpts(headline: str) -> tuple[tuple[Span, ...], ...]:
+def _window_excerpts(windows: Any) -> tuple[Excerpt, ...]:
+    excerpts = []
+    for start, headline in windows or ():
+        spans = next(
+            (spans for part in (headline or "").split(_DELIM) if (spans := _spans(part))), ()
+        )
+        if spans:
+            excerpts.append(Excerpt(spans, float(start)))
+    return tuple(excerpts[:3])
+
+
+def _excerpts(headline: str) -> tuple[Excerpt, ...]:
     fragments = []
     for fragment in headline.split(_DELIM):
         spans = _spans(fragment)
         if spans:
-            fragments.append(spans)
+            fragments.append(Excerpt(spans))
     return tuple(fragments[:3])
 
 
