@@ -14,10 +14,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from common.config import get_settings
+from common.db import create_pool
 from services.api import deps
 from services.api.main import create_app
 from tests.common.repo import read_seed as seed
-from tests.services.api.conftest import LogSink
+from tests.services.api.conftest import LogSink, request_with
 
 pytestmark = pytest.mark.integration
 
@@ -372,19 +373,58 @@ def test_read_routes_write_nothing(api: TestClient, db: psycopg.Connection[Any])
     assert _counts(db) == before
 
 
+def _statement_timeout_ms(conn: psycopg.Connection[Any]) -> int:
+    row = conn.execute("SHOW statement_timeout").fetchone()
+    assert row is not None
+    value = str(row[0])
+    return int(value[:-2]) if value.endswith("ms") else int(value[:-1]) * 1000
+
+
 def test_the_read_connection_is_read_only_with_a_bounded_statement_timeout(
-    db: psycopg.Connection[Any],
+    db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    for raw in deps.get_conn():
-        for conn in deps.get_read_conn(raw):
-            row = conn.execute("SHOW statement_timeout").fetchone()
-            assert row is not None
-            value = str(row[0])
-            ms = int(value[:-2]) if value.endswith("ms") else int(value[:-1]) * 1000
-            assert 0 < ms <= 5000
-            conn.rollback()
-            with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
-                conn.execute("INSERT INTO videos (video_id) VALUES ('ro000000001')")
+    """Through a real one-connection pool, so the *reused* connection is what is checked.
+
+    The first borrow marks the connection read-only; the second borrow must get
+    the same backend with that state cleared (``reset=``), still bounded by the
+    pool-startup ``statement_timeout``, and read-only again only via
+    ``get_read_conn``.
+    """
+    monkeypatch.setenv("DB_POOL_MIN_SIZE", "1")
+    monkeypatch.setenv("DB_POOL_MAX_SIZE", "1")
+    get_settings.cache_clear()
+    pool = create_pool(
+        connect_timeout=deps.CONNECT_TIMEOUT_SEC, statement_timeout_ms=deps.STATEMENT_TIMEOUT_MS
+    )
+    pool.open(wait=True, timeout=30)
+    request = request_with(pool)
+    try:
+        for raw in deps.get_conn(request):
+            first_pid = raw.info.backend_pid
+            for conn in deps.get_read_conn(raw):
+                assert 0 < _statement_timeout_ms(conn) <= 2000
+                conn.rollback()
+                with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
+                    conn.execute("INSERT INTO videos (video_id) VALUES ('ro000000001')")
+                conn.rollback()
+            assert raw.read_only is True  # set for this request...
+
+        for raw in deps.get_conn(request):  # ...and gone for the next one
+            assert raw.info.backend_pid == first_pid  # the pooled connection was reused
+            assert raw.read_only is None
+            assert 0 < _statement_timeout_ms(raw) <= 2000
+            raw.execute("INSERT INTO videos (video_id) VALUES ('rw000000001')")  # writable again
+            raw.rollback()
+
+        for raw in deps.get_conn(request):
+            for conn in deps.get_read_conn(raw):
+                assert conn.info.backend_pid == first_pid
+                conn.rollback()
+                with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
+                    conn.execute("INSERT INTO videos (video_id) VALUES ('ro000000002')")
+                conn.rollback()
+    finally:
+        pool.close()
     assert db.execute("SELECT count(*) FROM videos").fetchone() == (0,)
 
 
