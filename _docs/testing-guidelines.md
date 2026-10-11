@@ -68,6 +68,39 @@ boundaries, no network, deterministic, no repeat-run loops) apply unchanged to
   resets the document, storage, stubs and timers after every test. Leave
   `process.env` and module singletons as you found them.
 
+## Test at the scale the system actually runs at
+
+This is a single-operator system (architecture.md, "Expected scale"): tens of
+channels, tens to a couple of hundred videos in a backfill, a corpus in the low
+thousands built up over years. Tests must reflect that, not the safety caps.
+
+Owner decision, 2026-10-11.
+
+- **Default to the smallest number that makes the behaviour visible.** For
+  channels, videos, jobs and requests that is usually 1-5 channels and 3-20
+  videos. If a test seeds hundreds or thousands of entities, that is a smell.
+- **Never seed rows up to a production cap to prove the cap works. Make the
+  bound injectable and pass a small one.** A test that inserts 1200 videos to
+  show a 500-per-run slice produces three runs is testing arithmetic the slow
+  way; injecting a per-run bound of 2 against 5 videos proves the same slicing,
+  fails the same way, and runs in milliseconds. If a bound is a module constant
+  that a test cannot override, that is a design problem in the code, not a
+  reason to seed to it.
+- **Cross a boundary by one.** Page and limit tests need `limit + 1` rows, not a
+  realistic-looking pile. Tie-breaks need two tied rows, not twenty.
+- **This rule is about entity counts**, not about every large number. A
+  2000-segment transcript, a 900-token budget, a 2500-character string, a 300 s
+  timeout and an HTTP 503 are all legitimate fixtures — leave them alone. It
+  applies to how many channels, videos, jobs or backfill requests a test
+  creates.
+- **If a cap's real value genuinely has to be exercised**, keep exactly one such
+  case, mark it `integration`, and say in the test name or docstring why the
+  real number matters. It must not be the default shape of the suite.
+
+Tests that seed thousands of rows are slow, they flake under a shared Postgres
+container, and they bake in a scale this system will never see — so they cost
+real time on every run while testing a situation that will not occur.
+
 ## Flaky or racy behaviour: find the cause, don't loop the test
 
 Running a test 20 or 50 times "to prove it's not flaky" is not evidence and

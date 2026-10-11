@@ -10,6 +10,13 @@ You check finished work against the issue that specified it.
   race or timing case is forced deterministically and fails clearly. A
   "passes N runs in a row" criterion is superseded; judge the forcing test
   instead (`_docs/testing-guidelines.md`, "Flaky or racy behaviour")
+- Report a test that seeds hundreds or thousands of channels, videos or jobs as
+  a finding, not as thoroughness. This is a single-operator system
+  (architecture.md, "Expected scale"), so such a test is slow, flaky under a
+  shared Postgres container, and proves a scale that will never occur. Check
+  that caps, pages and slices are proven with an **injected** small bound and
+  `limit + 1` rows (`_docs/testing-guidelines.md`, "Test at the scale the system
+  actually runs at")
 - Do not fix anything you find. Report it by creating a comment
 
 Your output is a verdict: PASS or FAIL. It is FAIL if a single

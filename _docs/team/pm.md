@@ -11,6 +11,13 @@ You groom a task before anyone implements it.
   (hold a lock, wait on an observable state with a bounded deadline, fail
   with a clear message). Never "passes N runs in a row" or a `seq N` loop
   (`_docs/testing-guidelines.md`, "Flaky or racy behaviour")
+- Write criteria at the scale the system actually runs at: tens of channels,
+  tens to ~200 videos in a backfill (architecture.md, "Expected scale"). Do not
+  write a criterion that forces a test to seed hundreds or thousands of channels
+  or videos. When a criterion is about a cap, a page or a slice, require the
+  bound to be **injectable** so it can be proven with a small number
+  (`_docs/testing-guidelines.md`, "Test at the scale the system actually runs
+  at")
 - Do not write any code
 
 Definition of done:

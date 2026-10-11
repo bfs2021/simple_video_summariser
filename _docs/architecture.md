@@ -6,6 +6,23 @@
 document assumes every decision in `plan.md` §4 and does not re-argue them; it
 specifies *how* they are realized.
 
+**Expected scale.** This is a single-operator system: one person following a set
+of channels and reading the summaries. The design target is
+
+- **channels:** roughly 5-50 followed at once, with headroom to ~100
+- **videos per channel backfill:** tens up to ~200 in the normal case, bounded
+  by `MAX_BACKFILL_LIMIT` (500) on the synchronous route and
+  `MAX_BACKFILL_REQUEST_LIMIT` (5000) for a planner-run request
+- **corpus:** low thousands of videos accumulated over years, not per week
+- **API traffic:** a single operator browsing (§16.10 already relies on this)
+
+Nobody is going to register thousands of channels with hundreds of videos each.
+The caps above those numbers are **safety bounds**: they exist so a mistake or a
+runaway channel cannot flood the queue, not because the system is expected to
+operate there. Do not size, design or test as though the steady state sat at the
+cap — see `_docs/testing-guidelines.md`, "Test at the scale the system actually
+runs at".
+
 ---
 
 ## 0. Corrections to `plan.md`
