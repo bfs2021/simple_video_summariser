@@ -39,7 +39,8 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from common.config import Settings, get_settings
-from common.errors import Cancelled, Defer, classify, format_error, policy
+from common.errors import Cancelled, Defer, ErrorClass, classify, format_error, policy
+from common.repo.jobs import UNSET
 
 _logger = logging.getLogger(__name__)
 
@@ -152,16 +153,19 @@ _STALE_ANALYZE_SQL = r"""
 #: log line needs "the previous attempts", which the plain ``UPDATE ...
 #: RETURNING *`` below would otherwise only show as the new value, 0) in the
 #: same statement as the write, so there is still no read-then-write gap.
-_RETRY_DEAD_SQL = """
-    WITH candidate AS (
-        SELECT id, attempts AS prev_attempts
-        FROM jobs j
-        WHERE j.id = %(id)s AND j.state = 'dead'
+_RETRYABLE_PREDICATE = """
+        j.state = 'dead'
           AND NOT EXISTS (
               SELECT 1 FROM jobs newer
               WHERE newer.video_id = j.video_id AND newer.kind = j.kind
                 AND newer.dedupe_key = j.dedupe_key AND newer.id > j.id
-          )
+          )"""
+
+_RETRY_DEAD_SQL = f"""
+    WITH candidate AS (
+        SELECT id, attempts AS prev_attempts
+        FROM jobs j
+        WHERE j.id = %(id)s AND {_RETRYABLE_PREDICATE}
         FOR UPDATE
     )
     UPDATE jobs j SET state='pending', attempts=0, run_after=now(),
@@ -171,6 +175,73 @@ _RETRY_DEAD_SQL = """
     WHERE j.id = c.id
     RETURNING j.*, c.prev_attempts
 """
+
+#: #113. The filters are bound parameters only: ``%(kind)s`` is NULL for "any
+#: kind", ``%(filter_class)s`` is false for "any class" (so a NULL
+#: ``%(error_class)s`` can mean the reaped jobs, ``error_class IS NULL``).
+_BULK_FILTER = """
+        AND (%(kind)s::text IS NULL OR j.kind = %(kind)s::text)
+        AND (NOT %(filter_class)s::boolean
+             OR j.error_class IS NOT DISTINCT FROM %(error_class)s::text)"""
+
+#: ``limit + 1`` candidates are locked (``SKIP LOCKED``: a row another
+#: transaction holds is not eligible for this call) so ``has_more`` needs no
+#: ``count(*)``; only the newest ``limit`` of them are updated. ``attempts``
+#: before the update comes from the same statement, as in ``_RETRY_DEAD_SQL``.
+_RETRY_DEAD_MATCHING_SQL = f"""
+    WITH candidate AS (
+        SELECT id, attempts AS prev_attempts
+        FROM jobs j
+        WHERE {_RETRYABLE_PREDICATE}{_BULK_FILTER}
+        ORDER BY j.id DESC
+        LIMIT %(fetch)s
+        FOR UPDATE SKIP LOCKED
+    ), chosen AS (
+        SELECT id, prev_attempts FROM candidate ORDER BY id DESC LIMIT %(limit)s
+    )
+    UPDATE jobs j SET state='pending', attempts=0, run_after=now(),
+                      finished_at=NULL, locked_by=NULL, locked_at=NULL,
+                      heartbeat_at=NULL
+    FROM chosen c
+    WHERE j.id = c.id AND j.state = 'dead'
+    RETURNING j.id, j.video_id, j.kind, j.error_class, c.prev_attempts,
+              (SELECT count(*) FROM candidate) AS n_candidates
+"""
+
+_RETRY_DEAD_MATCHING_DRY_RUN_SQL = f"""
+    SELECT j.id, j.video_id, j.kind, j.error_class, j.attempts AS prev_attempts
+    FROM jobs j
+    WHERE {_RETRYABLE_PREDICATE}{_BULK_FILTER}
+    ORDER BY j.id DESC
+    LIMIT %(fetch)s
+"""
+
+#: The most jobs one ``retry_dead_matching`` call may re-queue (#113).
+MAX_BULK_RETRY = 50
+
+
+@dataclass(frozen=True, slots=True)
+class BulkRetriedJob:
+    """One job ``retry_dead_matching`` re-queued; ``error_class`` and
+    ``prev_attempts`` are the values it had before (the class is unchanged)."""
+
+    job_id: int
+    video_id: str
+    kind: str
+    error_class: str | None
+    prev_attempts: int
+
+
+@dataclass(frozen=True, slots=True)
+class BulkRetryResult:
+    """Result of ``retry_dead_matching``; ``jobs`` is ``id`` descending."""
+
+    jobs: tuple[BulkRetriedJob, ...]
+    has_more: bool
+
+    @property
+    def job_ids(self) -> list[int]:
+        return [job.job_id for job in self.jobs]
 
 
 @dataclass(frozen=True, slots=True)
@@ -567,6 +638,68 @@ class PostgresQueue:
         return RetryOutcome("superseded", newer_job_id=int(newer[0]))
 
     # -- heartbeat -----------------------------------------------------------
+
+    def retry_dead_matching(
+        self,
+        *,
+        kind: str | None = None,
+        error_class: str | None | Any = UNSET,
+        limit: int,
+        dry_run: bool = False,
+    ) -> BulkRetryResult:
+        """Put up to ``limit`` ``dead`` jobs matching the filters back to ``pending`` (#113).
+
+        Eligible: ``state = 'dead'``, matching every given filter (AND), and
+        not superseded (no higher id for the same ``(video_id, kind,
+        dedupe_key)``; the same predicate as ``retry_dead``). The newest
+        ``limit`` (``id`` descending) are retried with ``retry_dead``'s exact
+        transition. ``kind=None`` is any kind; ``error_class`` left ``UNSET``
+        is any class, ``None`` is ``error_class IS NULL``. Unknown kinds and
+        classes and a ``limit`` outside ``1..MAX_BULK_RETRY`` raise
+        ``ValueError`` before any SQL runs.
+
+        One statement selects (``limit + 1`` rows, so ``has_more`` needs no
+        count) and updates; a concurrent ``enqueue`` winning a key raises
+        ``UniqueViolation`` and nothing is retried. ``dry_run`` runs the same
+        selection read-only. Not on the ``JobQueue`` Protocol.
+        """
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_BULK_RETRY:
+            raise ValueError(f"limit must be an integer from 1 to {MAX_BULK_RETRY}")
+        if kind is not None and kind not in _VALID_KINDS:
+            raise ValueError(f"unknown job kind {kind!r}; expected one of {sorted(_VALID_KINDS)}")
+        filter_class = error_class is not UNSET
+        if filter_class and error_class is not None and error_class not in {c.value for c in ErrorClass}:
+            raise ValueError(f"unknown error class {error_class!r}")
+        params = {
+            "kind": kind,
+            "filter_class": filter_class,
+            "error_class": error_class if filter_class else None,
+            "fetch": limit + 1,
+            "limit": limit,
+        }
+        sql = _RETRY_DEAD_MATCHING_DRY_RUN_SQL if dry_run else _RETRY_DEAD_MATCHING_SQL
+        with self._conn.transaction(), self._conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+        if dry_run:
+            has_more = len(rows) > limit
+            rows = rows[:limit]
+        else:
+            has_more = bool(rows) and rows[0]["n_candidates"] > limit
+        rows.sort(key=lambda row: row["id"], reverse=True)
+        return BulkRetryResult(
+            jobs=tuple(
+                BulkRetriedJob(
+                    job_id=row["id"],
+                    video_id=row["video_id"],
+                    kind=row["kind"],
+                    error_class=row["error_class"],
+                    prev_attempts=row["prev_attempts"],
+                )
+                for row in rows
+            ),
+            has_more=has_more,
+        )
 
     def heartbeat(self, job_id: int, worker: str) -> bool:
         with self._conn.transaction(), self._conn.cursor() as cur:

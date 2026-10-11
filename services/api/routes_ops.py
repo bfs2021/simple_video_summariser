@@ -33,7 +33,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from common import metrics
 from common.config import get_settings
 from common.errors import ErrorClass
-from common.queue import VALID_KINDS, PostgresQueue
+from common.queue import MAX_BULK_RETRY, VALID_KINDS, PostgresQueue
 from common.repo.analyses import (
     reanalysis_backlog_count,
     token_usage_by_model,
@@ -270,3 +270,109 @@ def post_ops_job_retry(
         prev_attempts=outcome.prev_attempts,
     )
     return schemas.job_out(row)
+
+
+class BulkRetryBody(BaseModel):
+    """``POST /ops/jobs/retry`` body (#113): strict types, no unknown keys.
+
+    A typo such as ``error_clas`` must be a 422, never a silently wider
+    filter. ``state`` exists only so a client can send the listing's filter
+    unchanged; ``None`` is the same as omitting a key.
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    limit: int = Field(ge=1, le=MAX_BULK_RETRY)
+    state: Literal["dead"] | None = None
+    kind: Literal[_KIND_VALUES] | None = None  # type: ignore[valid-type]
+    error_class: Literal[(*_ERROR_CLASS_VALUES, "none")] | None = None  # type: ignore[valid-type]
+    dry_run: bool = False
+
+
+class BulkRetryOut(BaseModel):
+    retried: int
+    job_ids: list[int]
+    has_more: bool
+    dry_run: bool
+
+
+BULK_CONFLICT = {"detail": "concurrent change, try again"}
+
+
+async def _bulk_retry_gate(request: Request) -> None:
+    """Validate the body and *raise* before ``get_conn`` resolves: a 422 never
+    checks out a connection, and its message never echoes a submitted value."""
+    try:
+        raw = await request.json()
+    except ValueError:
+        raise RequestValidationError(
+            [{"loc": ("body",), "msg": "invalid JSON", "type": "json_invalid"}]
+        ) from None
+    try:
+        BulkRetryBody.model_validate(raw)
+    except ValidationError as exc:
+        errors = exc.errors(include_input=False, include_context=False, include_url=False)
+        raise RequestValidationError(
+            [{**error, "loc": ("body", *error["loc"])} for error in errors]
+        ) from None
+
+
+@router.post(
+    "/ops/jobs/retry",
+    response_model=BulkRetryOut,
+    dependencies=[
+        Depends(rate_limit),
+        Depends(_require_json_content_type),
+        Depends(_bulk_retry_gate),
+    ],
+)
+def post_ops_jobs_retry(
+    body: BulkRetryBody,
+    conn: Annotated[psycopg.Connection[Any], Depends(get_conn)],
+) -> BulkRetryOut | JSONResponse:
+    """Re-queue up to ``limit`` ``dead`` jobs matching the filters (#113).
+
+    One statement in ``PostgresQueue.retry_dead_matching`` selects and
+    updates; ``UniqueViolation`` (a concurrent ``enqueue`` won a key) retries
+    nothing and answers 409.
+    """
+    error_class = UNSET if body.error_class is None else body.error_class
+    if body.error_class == "none":
+        error_class = None
+    try:
+        result = PostgresQueue(conn).retry_dead_matching(
+            kind=body.kind, error_class=error_class, limit=body.limit, dry_run=body.dry_run
+        )
+    except psycopg.errors.UniqueViolation:
+        return JSONResponse(status_code=status.HTTP_409_CONFLICT, content=BULK_CONFLICT)
+    filters = {"kind": body.kind, "error_class": body.error_class, "limit": body.limit}
+    if body.dry_run:
+        _log.info(
+            "ops.jobs_bulk_retry_dry_run",
+            would_retry=len(result.jobs),
+            has_more=result.has_more,
+            **filters,
+        )
+    else:
+        for job in result.jobs:
+            _log.warning(
+                "ops.job_retried",
+                job_id=job.job_id,
+                video_id=job.video_id,
+                kind=job.kind,
+                prev_error_class=job.error_class,
+                prev_attempts=job.prev_attempts,
+                bulk=True,
+            )
+        _log.warning(
+            "ops.jobs_bulk_retried",
+            retried=len(result.jobs),
+            has_more=result.has_more,
+            **filters,
+        )
+    return BulkRetryOut(
+        retried=len(result.jobs),
+        job_ids=result.job_ids,
+        has_more=result.has_more,
+        dry_run=body.dry_run,
+    )

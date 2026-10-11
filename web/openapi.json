@@ -519,6 +519,109 @@
         "title": "BackfillVideo",
         "type": "object"
       },
+      "BulkRetryBody": {
+        "additionalProperties": false,
+        "description": "``POST /ops/jobs/retry`` body (#113): strict types, no unknown keys.\n\nA typo such as ``error_clas`` must be a 422, never a silently wider\nfilter. ``state`` exists only so a client can send the listing's filter\nunchanged; ``None`` is the same as omitting a key.",
+        "properties": {
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "error_class": {
+            "anyOf": [
+              {
+                "enum": [
+                  "PERMANENT_SOURCE",
+                  "TRANSIENT_NETWORK",
+                  "RATE_LIMITED",
+                  "TOOL_FAILURE",
+                  "LLM_INVALID_OUTPUT",
+                  "LLM_UNAVAILABLE",
+                  "RESOURCE",
+                  "BUG",
+                  "none"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Class"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "analyze",
+                  "ingest",
+                  "transcribe"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kind"
+          },
+          "limit": {
+            "maximum": 50.0,
+            "minimum": 1.0,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "state": {
+            "anyOf": [
+              {
+                "const": "dead",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "State"
+          }
+        },
+        "required": [
+          "limit"
+        ],
+        "title": "BulkRetryBody",
+        "type": "object"
+      },
+      "BulkRetryOut": {
+        "properties": {
+          "dry_run": {
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "job_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Job Ids",
+            "type": "array"
+          },
+          "retried": {
+            "title": "Retried",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "retried",
+          "job_ids",
+          "has_more",
+          "dry_run"
+        ],
+        "title": "BulkRetryOut",
+        "type": "object"
+      },
       "CancelBackfillRequest": {
         "additionalProperties": false,
         "properties": {
@@ -661,6 +764,35 @@
           "source_chunk_seq"
         ],
         "title": "ClaimOut",
+        "type": "object"
+      },
+      "ExcerptOut": {
+        "properties": {
+          "spans": {
+            "items": {
+              "$ref": "#/components/schemas/SpanOut"
+            },
+            "title": "Spans",
+            "type": "array"
+          },
+          "start_sec": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Sec"
+          }
+        },
+        "required": [
+          "spans",
+          "start_sec"
+        ],
+        "title": "ExcerptOut",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -1013,10 +1145,7 @@
           },
           "excerpts": {
             "items": {
-              "items": {
-                "$ref": "#/components/schemas/SpanOut"
-              },
-              "type": "array"
+              "$ref": "#/components/schemas/ExcerptOut"
             },
             "title": "Excerpts",
             "type": "array"
@@ -2025,6 +2154,45 @@
           }
         },
         "summary": "Get Ops Jobs"
+      }
+    },
+    "/ops/jobs/retry": {
+      "post": {
+        "description": "Re-queue up to ``limit`` ``dead`` jobs matching the filters (#113).\n\nOne statement in ``PostgresQueue.retry_dead_matching`` selects and\nupdates; ``UniqueViolation`` (a concurrent ``enqueue`` won a key) retries\nnothing and answers 409.",
+        "operationId": "post_ops_jobs_retry_ops_jobs_retry_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkRetryBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkRetryOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Post Ops Jobs Retry"
       }
     },
     "/ops/jobs/{id}/retry": {

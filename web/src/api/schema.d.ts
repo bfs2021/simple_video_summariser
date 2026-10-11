@@ -123,6 +123,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/ops/jobs/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Post Ops Jobs Retry
+         * @description Re-queue up to ``limit`` ``dead`` jobs matching the filters (#113).
+         *
+         *     One statement in ``PostgresQueue.retry_dead_matching`` selects and
+         *     updates; ``UniqueViolation`` (a concurrent ``enqueue`` won a key) retries
+         *     nothing and answers 409.
+         */
+        post: operations["post_ops_jobs_retry_ops_jobs_retry_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/ops/jobs/{id}/retry": {
         parameters: {
             query?: never;
@@ -464,6 +488,40 @@ export interface components {
             /** Video Id */
             video_id: string;
         };
+        /**
+         * BulkRetryBody
+         * @description ``POST /ops/jobs/retry`` body (#113): strict types, no unknown keys.
+         *
+         *     A typo such as ``error_clas`` must be a 422, never a silently wider
+         *     filter. ``state`` exists only so a client can send the listing's filter
+         *     unchanged; ``None`` is the same as omitting a key.
+         */
+        BulkRetryBody: {
+            /**
+             * Dry Run
+             * @default false
+             */
+            dry_run: boolean;
+            /** Error Class */
+            error_class?: ("PERMANENT_SOURCE" | "TRANSIENT_NETWORK" | "RATE_LIMITED" | "TOOL_FAILURE" | "LLM_INVALID_OUTPUT" | "LLM_UNAVAILABLE" | "RESOURCE" | "BUG" | "none") | null;
+            /** Kind */
+            kind?: ("analyze" | "ingest" | "transcribe") | null;
+            /** Limit */
+            limit: number;
+            /** State */
+            state?: "dead" | null;
+        };
+        /** BulkRetryOut */
+        BulkRetryOut: {
+            /** Dry Run */
+            dry_run: boolean;
+            /** Has More */
+            has_more: boolean;
+            /** Job Ids */
+            job_ids: number[];
+            /** Retried */
+            retried: number;
+        };
         /** CancelBackfillRequest */
         CancelBackfillRequest: {
             /** Backfill Id */
@@ -515,6 +573,13 @@ export interface components {
             start_sec: number | null;
             /** Text */
             text: string;
+        };
+        /** ExcerptOut */
+        ExcerptOut: {
+            /** Spans */
+            spans: components["schemas"]["SpanOut"][];
+            /** Start Sec */
+            start_sec: number | null;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -627,7 +692,7 @@ export interface components {
             /** Duration Sec */
             duration_sec: number | null;
             /** Excerpts */
-            excerpts: components["schemas"]["SpanOut"][][];
+            excerpts: components["schemas"]["ExcerptOut"][];
             /** Matched In */
             matched_in: ("title" | "analysis" | "transcript")[];
             /** Published At */
@@ -976,6 +1041,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["JobListOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    post_ops_jobs_retry_ops_jobs_retry_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BulkRetryBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BulkRetryOut"];
                 };
             };
             /** @description Validation Error */
