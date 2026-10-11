@@ -57,6 +57,7 @@ from services.api.backfill import (
     BackfillResult,
     CancelResult,
     ChannelNotRegistered,
+    SubtitleProbe,
     backfill,
     cancel_backfill,
 )
@@ -117,6 +118,18 @@ class BackfillRequest(BaseModel):
     dry_run: bool = True
 
 
+class BackfillLlmEstimate(BaseModel):
+    summarizer: str
+    model: str
+    chars_per_audio_sec: float | None
+    chars_samples: int
+    cost_per_char: float | None
+    cost_samples: int
+    est_input_tokens: int | None
+    cost_usd: float | None
+    basis: str
+
+
 class BackfillEstimate(BaseModel):
     audio_sec: int
     unknown_duration: int
@@ -124,6 +137,23 @@ class BackfillEstimate(BaseModel):
     rtf_samples: int
     transcription_sec: int | None
     assumes: str
+    probed: int
+    manual_subtitles: int
+    needs_transcription: int
+    unchecked: int
+    probe_failed: int
+    deadline_reached: bool
+    transcribe_audio_sec: int
+    llm: BackfillLlmEstimate
+
+
+class BackfillVideo(BaseModel):
+    video_id: str
+    duration_sec: int | None
+    subtitles: str
+    transcription_sec: int | None
+    est_input_tokens: int | None
+    llm_cost_usd: float | None
 
 
 class BackfillResponse(BaseModel):
@@ -136,6 +166,7 @@ class BackfillResponse(BaseModel):
     new_videos: int
     enqueued: int
     video_ids: list[str]
+    videos: list[BackfillVideo]
     estimate: BackfillEstimate
     backfill_id: str | None
 
@@ -434,6 +465,25 @@ def _backfill_channel_id(channel_id: str) -> str:
     return channel_id
 
 
+def get_subtitle_probe() -> SubtitleProbe:
+    """The dry run's subtitle probe (#117), built per request.
+
+    The adapters are imported here, not at module level, so importing the app
+    loads no ``adapters.*`` or yt-dlp module. Tests override this dependency.
+    Lives here rather than in ``deps`` next to ``get_catalog`` because that
+    module was owned by another change when this was written.
+    """
+    from adapters.youtube.metadata import YouTubeMetadata
+    from adapters.youtube.subtitles import YouTubeSubtitles
+
+    cookie_file = get_settings().YTDLP_COOKIE_FILE
+    available = YouTubeSubtitles().available
+    return SubtitleProbe(
+        metadata_factory=lambda timeout: YouTubeMetadata(timeout=timeout, cookie_file=cookie_file),
+        has_manual=lambda meta: available(meta).manual is not None,
+    )
+
+
 @router.post(
     "/channels/{channel_id:untrusted}/backfill",
     status_code=status.HTTP_202_ACCEPTED,
@@ -445,6 +495,7 @@ def post_channel_backfill(
     response: Response,
     conn: Annotated[psycopg.Connection[Any], Depends(get_conn)],
     catalog: Annotated[CatalogSource, Depends(get_catalog)],
+    probe: Annotated[SubtitleProbe, Depends(get_subtitle_probe)],
 ) -> BackfillResponse:
     """Backfill a registered channel's newest ``limit`` uploads (#41, D9b).
 
@@ -455,8 +506,13 @@ def post_channel_backfill(
     flat listing is network-bound, not CPU work (owner decision; moving it
     to a worker is #115). A dry run (the default) writes nothing; a real run
     answers 202 when it enqueued at least one job, else 200.
+
+    A dry run also checks each new video's subtitles, newest first, within a
+    100 s budget (#117); the rest are reported as ``unchecked``. It writes
+    nothing.
     """
     _require_idle(conn)
+    settings = get_settings()
     started = time.perf_counter()
     try:
         result = backfill(
@@ -466,6 +522,14 @@ def post_channel_backfill(
             channel_id,
             limit=body.limit,
             dry_run=body.dry_run,
+            probe=probe,
+            prefer_whisper=settings.PREFER_WHISPER,
+            summarizer=settings.SUMMARIZER,
+            model=(
+                settings.ANTHROPIC_MODEL
+                if settings.SUMMARIZER == "anthropic"
+                else settings.OLLAMA_MODEL
+            ),
         )
     except ChannelNotRegistered:
         raise HTTPException(status.HTTP_404_NOT_FOUND, CHANNEL_NOT_REGISTERED) from None
@@ -489,6 +553,11 @@ def post_channel_backfill(
         new_videos=result.new_videos,
         enqueued=result.enqueued,
         backfill_id=result.backfill_id,
+        probed=result.estimate.probed,
+        manual_subtitles=result.estimate.manual_subtitles,
+        unchecked=result.estimate.unchecked,
+        probe_failed=result.estimate.probe_failed,
+        deadline_reached=result.estimate.deadline_reached,
         duration_ms=round((time.perf_counter() - started) * 1000, 1),
     )
     if result.enqueued == 0:
@@ -496,8 +565,12 @@ def post_channel_backfill(
     return _backfill_response(result)
 
 
+_LLM_FIELDS = tuple(BackfillLlmEstimate.model_fields)
+
+
 def _backfill_response(result: BackfillResult) -> BackfillResponse:
     estimate = result.estimate
+    llm = estimate.llm
     return BackfillResponse(
         channel_id=result.channel_id,
         dry_run=result.dry_run,
@@ -508,6 +581,17 @@ def _backfill_response(result: BackfillResult) -> BackfillResponse:
         new_videos=result.new_videos,
         enqueued=result.enqueued,
         video_ids=list(result.video_ids),
+        videos=[
+            BackfillVideo(
+                video_id=v.video_id,
+                duration_sec=v.duration_sec,
+                subtitles=v.subtitles,
+                transcription_sec=v.transcription_sec,
+                est_input_tokens=v.est_input_tokens,
+                llm_cost_usd=v.llm_cost_usd,
+            )
+            for v in result.videos
+        ],
         estimate=BackfillEstimate(
             audio_sec=estimate.audio_sec,
             unknown_duration=estimate.unknown_duration,
@@ -515,6 +599,14 @@ def _backfill_response(result: BackfillResult) -> BackfillResponse:
             rtf_samples=estimate.rtf_samples,
             transcription_sec=estimate.transcription_sec,
             assumes=estimate.assumes,
+            probed=estimate.probed,
+            manual_subtitles=estimate.manual_subtitles,
+            needs_transcription=estimate.needs_transcription,
+            unchecked=estimate.unchecked,
+            probe_failed=estimate.probe_failed,
+            deadline_reached=estimate.deadline_reached,
+            transcribe_audio_sec=estimate.transcribe_audio_sec,
+            llm=BackfillLlmEstimate(**{f: getattr(llm, f) for f in _LLM_FIELDS}),
         ),
         backfill_id=result.backfill_id,
     )

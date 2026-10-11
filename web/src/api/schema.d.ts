@@ -42,6 +42,10 @@ export interface paths {
          *     flat listing is network-bound, not CPU work (owner decision; moving it
          *     to a worker is #115). A dry run (the default) writes nothing; a real run
          *     answers 202 when it enqueued at least one job, else 200.
+         *
+         *     A dry run also checks each new video's subtitles, newest first, within a
+         *     100 s budget (#117); the rest are reported as ``unchecked``. It writes
+         *     nothing.
          */
         post: operations["post_channel_backfill_channels__channel_id__backfill_post"];
         delete?: never;
@@ -364,14 +368,50 @@ export interface components {
             assumes: string;
             /** Audio Sec */
             audio_sec: number;
+            /** Deadline Reached */
+            deadline_reached: boolean;
+            llm: components["schemas"]["BackfillLlmEstimate"];
+            /** Manual Subtitles */
+            manual_subtitles: number;
+            /** Needs Transcription */
+            needs_transcription: number;
+            /** Probe Failed */
+            probe_failed: number;
+            /** Probed */
+            probed: number;
             /** Rtf */
             rtf: number | null;
             /** Rtf Samples */
             rtf_samples: number;
+            /** Transcribe Audio Sec */
+            transcribe_audio_sec: number;
             /** Transcription Sec */
             transcription_sec: number | null;
+            /** Unchecked */
+            unchecked: number;
             /** Unknown Duration */
             unknown_duration: number;
+        };
+        /** BackfillLlmEstimate */
+        BackfillLlmEstimate: {
+            /** Basis */
+            basis: string;
+            /** Chars Per Audio Sec */
+            chars_per_audio_sec: number | null;
+            /** Chars Samples */
+            chars_samples: number;
+            /** Cost Per Char */
+            cost_per_char: number | null;
+            /** Cost Samples */
+            cost_samples: number;
+            /** Cost Usd */
+            cost_usd: number | null;
+            /** Est Input Tokens */
+            est_input_tokens: number | null;
+            /** Model */
+            model: string;
+            /** Summarizer */
+            summarizer: string;
         };
         /** BackfillRequest */
         BackfillRequest: {
@@ -406,6 +446,23 @@ export interface components {
             total_count: number | null;
             /** Video Ids */
             video_ids: string[];
+            /** Videos */
+            videos: components["schemas"]["BackfillVideo"][];
+        };
+        /** BackfillVideo */
+        BackfillVideo: {
+            /** Duration Sec */
+            duration_sec: number | null;
+            /** Est Input Tokens */
+            est_input_tokens: number | null;
+            /** Llm Cost Usd */
+            llm_cost_usd: number | null;
+            /** Subtitles */
+            subtitles: string;
+            /** Transcription Sec */
+            transcription_sec: number | null;
+            /** Video Id */
+            video_id: string;
         };
         /** CancelBackfillRequest */
         CancelBackfillRequest: {
@@ -570,17 +627,10 @@ export interface components {
             /** Duration Sec */
             duration_sec: number | null;
             /** Excerpts */
-            excerpts: components["schemas"]["ExcerptOut"][];
+            excerpts: components["schemas"]["SpanOut"][][];
             /** Matched In */
             matched_in: ("title" | "analysis" | "transcript")[];
             /** Published At */
-        /** ExcerptOut */
-        ExcerptOut: {
-            /** Spans */
-            spans: components["schemas"]["SpanOut"][];
-            /** Start Sec */
-            start_sec: number | null;
-        };
             published_at: string | null;
             /** Title */
             title: string | null;

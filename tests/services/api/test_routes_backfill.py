@@ -27,6 +27,9 @@ from services.api.backfill import (
     BackfillResult,
     ChannelNotRegistered,
     Estimate,
+    LlmEstimate,
+    SubtitleProbe,
+    VideoEstimate,
 )
 from tests.services.api.conftest import LogSink
 
@@ -41,6 +44,12 @@ class _Info:
 
 class _Conn:
     info = _Info()
+
+
+_PROBE = SubtitleProbe(
+    metadata_factory=lambda timeout: (_ for _ in ()).throw(AssertionError("no real probe")),
+    has_manual=lambda meta: False,
+)
 
 
 class _Catalog:
@@ -59,7 +68,12 @@ def _result(**overrides: Any) -> BackfillResult:
         "new_videos": 2,
         "enqueued": 0,
         "video_ids": ("aaaaaaaaaaa", "bbbbbbbbbbb"),
-        "estimate": Estimate(600, 1, 0.25, 4, 150),
+        "estimate": Estimate(
+            600, 1, 0.25, 4, 150, probed=1, manual_subtitles=1, unchecked=1,
+            transcribe_audio_sec=300,
+            llm=LlmEstimate("anthropic", "m", 13.3, 5, 3e-06, 2, 1000, 0.012),
+        ),
+        "videos": (VideoEstimate("aaaaaaaaaaa", 300, "manual", 0, 1000, 0.012),),
         "backfill_id": None,
     }
     values.update(overrides)
@@ -81,10 +95,11 @@ class Recorder:
         *,
         limit: int,
         dry_run: bool,
+        **extra: Any,
     ) -> BackfillResult:
         self.calls.append(
             {"conn": conn, "queue": queue, "catalog": catalog, "channel_id": channel_id,
-             "limit": limit, "dry_run": dry_run}
+             "limit": limit, "dry_run": dry_run, **extra}
         )
         if self.error is not None:
             raise self.error
@@ -117,6 +132,7 @@ def api(
 
     app.dependency_overrides[deps.get_conn] = fake_conn
     app.dependency_overrides[deps.get_catalog] = lambda: catalog
+    app.dependency_overrides[routes_write.get_subtitle_probe] = lambda: _PROBE
     with TestClient(app) as client:
         yield client
 
@@ -276,13 +292,44 @@ def test_the_response_has_exactly_the_documented_keys(
         "enqueued": 0,
         "video_ids": ["aaaaaaaaaaa", "bbbbbbbbbbb"],
         "backfill_id": None,
+        "videos": [
+            {
+                "video_id": "aaaaaaaaaaa",
+                "duration_sec": 300,
+                "subtitles": "manual",
+                "transcription_sec": 0,
+                "est_input_tokens": 1000,
+                "llm_cost_usd": 0.012,
+            }
+        ],
         "estimate": {
             "audio_sec": 600,
             "unknown_duration": 1,
             "rtf": 0.25,
             "rtf_samples": 4,
             "transcription_sec": 150,
-            "assumes": "every new video needs speech-to-text",
+            "assumes": (
+                "manual-subtitle videos skip speech-to-text;"
+                " unchecked videos are assumed to need it"
+            ),
+            "probed": 1,
+            "manual_subtitles": 1,
+            "needs_transcription": 0,
+            "unchecked": 1,
+            "probe_failed": 0,
+            "deadline_reached": False,
+            "transcribe_audio_sec": 300,
+            "llm": {
+                "summarizer": "anthropic",
+                "model": "m",
+                "chars_per_audio_sec": 13.3,
+                "chars_samples": 5,
+                "cost_per_char": 3e-06,
+                "cost_samples": 2,
+                "est_input_tokens": 1000,
+                "cost_usd": 0.012,
+                "basis": "median recorded analyses.cost_usd per transcript character",
+            },
         },
     }
 
@@ -404,6 +451,7 @@ def test_a_malformed_channel_id_is_rejected_before_any_connection_or_catalog(
 
     app.dependency_overrides[deps.get_conn] = tracking_conn
     app.dependency_overrides[deps.get_catalog] = tracking_catalog
+    app.dependency_overrides[routes_write.get_subtitle_probe] = lambda: _PROBE
     with TestClient(app) as client:
         response = client.post(_url("UU" + "a" * 22), json={"limit": 5})
 

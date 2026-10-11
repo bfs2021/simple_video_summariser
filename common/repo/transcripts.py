@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import statistics
 from collections.abc import Sequence
 from decimal import Decimal
@@ -259,6 +260,33 @@ def median_whisper_rtf(conn: psycopg.Connection[Any]) -> tuple[float | None, int
         (_MIN_RTF, _MAX_RTF, RTF_SAMPLE_SIZE),
     ).fetchall()
     values = [float(row[0]) for row in rows]
+    if not values:
+        return None, 0
+    return statistics.median(values), len(values)
+
+
+CHARS_SAMPLE_SIZE = 20
+
+
+def median_chars_per_audio_sec(conn: psycopg.Connection[Any]) -> tuple[float | None, int]:
+    """Median transcript characters per second of audio, newest 20 (#117).
+
+    ``length(full_text) / videos.duration_sec`` over transcripts of any
+    ``source`` whose video has a positive ``duration_sec`` and whose text is
+    not empty. Returns ``(median, samples)``; with no usable row ``(None, 0)``.
+    A read only: no lock, no write.
+    """
+    rows = conn.execute(
+        """
+        SELECT length(t.full_text)::float8 / v.duration_sec::float8
+        FROM transcripts t JOIN videos v ON v.video_id = t.video_id
+        WHERE v.duration_sec > 0 AND length(t.full_text) > 0
+        ORDER BY t.created_at DESC, t.id DESC
+        LIMIT %s
+        """,
+        (CHARS_SAMPLE_SIZE,),
+    ).fetchall()
+    values = [float(row[0]) for row in rows if math.isfinite(float(row[0])) and row[0] > 0]
     if not values:
         return None, 0
     return statistics.median(values), len(values)

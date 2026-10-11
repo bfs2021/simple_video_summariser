@@ -183,6 +183,29 @@
             "title": "Audio Sec",
             "type": "integer"
           },
+          "deadline_reached": {
+            "title": "Deadline Reached",
+            "type": "boolean"
+          },
+          "llm": {
+            "$ref": "#/components/schemas/BackfillLlmEstimate"
+          },
+          "manual_subtitles": {
+            "title": "Manual Subtitles",
+            "type": "integer"
+          },
+          "needs_transcription": {
+            "title": "Needs Transcription",
+            "type": "integer"
+          },
+          "probe_failed": {
+            "title": "Probe Failed",
+            "type": "integer"
+          },
+          "probed": {
+            "title": "Probed",
+            "type": "integer"
+          },
           "rtf": {
             "anyOf": [
               {
@@ -198,6 +221,10 @@
             "title": "Rtf Samples",
             "type": "integer"
           },
+          "transcribe_audio_sec": {
+            "title": "Transcribe Audio Sec",
+            "type": "integer"
+          },
           "transcription_sec": {
             "anyOf": [
               {
@@ -208,6 +235,10 @@
               }
             ],
             "title": "Transcription Sec"
+          },
+          "unchecked": {
+            "title": "Unchecked",
+            "type": "integer"
           },
           "unknown_duration": {
             "title": "Unknown Duration",
@@ -220,9 +251,98 @@
           "rtf",
           "rtf_samples",
           "transcription_sec",
-          "assumes"
+          "assumes",
+          "probed",
+          "manual_subtitles",
+          "needs_transcription",
+          "unchecked",
+          "probe_failed",
+          "deadline_reached",
+          "transcribe_audio_sec",
+          "llm"
         ],
         "title": "BackfillEstimate",
+        "type": "object"
+      },
+      "BackfillLlmEstimate": {
+        "properties": {
+          "basis": {
+            "title": "Basis",
+            "type": "string"
+          },
+          "chars_per_audio_sec": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chars Per Audio Sec"
+          },
+          "chars_samples": {
+            "title": "Chars Samples",
+            "type": "integer"
+          },
+          "cost_per_char": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Per Char"
+          },
+          "cost_samples": {
+            "title": "Cost Samples",
+            "type": "integer"
+          },
+          "cost_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Usd"
+          },
+          "est_input_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Est Input Tokens"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "summarizer": {
+            "title": "Summarizer",
+            "type": "string"
+          }
+        },
+        "required": [
+          "summarizer",
+          "model",
+          "chars_per_audio_sec",
+          "chars_samples",
+          "cost_per_char",
+          "cost_samples",
+          "est_input_tokens",
+          "cost_usd",
+          "basis"
+        ],
+        "title": "BackfillLlmEstimate",
         "type": "object"
       },
       "BackfillRequest": {
@@ -307,6 +427,13 @@
             },
             "title": "Video Ids",
             "type": "array"
+          },
+          "videos": {
+            "items": {
+              "$ref": "#/components/schemas/BackfillVideo"
+            },
+            "title": "Videos",
+            "type": "array"
           }
         },
         "required": [
@@ -319,10 +446,77 @@
           "new_videos",
           "enqueued",
           "video_ids",
+          "videos",
           "estimate",
           "backfill_id"
         ],
         "title": "BackfillResponse",
+        "type": "object"
+      },
+      "BackfillVideo": {
+        "properties": {
+          "duration_sec": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Sec"
+          },
+          "est_input_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Est Input Tokens"
+          },
+          "llm_cost_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Llm Cost Usd"
+          },
+          "subtitles": {
+            "title": "Subtitles",
+            "type": "string"
+          },
+          "transcription_sec": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transcription Sec"
+          },
+          "video_id": {
+            "title": "Video Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "video_id",
+          "duration_sec",
+          "subtitles",
+          "transcription_sec",
+          "est_input_tokens",
+          "llm_cost_usd"
+        ],
+        "title": "BackfillVideo",
         "type": "object"
       },
       "CancelBackfillRequest": {
@@ -467,35 +661,6 @@
           "source_chunk_seq"
         ],
         "title": "ClaimOut",
-        "type": "object"
-      },
-      "ExcerptOut": {
-        "properties": {
-          "spans": {
-            "items": {
-              "$ref": "#/components/schemas/SpanOut"
-            },
-            "title": "Spans",
-            "type": "array"
-          },
-          "start_sec": {
-            "anyOf": [
-              {
-                "minimum": 0.0,
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Start Sec"
-          }
-        },
-        "required": [
-          "spans",
-          "start_sec"
-        ],
-        "title": "ExcerptOut",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -848,7 +1013,10 @@
           },
           "excerpts": {
             "items": {
-              "$ref": "#/components/schemas/ExcerptOut"
+              "items": {
+                "$ref": "#/components/schemas/SpanOut"
+              },
+              "type": "array"
             },
             "title": "Excerpts",
             "type": "array"
@@ -1601,7 +1769,7 @@
     },
     "/channels/{channel_id}/backfill": {
       "post": {
-        "description": "Backfill a registered channel's newest ``limit`` uploads (#41, D9b).\n\nThis is the one API route that runs a subprocess: the catalog is a\nyt-dlp flat listing, bounded by ``deps.BACKFILL_LIST_TIMEOUT_SEC`` and\n``MAX_BACKFILL_LIMIT``. It departs from \"the API performs no processing\"\nbecause architecture.md 8.3 wants a synchronous dry-run answer, and a\nflat listing is network-bound, not CPU work (owner decision; moving it\nto a worker is #115). A dry run (the default) writes nothing; a real run\nanswers 202 when it enqueued at least one job, else 200.",
+        "description": "Backfill a registered channel's newest ``limit`` uploads (#41, D9b).\n\nThis is the one API route that runs a subprocess: the catalog is a\nyt-dlp flat listing, bounded by ``deps.BACKFILL_LIST_TIMEOUT_SEC`` and\n``MAX_BACKFILL_LIMIT``. It departs from \"the API performs no processing\"\nbecause architecture.md 8.3 wants a synchronous dry-run answer, and a\nflat listing is network-bound, not CPU work (owner decision; moving it\nto a worker is #115). A dry run (the default) writes nothing; a real run\nanswers 202 when it enqueued at least one job, else 200.\n\nA dry run also checks each new video's subtitles, newest first, within a\n100 s budget (#117); the rest are reported as ``unchecked``. It writes\nnothing.",
         "operationId": "post_channel_backfill_channels__channel_id__backfill_post",
         "parameters": [
           {

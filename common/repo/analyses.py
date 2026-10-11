@@ -8,6 +8,8 @@ else in that job - atomically.
 
 from __future__ import annotations
 
+import math
+import statistics
 from typing import Any
 
 import psycopg
@@ -442,3 +444,30 @@ def reanalysis_backlog_count(conn: psycopg.Connection[Any], prompt_version: str)
     ).fetchone()
     assert row is not None
     return int(row[0])
+
+
+COST_SAMPLE_SIZE = 20
+
+
+def median_cost_per_char(conn: psycopg.Connection[Any], model: str) -> tuple[float | None, int]:
+    """Median ``cost_usd`` per transcript character, newest 20 analyses of ``model`` (#117).
+
+    Only rows with ``cost_usd > 0`` (``NULL`` and zero are ignored, like #102's
+    unknown price) whose transcript text is not empty count. Returns
+    ``(median, samples)``; with none ``(None, 0)``. A read only: no lock.
+    """
+    rows = conn.execute(
+        """
+        SELECT a.cost_usd::float8 / length(t.full_text)::float8
+        FROM analyses a JOIN transcripts t ON t.id = a.transcript_id
+        WHERE a.cost_usd IS NOT NULL AND a.cost_usd > 0
+          AND a.model = %s AND length(t.full_text) > 0
+        ORDER BY a.created_at DESC, a.id DESC
+        LIMIT %s
+        """,
+        (model, COST_SAMPLE_SIZE),
+    ).fetchall()
+    values = [float(row[0]) for row in rows if math.isfinite(float(row[0])) and row[0] > 0]
+    if not values:
+        return None, 0
+    return statistics.median(values), len(values)

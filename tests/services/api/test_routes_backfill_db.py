@@ -17,13 +17,23 @@ from psycopg.pq import TransactionStatus
 from common.config import get_settings
 from common.models import CatalogEntry, ChannelCatalog
 from common.queue import PRIORITY_BACKFILL
-from services.api import deps
+from services.api import deps, routes_write
+from services.api.backfill import SubtitleProbe
 from services.api.main import create_app
 from tests.services.api.conftest import LogSink
 
 pytestmark = pytest.mark.integration
 
 CHANNEL = "UCuAXFkgsw1L7xaCfnd5JJOw"
+class _FakeMetadata:
+    def fetch(self, video_id: str) -> Any:
+        return video_id
+
+
+NO_PROBE = SubtitleProbe(  # a fake: never yt-dlp
+    metadata_factory=lambda timeout: _FakeMetadata(),
+    has_manual=lambda meta: False,
+)
 ENTRIES = tuple(CatalogEntry(f"rt{i:09d}", f"secret title {i}", 60) for i in range(3))
 
 
@@ -53,6 +63,7 @@ def catalog() -> Catalog:
 def api(db: psycopg.Connection[Any], catalog: Catalog, logs: LogSink) -> Iterator[TestClient]:
     app = create_app()
     app.dependency_overrides[deps.get_catalog] = lambda: catalog
+    app.dependency_overrides[routes_write.get_subtitle_probe] = lambda: NO_PROBE
     with TestClient(app) as client:
         yield client
 
@@ -148,6 +159,7 @@ def test_the_catalog_runs_on_an_idle_request_connection(
     app = create_app()
     app.dependency_overrides[deps.get_conn] = capture_conn
     app.dependency_overrides[deps.get_catalog] = Watching
+    app.dependency_overrides[routes_write.get_subtitle_probe] = lambda: NO_PROBE
     with TestClient(app) as client:
         response = client.post(f"/channels/{CHANNEL}/backfill", json={"limit": 5, "dry_run": False})
 
@@ -169,6 +181,7 @@ def test_a_permanent_source_error_is_an_empty_200_and_changes_nothing(
 
     app = create_app()
     app.dependency_overrides[deps.get_catalog] = Gone
+    app.dependency_overrides[routes_write.get_subtitle_probe] = lambda: NO_PROBE
     with TestClient(app) as client:
         response = client.post(
             f"/channels/{CHANNEL}/backfill", json={"limit": 5, "dry_run": False}
