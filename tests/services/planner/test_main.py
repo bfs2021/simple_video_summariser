@@ -399,3 +399,55 @@ def test_real_sigterm_stops_an_idle_planner(tmp_path: Path) -> None:
 
     assert returncode == 0, remaining
     assert "DONE" in remaining
+
+
+def test_the_auto_caption_fallback_task_invokes_the_sweep_and_returns_its_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[Any] = []
+
+    def fake_sweep(conn: Any, queue: Any, *, settings: Settings, **kwargs: Any) -> int:
+        calls.append((conn, queue, settings, kwargs))
+        return 7
+
+    monkeypatch.setattr(planner_main, "run_auto_caption_fallback_sweep", fake_sweep)
+    conn = _FakeConn()
+    settings = _settings(AUTO_CAPTION_FALLBACK=True)
+    tasks = {t.name: t for t in planner_main.build_registry(settings, lambda: conn)}  # type: ignore[arg-type,return-value]
+
+    assert tasks["auto_caption_fallback"].fn() == 7  # the count is propagated, not discarded
+
+    assert len(calls) == 1
+    assert calls[0][0] is conn
+    assert calls[0][2] is settings  # the real flag reaches the sweep, not a copy
+
+
+def _dead_transcribe(conn: Any) -> None:
+    conn.execute("INSERT INTO videos (video_id) VALUES ('deadvideo01')")
+    conn.execute(
+        "INSERT INTO jobs (video_id, kind, dedupe_key, state, error_class, finished_at) "
+        "VALUES ('deadvideo01', 'transcribe', 'k', 'dead', 'TOOL_FAILURE', now())"
+    )
+    conn.commit()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(("enabled", "expected"), [(True, 1), (False, 0)])
+def test_the_auto_caption_fallback_task_enqueues_only_when_the_flag_is_on(
+    conn: Any, head_dsn: str, enabled: bool, expected: int
+) -> None:
+    import psycopg
+
+    _dead_transcribe(conn)
+    settings = _settings(DATABASE_URL=head_dsn, AUTO_CAPTION_FALLBACK=enabled)
+    tasks = {
+        t.name: t for t in planner_main.build_registry(settings, lambda: psycopg.connect(head_dsn))
+    }
+
+    assert tasks["auto_caption_fallback"].fn() == expected
+
+    # Read from another connection: the task's own is closed without a commit.
+    with psycopg.connect(head_dsn) as fresh:
+        assert fresh.execute("SELECT count(*) FROM jobs WHERE kind = 'ingest'").fetchone() == (
+            expected,
+        )
