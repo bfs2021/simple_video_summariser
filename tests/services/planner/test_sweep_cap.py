@@ -357,7 +357,9 @@ def test_sweep_dry_run_says_cap_none_for_ollama(
     get_settings.cache_clear()
     _candidates(conn, 2)
 
-    assert planner_main.main(["--sweep-dry-run"]) == 0
+    # The forbidden factory turns a dry run that falls through to the scheduler
+    # into an immediate failure; the real scheduler would block until killed.
+    assert planner_main.main(["--sweep-dry-run"], scheduler_factory=_forbidden_factory) == 0
 
     assert "cap=none would_enqueue_this_run=2 would_remain_after_cap=0" in capsys.readouterr().out
 
@@ -383,3 +385,15 @@ def test_the_plan_with_a_cap_lowered_below_what_was_enqueued_leaves_every_candid
     )
 
     assert (plan.would_enqueue_this_run, plan.would_remain_after_cap) == (0, 5)
+
+
+def test_the_plan_never_reports_a_negative_remainder_when_the_cap_exceeds_the_candidates(
+    conn: psycopg.Connection[Any],
+) -> None:
+    _candidates(conn, 3)
+
+    plan = plan_reanalysis_sweep(
+        conn, prompt_version=VERSION, summarizer_name="anthropic", max_jobs_anthropic=10
+    )
+
+    assert (plan.would_enqueue_this_run, plan.would_remain_after_cap) == (3, 0)
