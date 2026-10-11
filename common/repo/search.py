@@ -12,13 +12,17 @@ normalisation, then ``published_at`` (newest first, nulls last), then
 configuration ``transcript_ts_config(language)`` picks. The index condition is
 one row-independent tsquery, ``transcript_search_tsquery(q)`` (the OR of
 ``websearch_to_tsquery(cfg, q)`` over every configuration the mapping can
-return). Each candidate is then checked against one per-row query: its transcript's
-own configuration OR'd with the English one (title and analysis text are always
-English, so they stay searchable on a non-English video). The same query ranks
-the row, lists the sources it matched in, and drives every headline.
-``matched_in`` says which sources contain a query lexeme,
+return). Each candidate is then checked per source (#112): the transcript's own
+configuration query against the transcript only (weight D) and the English query
+against the title and analysis only (weights A, B, C, which are always English, so
+they stay searchable on a non-English video). A row is never admitted because the
+English stem of a word matches another language's transcript. A row is admitted on
+a lexeme in a source exactly when that source is in ``matched_in`` and its
+excerpts are highlighted: ``matched_in`` and the headlines use the same per-source
+queries as the filter. ``matched_in`` says which sources contain a query lexeme,
 derived from the weights stored in the vector (``ts_filter``), for the page's
-rows only.
+rows only. The rank (``ts_rank_cd``) uses both queries over the whole vector, for
+admitted rows only.
 
 ``q`` is only ever a bound parameter, and ``websearch_to_tsquery`` never
 raises a syntax error. A query with no positive term (only stop words, or
@@ -65,7 +69,7 @@ _PROTECTED = "chr(57344) || chr(57345) || chr(57346)"
 RANK_WEIGHTS = "{0.1, 0.2, 0.4, 1.0}"
 
 #: Segment windows for one page row (#110), a scalar subquery over ``t``,
-#: ``page.cfg`` and ``r.rq`` of the outer query: a JSON array of
+#: ``page.cfg`` and ``r.own`` of the outer query: a JSON array of
 #: ``[start_sec, headline]``, at most 3, ascending by start. A window is one
 #: segment whose own text matches, or two adjacent segments that match only
 #: when joined (a phrase split at a boundary). Windows never share a segment:
@@ -92,7 +96,7 @@ WINDOWS_SQL = f"""
                  ) WITH ORDINALITY AS e(seg, ord)
         ),
         hits AS (
-            SELECT segs.*, to_tsvector(page.cfg, segs.text) @@ r.rq AS hit FROM segs
+            SELECT segs.*, to_tsvector(page.cfg, segs.text) @@ r.own AS hit FROM segs
         ),
         adj AS (
             SELECT hits.*, lead(hit) OVER o AS nhit, lead(text) OVER o AS ntext
@@ -107,7 +111,7 @@ WINDOWS_SQL = f"""
             FROM adj
             WHERE NOT hit AND nhit IS NOT NULL AND NOT nhit
               AND text <> '' AND ntext <> '' AND start IS NOT NULL
-              AND to_tsvector(page.cfg, text || ' ' || ntext) @@ r.rq
+              AND to_tsvector(page.cfg, text || ' ' || ntext) @@ r.own
         ),
         windows AS (
             SELECT ord, start, wtext FROM singles
@@ -118,7 +122,7 @@ WINDOWS_SQL = f"""
         ),
         ranked AS (
             SELECT windows.*, row_number() OVER (
-                       ORDER BY ts_rank(to_tsvector(page.cfg, wtext), r.rq) DESC, start, ord
+                       ORDER BY ts_rank(to_tsvector(page.cfg, wtext), r.own) DESC, start, ord
                    ) AS pick
             FROM windows
         )
@@ -126,17 +130,23 @@ WINDOWS_SQL = f"""
                ts_headline(
                    page.cfg,
                    translate(translate(wtext, {_STRIPPED}, ''), '<>&', {_PROTECTED}),
-                   r.rq,
+                   r.own,
                    'StartSel=' || chr(1) || ', StopSel=' || chr(2) || ', {WINDOW_OPTIONS}'
                ) AS headline
         FROM ranked WHERE pick <= 3
     ) AS top
 """
 
-#: The query one row is checked against: its transcript's own configuration
-#: OR'd with the English one (title and analysis text are always English).
+#: The queries one row is checked against (#112). ``own`` is the query in the
+#: row's transcript configuration and is only ever applied to the transcript
+#: (weight D); ``en`` is the English query and is only applied to the title and
+#: analysis (weights A, B, C), which are always English. ``rq`` is their OR,
+#: used only to rank a row that has already been admitted.
 ROW_QUERY_SQL = """
     SELECT CASE WHEN k.cfg = 'pg_catalog.english'::regconfig THEN q.en
+                ELSE websearch_to_tsquery(k.cfg, %(q)s) END AS own,
+           q.en AS en,
+           CASE WHEN k.cfg = 'pg_catalog.english'::regconfig THEN q.en
                 ELSE websearch_to_tsquery(k.cfg, %(q)s) || q.en END AS rq
 """
 
@@ -162,7 +172,9 @@ page AS (
     ) bt ON true
     CROSS JOIN LATERAL (SELECT transcript_ts_config(bt.language) AS cfg) k
     CROSS JOIN LATERAL ({ROW_QUERY_SQL}) r
-    WHERE sd.fts @@ r.rq
+    WHERE CASE WHEN k.cfg = 'pg_catalog.english'::regconfig THEN sd.fts @@ r.en
+               ELSE (sd.fts @@ r.own AND ts_filter(sd.fts, '{{d}}') @@ r.own)
+                    OR (sd.fts @@ r.en AND ts_filter(sd.fts, '{{a,b,c}}') @@ r.en) END
     ORDER BY rank DESC, v.published_at DESC NULLS LAST, v.video_id ASC
     OFFSET %(offset)s LIMIT %(limit)s
 )
@@ -172,18 +184,20 @@ SELECT page.video_id, page.title, page.channel_id, page.channel_title,
        CASE WHEN m.in_transcript AND jsonb_array_length(w.windows) = 0 THEN ts_headline(
            page.cfg,
            translate(translate(t.full_text, {_STRIPPED}, ''), '<>&', {_PROTECTED}),
-           r.rq,
+           r.own,
            'StartSel=' || chr(1) || ', StopSel=' || chr(2)
                || ', FragmentDelimiter=' || chr(3) || ', {HEADLINE_OPTIONS}'
        ) END
 FROM page
 CROSS JOIN q
 CROSS JOIN LATERAL ({ROW_QUERY_SQL.replace('k.cfg', 'page.cfg')}) r
-CROSS JOIN LATERAL (SELECT tsquery_positive_lexemes(r.rq) AS lexemes) lx
 CROSS JOIN LATERAL (
-    SELECT tsvector_to_array(ts_filter(page.fts, '{{a}}')) && lx.lexemes AS in_title,
-           tsvector_to_array(ts_filter(page.fts, '{{b,c}}')) && lx.lexemes AS in_analysis,
-           tsvector_to_array(ts_filter(page.fts, '{{d}}')) && lx.lexemes AS in_transcript
+    SELECT tsquery_positive_lexemes(r.en) AS en, tsquery_positive_lexemes(r.own) AS own
+) lx
+CROSS JOIN LATERAL (
+    SELECT tsvector_to_array(ts_filter(page.fts, '{{a}}')) && lx.en AS in_title,
+           tsvector_to_array(ts_filter(page.fts, '{{b,c}}')) && lx.en AS in_analysis,
+           tsvector_to_array(ts_filter(page.fts, '{{d}}')) && lx.own AS in_transcript
 ) m
 LEFT JOIN transcripts t ON t.id = page.transcript_id
 CROSS JOIN LATERAL ({WINDOWS_SQL}) w

@@ -1151,17 +1151,63 @@ def test_the_full_text_fallback_headline_uses_the_rows_configuration(
     assert Span("Häuser", True) in hit.excerpts[0].spans
 
 
-def test_a_word_matched_through_the_english_arm_is_still_a_transcript_match(
+def test_another_languages_stem_never_admits_a_row(conn: psycopg.Connection[Any]) -> None:
+    # The Polish row is indexed with "simple", so "run" is a lexeme of it. The
+    # English stem of "running" is "run", but the English query only applies to
+    # the title and analysis (#112): "A row never matches because of another
+    # language's stemming".
+    _lang(conn, "arm00000001", "she will run home", "pl")
+
+    assert _search(conn, "running").results == ()
+    assert _ids(_search(conn, "run")) == ["arm00000001"]
+
+
+def test_a_non_english_row_found_by_its_title_does_not_claim_a_transcript_match(
     conn: psycopg.Connection[Any],
 ) -> None:
-    # The Polish row is indexed with "simple", so "run" is a lexeme of it; the
-    # English stem of "running" finds it, and the hit says where and shows it.
-    _lang(conn, "arm00000001", "she will run home", "pl")
+    # Admitted on the title only, although the transcript holds the English stem:
+    # the invariant (cd7b6ee) is that matched_in, and the highlight, name exactly
+    # the sources the row was admitted on.
+    _video(conn, "arm00000002", title="Running tips")
+    _transcript(conn, "arm00000002", "she will run home", language="pl")
 
     [hit] = _search(conn, "running").results
 
-    assert hit.matched_in == ("transcript",)
-    assert Span("run", True) in [s for e in hit.excerpts for s in e.spans]
+    assert hit.matched_in == ("title",)
+    assert not any(s.match for e in hit.excerpts for s in e.spans)
+
+
+def test_a_source_a_row_is_admitted_on_is_reported_and_highlighted(
+    conn: psycopg.Connection[Any],
+) -> None:
+    # The old behaviour admitted a row on a transcript lexeme while reporting
+    # matched_in=() and an unhighlighted excerpt (fixed in cd7b6ee).
+    _video(conn, "arm00000003", title="Wind farms")
+    _transcript(conn, "arm00000003", "Die Häuser sind alt", language="de")
+    _video(conn, "arm00000004")
+    _transcript(conn, "arm00000004", "she will run home", language="pl")
+
+    for q, vid, sources, word in [
+        ("farm", "arm00000003", ("title",), None),
+        ("Häuser", "arm00000003", ("transcript",), "Häuser"),
+        ("run", "arm00000004", ("transcript",), "run"),
+    ]:
+        [hit] = (h for h in _search(conn, q).results if h.video_id == vid)
+        assert hit.matched_in == sources, q
+        marked = [s.text for e in hit.excerpts for s in e.spans if s.match]
+        assert marked == ([word] if word else []), q
+
+
+def test_an_exclusion_in_the_transcript_still_excludes_a_title_match_on_a_non_english_row(
+    conn: psycopg.Connection[Any],
+) -> None:
+    # Scoping the arms by weight must not scope the exclusion with them.
+    _video(conn, "arm00000005", title="Cats at home")
+    _transcript(conn, "arm00000005", "Hund und Katze", language="de")
+    _video(conn, "arm00000006", title="Cats at home")
+    _transcript(conn, "arm00000006", "Hund und Vogel", language="de")
+
+    assert _ids(_search(conn, "cats -Katze")) == ["arm00000006"]
 
 
 def test_the_sql_itself_returns_at_most_three_windows(conn: psycopg.Connection[Any]) -> None:
