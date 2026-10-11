@@ -267,23 +267,22 @@ def test_two_transcripts_of_the_same_unrecognised_rank_still_give_one_result(
     assert len(page.results) == 1
 
 
-def test_equally_ranked_transcripts_resolve_to_the_lowest_id_whatever_the_heap_order(
+def test_equally_ranked_transcripts_resolve_to_the_lowest_id_even_when_source_order_disagrees(
     conn: psycopg.Connection[Any],
 ) -> None:
-    # Unrecognised sources tie on transcript_rank(). Rewriting the first row's
-    # indexed text makes a new tuple version, so it sits after the second in
-    # the heap: only an explicit ``id`` tie-break returns it first.
+    # Unrecognised sources tie on transcript_rank(). The lowest id has the source
+    # that sorts LAST ("bogus_z"), so an index ordered by (video_id, source) hands
+    # the other row first unless ``id`` is an explicit tie-break (#15, #94).
     _video(conn, "tieheap0001")
     conn.execute(
         "INSERT INTO transcripts (video_id, source, segments, full_text) VALUES"
-        " (%s, 'bogus_a', '[]', 'alpha'), (%s, 'bogus_b', '[]', 'beta')",
+        " (%s, 'bogus_z', '[]', 'alpha'), (%s, 'bogus_a', '[]', 'beta')",
         ("tieheap0001", "tieheap0001"),
     )
-    conn.execute("UPDATE transcripts SET full_text = 'alpha gamma' WHERE source = 'bogus_a'")
 
-    assert _ids(_search(conn, "gamma")) == ["tieheap0001"]
+    assert _ids(_search(conn, "alpha")) == ["tieheap0001"]
     assert _search(conn, "beta").results == ()
-    assert _search(conn, "gamma").results[0].transcript_source == "bogus_a"
+    assert _search(conn, "alpha").results[0].transcript_source == "bogus_z"
 
 
 def test_the_search_writes_nothing(conn: psycopg.Connection[Any]) -> None:
@@ -339,6 +338,16 @@ def test_pages_cut_through_tied_ranks_in_video_id_order(conn: psycopg.Connection
     walked = [_ids(_search(conn, "zebra", limit=2, offset=o)) for o in (0, 2, 4)]
 
     assert walked == [ids[0:2], ids[2:4], ids[4:6]]
+
+
+def test_a_page_cut_puts_a_null_published_at_last(conn: psycopg.Connection[Any]) -> None:
+    # Offset 1 skips the first row, so it only shows which row is first (#87).
+    _seed(conn, "nulls_a0001", "zebra horse", published=None)
+    _seed(conn, "nulls_b0001", "zebra horse", published=datetime(2026, 1, 1, tzinfo=UTC))
+    _seed(conn, "nulls_c0001", "zebra horse", published=datetime(2025, 1, 1, tzinfo=UTC))
+
+    assert _ids(_search(conn, "zebra", limit=1, offset=1)) == ["nulls_c0001"]
+    assert _ids(_search(conn, "zebra", limit=1, offset=2)) == ["nulls_a0001"]
 
 
 def test_has_more_boundaries(conn: psycopg.Connection[Any]) -> None:
@@ -674,6 +683,18 @@ def test_changing_a_title_moves_the_match(conn: psycopg.Connection[Any]) -> None
 
     assert _search(conn, "giraffe").results == ()
     assert _ids(_search(conn, "zebra")) == ["retitle0001"]
+
+
+def test_a_direct_update_of_a_title_refreshes_the_document(
+    conn: psycopg.Connection[Any],
+) -> None:
+    # upsert_video writes every column, so only a bare UPDATE of ``title`` tells
+    # ``UPDATE OF title`` from any other column list (#20).
+    _video(conn, "titleupd001", title="oldword here")
+    conn.execute("UPDATE videos SET title = 'newword here' WHERE video_id = 'titleupd001'")
+
+    assert _ids(_search(conn, "newword")) == ["titleupd001"]
+    assert _search(conn, "oldword").results == ()
 
 
 def test_an_rss_stub_is_searchable_by_title_before_any_transcript(
@@ -1219,3 +1240,136 @@ def test_the_sql_itself_returns_at_most_three_windows(conn: psycopg.Connection[A
 
     assert [w[0] for w in windows] == sorted(w[0] for w in windows)
     assert len(windows) == 3
+
+
+# --- gaps found by mutation (#110, #111, #112) -----------------------------------
+
+
+def test_another_languages_stem_is_rejected_by_the_per_row_filter(
+    conn: psycopg.Connection[Any],
+) -> None:
+    # The index condition admits any configuration's stem; only the per-row
+    # filter says no. Dutch, French and others stem "runnings" to "running",
+    # which is exactly what the Polish ("simple") row holds (#83).
+    _lang(conn, "filter00001", "she was running late", "pl")
+
+    assert _search(conn, "runnings").results == ()
+    assert _ids(_search(conn, "running")) == ["filter00001"]
+
+
+def test_the_own_configuration_drives_matched_in_and_the_window(
+    conn: psycopg.Connection[Any],
+) -> None:
+    # "Häuser" stems to "haus" in German but stays "häuser" in English, unlike
+    # "Haus": only the row's own query finds the segment, highlights it and lets
+    # the transcript count as a source (#110, #111, #112, #120).
+    _segments(conn, "own_win0001", [(0, "Willkommen"), (7, "Die Häuser sind alt")], language="de")
+
+    [hit] = _search(conn, "Häuser").results
+
+    assert hit.matched_in == ("transcript",)
+    assert [(e.start_sec, [s.text for s in e.spans if s.match]) for e in hit.excerpts] == [
+        (7.0, ["Häuser"])
+    ]
+
+
+def test_the_own_configuration_drives_the_full_text_fallback_headline(
+    conn: psycopg.Connection[Any],
+) -> None:
+    _video(conn, "own_fb00001")
+    conn.execute(
+        "INSERT INTO transcripts (video_id, source, language, segments, full_text)"
+        " VALUES ('own_fb00001', 'whisper', 'de', '[]', 'Die Häuser sind alt')"
+    )
+
+    [hit] = _search(conn, "Häuser").results
+
+    assert [e.start_sec for e in hit.excerpts] == [None]
+    assert Span("Häuser", True) in hit.excerpts[0].spans
+
+
+def test_a_phrase_split_across_a_boundary_is_found_in_the_rows_configuration(
+    conn: psycopg.Connection[Any],
+) -> None:
+    # German drops "das"; "Kinder" and "Kindern" both stem to "kind". English
+    # keeps them apart, so only the row's configuration joins the pair (#107).
+    _segments(conn, "own_pair001", [(5, "das Kinder"), (9, "alt")], language="de")
+
+    [hit] = _search(conn, '"Kindern alt"').results
+
+    assert [e.start_sec for e in hit.excerpts] == [5.0]
+
+
+def test_windows_are_ranked_in_the_rows_configuration(conn: psycopg.Connection[Any]) -> None:
+    # Four hit segments. In German "Kinder" and "Kindern" are both "kind", so the
+    # last one (two hits) outranks the three that tie. Ranked with an English
+    # vector nothing would match the German query and the earliest three would
+    # win (#108).
+    _segments(
+        conn, "own_rank001",
+        [(10, "Kinder a"), (20, "Kinder b"), (30, "Kinder c"), (40, "Kinder Kindern d")],
+        language="de",
+    )
+
+    assert [s for s, _ in _windows(conn, "Kindern")] == [10.0, 20.0, 40.0]
+
+
+def test_a_pair_whose_first_segment_has_no_start_gives_no_timestamp(
+    conn: psycopg.Connection[Any],
+) -> None:
+    # float(None) would raise: the SQL must not offer a window without a start (#151).
+    _segments(conn, "pair_null01", [(None, "we use machine"), (8, "learning daily")])
+
+    [hit] = _search(conn, '"machine learning"').results
+
+    assert [e.start_sec for e in hit.excerpts] == [None]
+
+
+def test_a_start_of_exactly_1e9_is_a_timestamp_and_one_above_is_not(
+    conn: psycopg.Connection[Any],
+) -> None:
+    # The boundary is crossed by one in each direction (#158, #159).
+    _segments(conn, "bound_at001", [(1_000_000_000, "a zebra")])
+    _segments(conn, "bound_ab001", [(1_000_000_001, "an okapi")])
+
+    assert [s for s, _ in _windows(conn, "zebra")] == [1e9]
+    assert [s for s, _ in _windows(conn, "okapi")] == [None]
+
+
+def test_the_best_ranked_window_wins_even_when_it_is_the_latest(
+    conn: psycopg.Connection[Any],
+) -> None:
+    # Four hits, three slots. The last has the query word twice, so it outranks
+    # the first three, which tie: ranking by ts_rank drops the last of the tie
+    # (#136); a tie broken by the later ordinal would drop the first (#137).
+    _segments(
+        conn, "winrank0001",
+        [(10, "zebra a"), (20, "zebra b"), (30, "zebra c"), (40, "zebra zebra")],
+    )
+
+    assert [s for s, _ in _windows(conn, "zebra")] == [10.0, 20.0, 40.0]
+
+
+def test_the_fallback_headline_gives_three_fragments(conn: psycopg.Connection[Any]) -> None:
+    # Pins both ts_headline's MaxFragments and the Python-side keep (#168, #185).
+    filler = " ".join(f"w{i}" for i in range(150))
+    _video(conn, "frag0000001")
+    conn.execute(
+        "INSERT INTO transcripts (video_id, source, language, segments, full_text)"
+        " VALUES ('frag0000001', 'whisper', 'en', '[]', %s)",
+        (f"zebra {filler} zebra {filler} zebra {filler}",),
+    )
+
+    [hit] = _search(conn, "zebra").results
+
+    assert len(hit.excerpts) == 3
+    assert all(any(s.match for s in e.spans) for e in hit.excerpts)
+
+
+def test_html_characters_before_a_match_are_restored(conn: psycopg.Connection[Any]) -> None:
+    # The text before the first highlight is a span of its own (#195).
+    _seed(conn, "restore0001", "x < y & <b> and zebra")
+
+    [hit] = _search(conn, "zebra").results
+
+    assert "x < y & <b> and " in "".join(s.text for s in hit.excerpts[0].spans)
