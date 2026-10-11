@@ -84,7 +84,7 @@ def test_a_dry_run_probes_classifies_and_reports_per_video(db: psycopg.Connectio
 
     result = _run(db, meta)
 
-    assert meta.calls == [e.video_id for e in ENTRIES]
+    assert sorted(meta.calls) == sorted(e.video_id for e in ENTRIES)  # 4 probes run concurrently
     assert [v.video_id for v in result.videos] == [e.video_id for e in ENTRIES]
     assert [v.subtitles for v in result.videos] == ["transcribe", "manual", "transcribe", "transcribe"]
     assert (result.estimate.probed, result.estimate.manual_subtitles) == (4, 1)

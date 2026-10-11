@@ -160,3 +160,58 @@ def test_cost_per_char_uses_only_the_newest_twenty(conn: psycopg.Connection[Any]
 
     assert samples == 20
     assert value == pytest.approx(1e-5)
+
+
+# --- the 20-row window is taken before unusable rows are skipped (#117 QA) ------------
+
+
+def test_chars_per_sec_empty_rows_do_not_shrink_the_newest_twenty(
+    conn: psycopg.Connection[Any],
+) -> None:
+    # 5 empty transcripts are the newest; the SQL must skip them *before* LIMIT 20,
+    # so the 20 usable ones that follow still all count
+    for i in range(25):
+        _video(conn, f"e{i:010d}", 10)
+        _transcript(conn, f"e{i:010d}", "" if i < 5 else "x" * 100, age=i)
+
+    assert median_chars_per_audio_sec(conn) == (10.0, 20)
+
+
+def test_chars_per_sec_takes_the_newest_twenty_not_the_oldest(
+    conn: psycopg.Connection[Any],
+) -> None:
+    # 30 rows so the oldest 20 (10 outliers + 10 normal) have a different median
+    # from the newest 20 (all normal): ASC instead of DESC cannot give 1.0
+    for i in range(30):
+        _video(conn, f"d{i:010d}", 10)
+        _transcript(conn, f"d{i:010d}", "x" * (10 if i < 20 else 1000), age=i)
+
+    assert median_chars_per_audio_sec(conn) == (1.0, 20)
+
+
+def test_cost_per_char_zero_cost_rows_do_not_shrink_the_newest_twenty(
+    conn: psycopg.Connection[Any],
+) -> None:
+    _video(conn, "a0000000001", 10)
+    t = _transcript(conn, "a0000000001", "x" * 1000)
+    for i in range(25):
+        _analysis(conn, "a0000000001", t, "0" if i < 5 else "0.01", age=i)
+
+    value, samples = median_cost_per_char(conn, "m")
+
+    assert samples == 20
+    assert value == pytest.approx(1e-5)
+
+
+def test_cost_per_char_takes_the_newest_twenty_not_the_oldest(
+    conn: psycopg.Connection[Any],
+) -> None:
+    _video(conn, "a0000000001", 10)
+    t = _transcript(conn, "a0000000001", "x" * 1000)
+    for i in range(30):  # the oldest 20 have a different median from the newest 20
+        _analysis(conn, "a0000000001", t, "0.01" if i < 20 else "5.00", age=i)
+
+    value, samples = median_cost_per_char(conn, "m")
+
+    assert samples == 20
+    assert value == pytest.approx(1e-5)
