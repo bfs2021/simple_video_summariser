@@ -8,7 +8,15 @@ transcript (D). Only a video's preferred transcript counts: the one with the
 lowest ``transcript_rank(source)`` (D2), the same one ``get_best_transcript``
 returns. Results are ranked by ``ts_rank_cd`` with explicit weights and length
 normalisation, then ``published_at`` (newest first, nulls last), then
-``video_id``. ``matched_in`` says which sources contain a query lexeme,
+``video_id``. Language (#112): the transcript part of the vector is stemmed with the
+configuration ``transcript_ts_config(language)`` picks. The index condition is
+one row-independent tsquery, ``transcript_search_tsquery(q)`` (the OR of
+``websearch_to_tsquery(cfg, q)`` over every configuration the mapping can
+return). Each candidate is then re-checked with its own configuration: it
+matches when ``fts @@ websearch_to_tsquery(cfg, q)`` or ``fts @@
+websearch_to_tsquery('english', q)``; the second arm keeps the English title
+and analysis text (always ``'english'``) searchable on a non-English video.
+Rank and headline use the row's own configuration. ``matched_in`` says which sources contain a query lexeme,
 derived from the weights stored in the vector (``ts_filter``), for the page's
 rows only.
 
@@ -51,17 +59,28 @@ RANK_WEIGHTS = "{0.1, 0.2, 0.4, 1.0}"
 
 SEARCH_SQL = f"""
 WITH q AS (
-    SELECT websearch_to_tsquery('english', %(q)s) AS query,
-           tsquery_positive_lexemes(websearch_to_tsquery('english', %(q)s)) AS lexemes
+    SELECT websearch_to_tsquery('english', %(q)s) AS en,
+           transcript_search_tsquery(%(q)s) AS any_config
 ),
 page AS (
     SELECT v.video_id, v.title, v.channel_id, c.title AS channel_title,
            v.published_at, v.duration_sec, v.unavailable, sd.fts,
-           ts_rank_cd('{RANK_WEIGHTS}', sd.fts, q.query, 1) AS rank
+           bt.id AS transcript_id, k.cfg,
+           ts_rank_cd('{RANK_WEIGHTS}', sd.fts,
+                      CASE WHEN k.cfg = 'pg_catalog.english'::regconfig THEN q.en
+                           ELSE websearch_to_tsquery(k.cfg, %(q)s) || q.en END, 1) AS rank
     FROM q
-    JOIN search_docs sd ON sd.fts @@ q.query
+    JOIN search_docs sd ON sd.fts @@ q.any_config
     JOIN videos v ON v.video_id = sd.video_id
     LEFT JOIN channels c ON c.channel_id = v.channel_id
+    LEFT JOIN LATERAL (
+        SELECT best.id, best.language FROM transcripts best
+        WHERE best.video_id = sd.video_id
+        ORDER BY transcript_rank(best.source), best.id
+        LIMIT 1
+    ) bt ON true
+    CROSS JOIN LATERAL (SELECT transcript_ts_config(bt.language) AS cfg) k
+    WHERE sd.fts @@ websearch_to_tsquery(k.cfg, %(q)s) OR sd.fts @@ q.en
     ORDER BY rank DESC, v.published_at DESC NULLS LAST, v.video_id ASC
     OFFSET %(offset)s LIMIT %(limit)s
 )
@@ -69,25 +88,27 @@ SELECT page.video_id, page.title, page.channel_id, page.channel_title,
        page.published_at, page.duration_sec, page.unavailable, t.source,
        m.in_title, m.in_analysis, m.in_transcript,
        CASE WHEN m.in_transcript THEN ts_headline(
-           'english',
+           page.cfg,
            translate(translate(t.full_text, {_STRIPPED}, ''), '<>&', {_PROTECTED}),
-           q.query,
+           r.own,
            'StartSel=' || chr(1) || ', StopSel=' || chr(2)
                || ', FragmentDelimiter=' || chr(3) || ', {HEADLINE_OPTIONS}'
        ) END
 FROM page
 CROSS JOIN q
+CROSS JOIN LATERAL (SELECT websearch_to_tsquery(page.cfg, %(q)s) AS own) r
 CROSS JOIN LATERAL (
-    SELECT tsvector_to_array(ts_filter(page.fts, '{{a}}')) && q.lexemes AS in_title,
-           tsvector_to_array(ts_filter(page.fts, '{{b,c}}')) && q.lexemes AS in_analysis,
-           tsvector_to_array(ts_filter(page.fts, '{{d}}')) && q.lexemes AS in_transcript
+    SELECT tsquery_positive_lexemes(
+               CASE WHEN page.cfg = 'pg_catalog.english'::regconfig THEN q.en
+                    ELSE r.own || q.en END) AS shared,
+           tsquery_positive_lexemes(r.own) AS own
+) lx
+CROSS JOIN LATERAL (
+    SELECT tsvector_to_array(ts_filter(page.fts, '{{a}}')) && lx.shared AS in_title,
+           tsvector_to_array(ts_filter(page.fts, '{{b,c}}')) && lx.shared AS in_analysis,
+           tsvector_to_array(ts_filter(page.fts, '{{d}}')) && lx.own AS in_transcript
 ) m
-LEFT JOIN LATERAL (
-    SELECT best.source, best.full_text FROM transcripts best
-    WHERE best.video_id = page.video_id
-    ORDER BY transcript_rank(best.source), best.id
-    LIMIT 1
-) t ON true
+LEFT JOIN transcripts t ON t.id = page.transcript_id
 ORDER BY page.rank DESC, page.published_at DESC NULLS LAST, page.video_id ASC
 """
 
@@ -144,7 +165,7 @@ def _has_positive_term(conn: psycopg.Connection[Any], query: str) -> bool:
     # querytree() is '' for no lexemes and 'T' when nothing indexable is left
     # (only exclusions): both would otherwise scan or list the corpus.
     row = conn.execute(
-        "SELECT querytree(websearch_to_tsquery('english', %s))", (query,)
+        "SELECT querytree(transcript_search_tsquery(%s))", (query,)
     ).fetchone()
     return row is not None and row[0] not in ("", "T")
 

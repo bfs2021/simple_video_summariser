@@ -62,7 +62,7 @@ def test_upgrade_creates_the_table_and_downgrade_drops_it(
         "last_skipped_locked_at": ("timestamp with time zone", "YES"),
     }
 
-    command.downgrade(config, "-1")
+    command.downgrade(config, "0008")
     assert _columns(postgres_dsn) == {}
 
     command.upgrade(config, "head")

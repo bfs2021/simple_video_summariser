@@ -391,8 +391,14 @@ CREATE TABLE transcripts (
 );
 
 ALTER TABLE transcripts ADD COLUMN fts tsvector
-    GENERATED ALWAYS AS (to_tsvector('english', coalesce(full_text,''))) STORED;
+    GENERATED ALWAYS AS (to_tsvector(transcript_ts_config(language), coalesce(full_text,''))) STORED;
 CREATE INDEX transcripts_fts_idx ON transcripts USING GIN (fts);
+
+-- language -> built-in text-search config (#112, migration 0011); NULL/empty ->
+-- english, unsupported codes -> simple. IMMUTABLE and baked into fts: changing it
+-- needs a new migration that also re-runs ALTER COLUMN fts SET EXPRESSION.
+-- transcript_ts_config(lang TEXT) RETURNS regconfig
+-- transcript_search_tsquery(q TEXT) RETURNS tsquery  -- OR over all those configs
 
 -- source preference (D2): manual > whisper > auto
 CREATE FUNCTION transcript_rank(src TEXT) RETURNS INT IMMUTABLE LANGUAGE sql AS

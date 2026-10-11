@@ -49,10 +49,14 @@ def _video(
 
 
 def _transcript(
-    conn: psycopg.Connection[Any], video_id: str, text: str, source: str = "whisper"
+    conn: psycopg.Connection[Any],
+    video_id: str,
+    text: str,
+    source: str = "whisper",
+    language: str | None = "en",
 ) -> int:
     segments = (Segment(0.0, 1.0, text),) if text else ()
-    return save_transcript(conn, video_id, source, "en", "none", segments, None)
+    return save_transcript(conn, video_id, source, language, "none", segments, None)
 
 
 def _seed(conn: psycopg.Connection[Any], video_id: str, text: str, **kw: Any) -> None:
@@ -390,9 +394,8 @@ def test_headline_is_computed_only_for_the_page(conn: psycopg.Connection[Any]) -
     head, _, tail = SEARCH_SQL.partition("ts_headline")
     assert tail, "SEARCH_SQL must call ts_headline"
     assert "LIMIT" in head and "OFFSET" in head
-    # Past the page CTE the only LIMIT is the per-row "best transcript" lookup.
     assert "OFFSET" not in tail
-    assert tail.count("LIMIT") == 1 and "FROM page" in tail
+    assert "LIMIT" not in tail and "FROM page" in tail
 
 
 # --- title and analysis text (#111) --------------------------------------------
@@ -724,3 +727,121 @@ def test_a_four_hour_transcript_saves_and_stays_searchable(
 
     assert _ids(_search(conn, "word5999")) == ["longpod00001"]
     assert _ids(_search(conn, "zebra")) == ["longpod00001"]
+
+
+# --- language-aware matching (#112) -------------------------------------------------
+
+
+def _lang(conn: psycopg.Connection[Any], vid: str, text: str, language: str | None,
+          **kw: Any) -> None:
+    _video(conn, vid, **kw)
+    _transcript(conn, vid, text, language=language)
+
+
+def test_english_stemming_still_works_and_simple_languages_match_exact_forms_only(
+    conn: psycopg.Connection[Any],
+) -> None:
+    _lang(conn, "en000000001", "she was running late", "en")
+    _lang(conn, "pl000000001", "she was running late", "pl")
+
+    assert _ids(_search(conn, "runs")) == ["en000000001"]
+    assert sorted(_ids(_search(conn, "running"))) == ["en000000001", "pl000000001"]
+
+
+def test_german_stemming_applies_to_german_transcripts_only(
+    conn: psycopg.Connection[Any],
+) -> None:
+    _lang(conn, "de000000001", "Die Häuser sind alt", "de")
+    _lang(conn, "de000000002", "Das Dach des Hauses", "de-AT")
+    _lang(conn, "en000000002", "Die Häuser sind alt", "en")
+
+    assert sorted(_ids(_search(conn, "Haus"))) == ["de000000001", "de000000002"]
+
+
+def test_stop_words_follow_the_rows_own_language(conn: psycopg.Connection[Any]) -> None:
+    _lang(conn, "de000000003", "der Hund bellt", "de")
+    _lang(conn, "en000000003", "the cat sleeps", "en")
+    _lang(conn, "pl000000002", "the cat sleeps", "pl")
+
+    assert _search(conn, "der").results == ()
+    assert _search(conn, "the").results[0].video_id == "pl000000002"
+    assert _ids(_search(conn, "the")) == ["pl000000002"]
+
+
+@pytest.mark.parametrize("language", ["en", "pl", "de"])
+def test_negation_excludes_in_every_language(
+    conn: psycopg.Connection[Any], language: str
+) -> None:
+    _lang(conn, "neg_ok00001", "cats are great", language)
+    _lang(conn, "neg_bad0001", "cats and dogs together", language)
+
+    assert _ids(_search(conn, "cats -dogs")) == ["neg_ok00001"]
+
+
+def test_a_query_without_a_positive_term_in_any_config_returns_nothing(
+    conn: psycopg.Connection[Any],
+) -> None:
+    _lang(conn, "pl000000003", "dogs and the cats", "pl")
+
+    assert _search(conn, "-dogs") == SearchPage((), False)
+
+
+def test_the_headline_uses_the_rows_configuration(conn: psycopg.Connection[Any]) -> None:
+    _lang(conn, "de000000004", "Die Häuser sind alt", "de")
+
+    [hit] = _search(conn, "Haus").results
+
+    assert Span("Häuser", True) in [s for fragment in hit.excerpts for s in fragment]
+
+
+def test_the_preferred_transcript_decides_the_language(conn: psycopg.Connection[Any]) -> None:
+    _video(conn, "mixlang00001")
+    _transcript(conn, "mixlang00001", "the houses are old", "youtube_auto", "en")
+    _transcript(conn, "mixlang00001", "Die Häuser sind alt", "whisper", "de")
+
+    assert _ids(_search(conn, "Haus")) == ["mixlang00001"]
+    assert _search(conn, "houses").results == ()
+
+
+def test_english_title_and_analysis_still_match_on_a_non_english_video(
+    conn: psycopg.Connection[Any],
+) -> None:
+    _video(conn, "deen0000001", title="Wind farms")
+    tid = _transcript(conn, "deen0000001", "Die Häuser sind alt", language="de")
+    _analysis(conn, "deen0000001", tid, "about governments", claim="plain claim")
+
+    assert _ids(_search(conn, "farm")) == ["deen0000001"]
+    [hit] = _search(conn, "government").results
+    assert hit.matched_in == ("analysis",)
+
+
+def test_more_matching_german_words_rank_higher(conn: psycopg.Connection[Any]) -> None:
+    _lang(conn, "dr_one00001", "Haus alt neu groß klein", "de")
+    _lang(conn, "dr_many0001", "Haus Häuser Hauses alt", "de")
+
+    assert _ids(_search(conn, "Haus")) == ["dr_many0001", "dr_one00001"]
+
+
+@pytest.mark.parametrize(
+    "q", ["'", '"', "-", "or", "der -die", "Häuser OR \"x y\"", "日本語", "<script>", "-der", "the -the"]
+)
+def test_hostile_queries_over_a_mixed_language_corpus_do_not_raise(
+    conn: psycopg.Connection[Any], q: str
+) -> None:
+    _lang(conn, "mix00000001", "Die Häuser sind alt der die das", "de")
+    _lang(conn, "mix00000002", "the running dogs", "pl")
+    _lang(conn, "mix00000003", "日本語 の テキスト", "ja")
+
+    assert isinstance(_search(conn, q), SearchPage)
+
+
+def test_the_rank_of_a_non_english_row_uses_its_own_configuration(
+    conn: psycopg.Connection[Any],
+) -> None:
+    # "Haus" appears twice in the German row (stemmed) and once in the English-
+    # tagged row; ranking with the English query alone would score the German
+    # row on a single exact form.
+    _lang(conn, "own_de00001", "Haus Häuser alt", "de")
+    _lang(conn, "own_en00001", "Haus alt neu", "en")
+
+    assert _ids(_search(conn, "Haus"))[0] == "own_de00001"
