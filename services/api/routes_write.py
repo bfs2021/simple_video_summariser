@@ -25,7 +25,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 import psycopg
 import structlog
@@ -36,7 +36,12 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from starlette.convertors import Convertor, register_url_convertor
 
 from common.config import get_settings
-from common.errors import RateLimitedError, ToolFailureError, TransientNetworkError
+from common.errors import (
+    PermanentSourceError,
+    RateLimitedError,
+    ToolFailureError,
+    TransientNetworkError,
+)
 from common.models import CatalogSource
 from common.queue import (
     PRIORITY_INTERACTIVE,
@@ -44,15 +49,15 @@ from common.queue import (
     analyze_dedupe_key,
 )
 from common.repo.backfill_requests import create_request
-from common.repo.channels import channel_exists, register_channel
+from common.repo.channels import channel_exists, fill_channel_title, register_channel
 from common.repo.jobs import active_job, latest_job
 from common.repo.transcripts import get_best_transcript
 from common.repo.videos import insert_submitted_video, video_exists
 from common.youtube_refs import (
-    UnsupportedChannelRef,
+    NameRef,
     is_channel_id,
     is_video_id,
-    parse_channel_ref,
+    parse_channel_input,
     parse_video_ref,
 )
 from services.api.backfill import (
@@ -65,7 +70,13 @@ from services.api.backfill import (
     backfill,
     cancel_backfill,
 )
-from services.api.deps import get_catalog, get_conn, rate_limit
+from services.api.deps import (
+    ChannelResolver,
+    get_catalog,
+    get_channel_resolver,
+    get_conn,
+    rate_limit,
+)
 
 _log = structlog.get_logger(__name__)
 
@@ -97,7 +108,15 @@ _BACKFILL_ID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 )
 BAD_VIDEO_REF = "url must be a YouTube video ID or video URL"
-BAD_CHANNEL_REF = "url must be a YouTube channel ID or youtube.com/channel/ URL"
+if TYPE_CHECKING:
+    from adapters.youtube.channel_resolver import ResolvedChannel
+
+BAD_CHANNEL_REF = (
+    "url must be a YouTube channel ID, youtube.com/channel/ URL, @handle, /c/ or /user/ URL"
+)
+CHANNEL_NOT_FOUND = "channel not found"
+CHANNEL_LOOKUP_UNAVAILABLE = "channel lookup is unavailable; try again later"
+CHANNEL_LOOKUP_BROKEN = "channel lookup failed"
 BAD_BACKFILL_CHANNEL = "channel_id must be a canonical YouTube channel ID (UC + 22 characters)"
 CHANNEL_NOT_REGISTERED = "channel is not registered; register it with POST /channels first"
 BACKFILL_REQUEST_ACTIVE = "a backfill request is already pending or running for this channel"
@@ -230,6 +249,7 @@ class ChannelRegistration(BaseModel):
     monitor_from: datetime
     added_at: datetime
     created: bool
+    resolved_from: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -434,6 +454,7 @@ def post_video_reanalyze(
 @router.post(
     "/channels",
     status_code=status.HTTP_201_CREATED,
+    response_model_exclude_none=True,
     responses={
         200: {"model": ChannelRegistration, "description": "Already registered"}
     },
@@ -442,18 +463,26 @@ def post_channels(
     body: SubmitRef,
     response: Response,
     conn: Annotated[psycopg.Connection[Any], Depends(get_conn)],
+    resolve: Annotated[ChannelResolver, Depends(get_channel_resolver)],
 ) -> ChannelRegistration:
     try:
-        channel_id = parse_channel_ref(body.url)
-    except UnsupportedChannelRef as exc:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from None
+        ref = parse_channel_input(body.url)
     except ValueError:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT, BAD_CHANNEL_REF
         ) from None
+    resolved_title: str | None = None
+    if isinstance(ref, NameRef):
+        resolved = _resolve_channel_name(resolve, ref)
+        channel_id = resolved.channel_id
+        resolved_title = resolved.title
+    else:
+        channel_id = ref
     _require_idle(conn)
     with conn.transaction():
         registered = register_channel(conn, channel_id)
+        if isinstance(ref, NameRef):
+            fill_channel_title(conn, channel_id, resolved_title)
     if not registered.created:
         response.status_code = status.HTTP_200_OK
     channel = registered.channel
@@ -463,7 +492,24 @@ def post_channels(
         monitor_from=channel.monitor_from,
         added_at=channel.added_at,
         created=registered.created,
+        resolved_from=ref.kind if isinstance(ref, NameRef) else None,
     )
+
+
+def _resolve_channel_name(resolve: ChannelResolver, ref: NameRef) -> ResolvedChannel:
+    """Map a resolver failure to a fixed response; no input or yt-dlp text leaves here."""
+    try:
+        return resolve(ref.kind, ref.name)
+    except PermanentSourceError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, CHANNEL_NOT_FOUND) from None
+    except (TransientNetworkError, RateLimitedError):
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, CHANNEL_LOOKUP_UNAVAILABLE
+        ) from None
+    except ToolFailureError:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY, CHANNEL_LOOKUP_BROKEN
+        ) from None
 
 
 def _reanalyze_video_id(request: Request, video_id: str) -> str:

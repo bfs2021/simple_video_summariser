@@ -705,6 +705,8 @@ export interface components {
              * Format: date-time
              */
             monitor_from: string;
+            /** Resolved From */
+            resolved_from?: string | null;
         };
         /** ClaimOut */
         ClaimOut: {

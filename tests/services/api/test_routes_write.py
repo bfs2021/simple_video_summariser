@@ -18,9 +18,18 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
+from adapters.youtube.channel_resolver import ResolvedChannel
 from common.config import get_settings
+from common.errors import (
+    PermanentSourceError,
+    RateLimitedError,
+    ToolFailureError,
+    TransientNetworkError,
+    UnavailableReason,
+)
 from common.queue import PRIORITY_INTERACTIVE, PRIORITY_NORMAL, PostgresQueue
 from common.repo.channels import register_channel
+from services.api.deps import get_channel_resolver
 from services.api.main import create_app
 from services.api.routes_write import submit_video
 from tests.services.api.conftest import LogSink
@@ -46,9 +55,33 @@ def db(dsn: str) -> Iterator[psycopg.Connection[Any]]:
         yield conn
 
 
+class FakeResolver:
+    """Stands in for ``resolve_channel``: canned answers, or a permanent miss."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self.answers: dict[tuple[str, str], ResolvedChannel | BaseException] = {}
+
+    def __call__(self, kind: str, name: str) -> ResolvedChannel:
+        self.calls.append((kind, name))
+        answer = self.answers.get((kind, name))
+        if answer is None:
+            raise PermanentSourceError(UnavailableReason.REMOVED, f"yt-dlp exited: {MARKER}")
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
+
+
 @pytest.fixture
-def api(dsn: str, logs: LogSink) -> Iterator[TestClient]:
-    with TestClient(create_app()) as client:
+def resolver() -> FakeResolver:
+    return FakeResolver()
+
+
+@pytest.fixture
+def api(dsn: str, logs: LogSink, resolver: FakeResolver) -> Iterator[TestClient]:
+    app = create_app()
+    app.dependency_overrides[get_channel_resolver] = lambda: resolver
+    with TestClient(app) as client:
         yield client
 
 
@@ -638,23 +671,138 @@ def test_a_registration_racing_an_uncommitted_insert_returns_the_committed_row(
 
 
 @pytest.mark.parametrize(
-    "ref",
+    ("ref", "kind", "name"),
     [
-        "@somehandle",
-        "https://www.youtube.com/@somehandle",
-        "https://www.youtube.com/c/somename",
-        "https://www.youtube.com/user/somename",
+        ("@SomeHandle", "handle", "SomeHandle"),
+        ("https://www.youtube.com/@SomeHandle/videos", "handle", "SomeHandle"),
+        ("https://www.youtube.com/c/SomeName", "c", "SomeName"),
+        ("https://www.youtube.com/user/SomeName", "user", "SomeName"),
     ],
 )
-def test_handle_urls_are_rejected_with_a_channel_id_hint(
-    api: TestClient, db: psycopg.Connection[Any], ref: str
+def test_a_name_reference_resolves_and_registers_the_channel(
+    api: TestClient,
+    db: psycopg.Connection[Any],
+    resolver: FakeResolver,
+    ref: str,
+    kind: str,
+    name: str,
 ) -> None:
-    response = api.post("/channels", json={"url": ref + MARKER})
+    resolver.answers[(kind, name)] = ResolvedChannel(CHANNEL, "Resolved Title")
+
+    response = api.post("/channels", json={"url": ref})
+
+    assert response.status_code == 201
+    assert resolver.calls == [(kind, name)]
+    assert response.json()["channel_id"] == CHANNEL
+    assert response.json()["resolved_from"] == kind
+    [(channel_id, title, active, *_)] = _channel_rows(db)
+    assert (channel_id, title, active) == (CHANNEL, "Resolved Title", True)
+    assert _jobs(db) == []
+
+
+def test_the_handle_and_legacy_forms_of_one_channel_end_in_one_row(
+    api: TestClient, db: psycopg.Connection[Any], resolver: FakeResolver
+) -> None:
+    resolver.answers[("handle", "somehandle")] = ResolvedChannel(CHANNEL, "T")
+    resolver.answers[("c", "somename")] = ResolvedChannel(CHANNEL, "T")
+
+    first = api.post("/channels", json={"url": "@somehandle"})
+    second = api.post("/channels", json={"url": "https://www.youtube.com/c/somename"})
+    third = api.post("/channels", json={"url": CHANNEL})
+
+    assert (first.status_code, second.status_code, third.status_code) == (201, 200, 200)
+    assert second.json()["created"] is False
+    assert len(_channel_rows(db)) == 1
+
+
+def test_canonical_input_never_reaches_the_resolver(
+    api: TestClient, resolver: FakeResolver
+) -> None:
+    response = api.post("/channels", json={"url": f"https://www.youtube.com/channel/{CHANNEL}"})
+
+    assert response.status_code == 201
+    assert "resolved_from" not in response.json()
+    assert resolver.calls == []
+
+
+@pytest.mark.parametrize("title", ["Kept", None])
+def test_a_resolved_title_only_fills_a_null_title(
+    api: TestClient, db: psycopg.Connection[Any], resolver: FakeResolver, title: str | None
+) -> None:
+    db.execute(
+        "INSERT INTO channels (channel_id, title, active, monitor_from) "
+        "VALUES (%s, %s, true, now())",
+        (CHANNEL, title),
+    )
+    resolver.answers[("handle", "SomeHandle")] = ResolvedChannel(CHANNEL, "New")
+
+    response = api.post("/channels", json={"url": "@SomeHandle"})
+
+    assert response.status_code == 200
+    [(_, stored, *_)] = _channel_rows(db)
+    assert stored == (title if title is not None else "New")
+
+
+def test_a_missing_name_is_404_with_a_fixed_message_and_writes_nothing(
+    api: TestClient, db: psycopg.Connection[Any]
+) -> None:
+    before = _counts(db)
+
+    response = api.post("/channels", json={"url": "@nosuchname"})
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "channel not found"
+    assert MARKER not in response.text
+    assert _counts(db) == before
+
+
+@pytest.mark.parametrize(
+    ("error", "status"),
+    [
+        (TransientNetworkError(f"timed out {MARKER}"), 503),
+        (RateLimitedError(f"HTTP 429 {MARKER}"), 503),
+        (ToolFailureError(f"bad output {MARKER}"), 502),
+    ],
+)
+def test_lookup_failures_respond_with_a_fixed_message_and_write_nothing(
+    api: TestClient,
+    db: psycopg.Connection[Any],
+    resolver: FakeResolver,
+    error: BaseException,
+    status: int,
+) -> None:
+    resolver.answers[("handle", "SomeHandle")] = error
+    before = _counts(db)
+
+    response = api.post("/channels", json={"url": "@SomeHandle"})
+
+    assert response.status_code == status
+    assert MARKER not in response.text
+    assert _counts(db) == before
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "@ab",
+        "@a b",
+        "SomeName",
+        "youtube.com/@ab/foo/bar",
+        "https://youtube.com@evil.com/@SomeHandle",
+        f"https://www.youtube.com/watch?v={VID}",
+        "https://www.youtube.com/playlist?list=PL1",
+    ],
+)
+def test_an_invalid_name_reference_is_422_before_any_lookup(
+    api: TestClient, db: psycopg.Connection[Any], resolver: FakeResolver, ref: str
+) -> None:
+    before = _counts(db)
+
+    response = api.post("/channels", json={"url": ref})
 
     assert response.status_code == 422
-    assert "channel-ID" in response.json()["detail"]
-    assert MARKER not in response.text
-    assert _counts(db) == (0, 0, 0)
+    assert resolver.calls == []
+    assert _counts(db) == before
 
 
 @pytest.mark.parametrize(

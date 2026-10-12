@@ -359,3 +359,21 @@ ERROR: [youtube:tab] UUx7T6qYK4VaP2-OhorrFS3Q: YouTube said: The playlist does n
 returncode = 1
 error_class = "PERMANENT_SOURCE"
 reason = "removed"
+
+[[case]]
+# live run on 2026-10-12, yt-dlp 2026.08.19, https://www.youtube.com/@zzqxnotarealhandle9981 (no such handle)
+stderr = '''
+ERROR: [youtube:tab] @zzqxnotarealhandle9981: Unable to download API page: HTTP Error 404: Not Found (caused by <HTTPError 404: Not Found>)
+'''
+returncode = 1
+error_class = "PERMANENT_SOURCE"
+reason = "removed"
+
+[[case]]
+# live run on 2026-10-12, yt-dlp 2026.08.19, https://www.youtube.com/c/zzqxnotarealname9981 (no such legacy /c/ name)
+stderr = '''
+ERROR: [youtube:tab] zzqxnotarealname9981: Unable to download API page: HTTP Error 404: Not Found (caused by <HTTPError 404: Not Found>)
+'''
+returncode = 1
+error_class = "PERMANENT_SOURCE"
+reason = "removed"

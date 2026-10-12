@@ -17,8 +17,8 @@ for the read routes (#42).
 
 from __future__ import annotations
 
-from collections.abc import Generator
-from typing import Annotated, Any
+from collections.abc import Callable, Generator
+from typing import TYPE_CHECKING, Annotated, Any
 
 import psycopg
 import structlog
@@ -26,6 +26,11 @@ from fastapi import Depends, Request
 
 from common.config import get_settings
 from common.models import CatalogSource
+
+if TYPE_CHECKING:
+    from adapters.youtube.channel_resolver import ResolvedChannel
+
+ChannelResolver = Callable[[str, str], "ResolvedChannel"]
 
 _log = structlog.get_logger(__name__)
 
@@ -112,3 +117,14 @@ def get_catalog() -> CatalogSource:
         timeout=BACKFILL_LIST_TIMEOUT_SEC,
         cookie_file=get_settings().YTDLP_COOKIE_FILE,
     )
+
+
+def get_channel_resolver() -> ChannelResolver:
+    """The ``@handle``/``/c/``/``/user/`` resolver for ``POST /channels`` (#81).
+
+    Imported here, like ``get_catalog``, so importing the app loads no adapter.
+    Tests override this dependency.
+    """
+    from adapters.youtube.channel_resolver import resolve_channel
+
+    return resolve_channel

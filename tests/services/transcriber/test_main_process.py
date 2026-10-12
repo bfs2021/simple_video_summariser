@@ -235,6 +235,8 @@ def test_a_job_left_by_kill_9_is_reaped_and_finished_by_another_worker(
     age_heartbeat(db, job_id)
     assert reap(db) == 1
     assert job_row(db, job_id)[0] == "pending"
+    # The reap backs the job off (#87); expire that backoff without sleeping.
+    db.execute("UPDATE jobs SET run_after = now() - interval '1 second' WHERE id = %s", (job_id,))
 
     rescuer = replica_factory("instant")
     started_id, locked_by = rescuer.wait_started()

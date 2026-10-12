@@ -226,3 +226,13 @@ def get_channel_title(conn: psycopg.Connection[Any], channel_id: str) -> str | N
     if row is None or not row[0]:
         return None
     return str(row[0])
+
+
+def fill_channel_title(conn: psycopg.Connection[Any], channel_id: str, title: str | None) -> None:
+    """Set ``title`` on a channel whose title is NULL; a title already set is kept (#81)."""
+    if title is None:
+        return
+    conn.execute(
+        "UPDATE channels SET title = %(title)s WHERE channel_id = %(id)s AND title IS NULL",
+        {"id": channel_id, "title": title},
+    )

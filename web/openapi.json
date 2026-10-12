@@ -924,6 +924,17 @@
             "format": "date-time",
             "title": "Monitor From",
             "type": "string"
+          },
+          "resolved_from": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolved From"
           }
         },
         "required": [

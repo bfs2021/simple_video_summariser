@@ -13,7 +13,8 @@ Only video hosts are accepted; ``music.youtube.com`` is rejected on purpose
 from __future__ import annotations
 
 import re
-from urllib.parse import SplitResult, urlsplit
+from dataclasses import dataclass
+from urllib.parse import SplitResult, unquote, urlsplit
 
 # ``UC`` plus 22 characters, 24 in all. Always use ``fullmatch``: unlike
 # ``$``, it never accepts a trailing newline.
@@ -171,3 +172,82 @@ def _split_url(ref: str, shown: str, *, what: str) -> SplitResult:
         return urlsplit(url)
     except ValueError:
         raise ValueError(f"not a YouTube {what}: {shown}") from None
+
+
+_NAME_TABS = frozenset({"videos", "featured", "streams", "shorts"})
+_NAME_KINDS = frozenset({"c", "user"})
+_HANDLE_CHARS = (3, 30)
+_LEGACY_NAME_CHARS = (1, 100)
+_NAME_CHARS = re.compile(r"[\w.-]+")
+_NAME_REF_MESSAGE = "not a YouTube channel ID, @handle, /c/ or /user/ reference"
+
+
+@dataclass(frozen=True, slots=True)
+class NameRef:
+    """A channel named by ``@handle``, ``/c/<name>`` or ``/user/<name>`` (#81).
+
+    ``kind`` is ``handle``, ``c`` or ``user``. The name is not a channel ID, so
+    it needs a lookup before anything else uses it.
+    """
+
+    kind: str
+    name: str
+
+
+def parse_channel_input(text: str) -> str | NameRef:
+    """The ``UC...`` channel ID in ``text``, or the ``NameRef`` it names (#81).
+
+    Canonical input goes to ``parse_channel_ref`` unchanged, so it never reaches
+    the resolver. Otherwise ``text`` is a ``@handle``, or a ``/c/`` or ``/user/``
+    URL on the same hosts, with an optional trailing ``/``, one known tab (for
+    example ``/videos``) and a query, which are ignored. Names are percent-decoded
+    before the character check: a handle is 3-30 characters, a legacy name 1-100,
+    each of Unicode letters, digits, ``_``, ``-`` and ``.``.
+
+    Everything else raises ``ValueError`` with a fixed message that never echoes
+    the input.
+    """
+    try:
+        return parse_channel_ref(text)
+    except UnsupportedChannelRef:
+        return _parse_name_ref(text)
+
+
+def _parse_name_ref(text: str) -> NameRef:
+    raw = text if isinstance(text, str) else ""
+    if len(raw) > MAX_REF_CHARS:
+        raise ValueError(_NAME_REF_MESSAGE)
+    ref = raw.strip()
+    if not ref or _BAD_CHARS.search(ref):
+        raise ValueError(_NAME_REF_MESSAGE)
+    if ref.startswith("@"):
+        return _checked_name("handle", ref[1:])
+
+    try:
+        parts = _split_url(ref, "", what="channel reference")
+    except ValueError:
+        raise ValueError(_NAME_REF_MESSAGE) from None
+    if parts.netloc.lower() not in _HOSTS:
+        raise ValueError(_NAME_REF_MESSAGE)
+    segments = [unquote(s) for s in parts.path.split("/")[1:]]
+    if segments and segments[-1] == "":
+        segments.pop()
+    if not segments:
+        raise ValueError(_NAME_REF_MESSAGE)
+    head = segments[0]
+    if head.startswith("@"):
+        kind, name, rest = "handle", head[1:], segments[1:]
+    elif head in _NAME_KINDS and len(segments) >= 2:
+        kind, name, rest = head, segments[1], segments[2:]
+    else:
+        raise ValueError(_NAME_REF_MESSAGE)
+    if rest and not (len(rest) == 1 and rest[0] in _NAME_TABS):
+        raise ValueError(_NAME_REF_MESSAGE)
+    return _checked_name(kind, name)
+
+
+def _checked_name(kind: str, name: str) -> NameRef:
+    low, high = _HANDLE_CHARS if kind == "handle" else _LEGACY_NAME_CHARS
+    if not low <= len(name) <= high or _NAME_CHARS.fullmatch(name) is None:
+        raise ValueError(_NAME_REF_MESSAGE)
+    return NameRef(kind, name)

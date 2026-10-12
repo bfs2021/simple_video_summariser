@@ -784,7 +784,7 @@ separated per D13.
 | Method | Path | Notes |
 |---|---|---|
 | `POST` | `/videos` | body `{url}`; priority `+10`; returns job id |
-| `POST` | `/channels` | forward-only; sets `monitor_from` |
+| `POST` | `/channels` | forward-only; sets `monitor_from`. Accepts a channel ID, `youtube.com/channel/` URL, or `@handle`, `/c/` or `/user/` reference; a name is resolved synchronously with one bounded yt-dlp call (at most 20 s, #81, an exception to the no-processing rule in §1): `404` if it does not exist, `503` on timeout or rate limit, `502` on bad output |
 | `GET` | `/channels` | paginated channel list (id, title, active, video count), powers the Library channel filter |
 | `POST` | `/channels/{id}/backfill` | `{limit, dry_run}`; priority `-10` (D9b) |
 | `POST` | `/channels/{id}/backfill-requests` | `{limit <= 5000, dry_run}`; only records a request, the planner `channel_backfill` task runs it (#115); `409` while the channel has a pending or running one |

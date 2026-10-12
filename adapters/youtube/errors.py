@@ -59,6 +59,8 @@ _PERMANENT: list[tuple[re.Pattern[str], UnavailableReason]] = [
     # A channel's uploads playlist (UU...) that is missing. yt-dlp says the same
     # for a channel that does not exist and for a real one without uploads.
     (_rx(r"The playlist does not exist"), UnavailableReason.REMOVED),
+    # A @handle, /c/ or /user/ name that does not exist (#81).
+    (_rx(r"Unable to download API page: HTTP Error 404"), UnavailableReason.REMOVED),
     (_rx(r"Sign in to confirm your age"), UnavailableReason.AGEGATED),
     (_rx(r"Private video", r"members-only"), UnavailableReason.PRIVATE),
     (
