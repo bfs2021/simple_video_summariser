@@ -303,7 +303,12 @@ def build_registry(settings: Settings, connect: Connect) -> list[Task]:
         )
 
     def poll(conn: psycopg.Connection[Any]) -> int:
-        result = poll_channels(conn, YouTubeFeed(), PostgresQueue(conn, settings=settings))
+        result = poll_channels(
+            conn,
+            YouTubeFeed(),
+            PostgresQueue(conn, settings=settings),
+            skip_shorts=settings.SKIP_SHORTS,
+        )
         return result.jobs_enqueued
 
     catalog = YouTubeCatalog(timeout=RECONCILE_LIST_TIMEOUT_SEC)
