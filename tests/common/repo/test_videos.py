@@ -139,7 +139,7 @@ def test_upsert_video_strips_nul_from_title_and_description(conn: psycopg.Connec
     assert row == ("badtitle", "baddesc")
 
 
-@pytest.mark.parametrize("reason", ["removed", "private", "geoblocked", "agegated"])
+@pytest.mark.parametrize("reason", ["removed", "private", "geoblocked", "agegated", "short"])
 def test_mark_unavailable_accepts_each_valid_reason(
     conn: psycopg.Connection, reason: str
 ) -> None:
@@ -247,6 +247,33 @@ def test_insert_discovered_video_inserts_a_new_row(conn: psycopg.Connection) -> 
         None,
         None,
     )
+
+
+def test_insert_discovered_video_stores_the_given_unavailable_reason(
+    conn: psycopg.Connection,
+) -> None:
+    assert insert_discovered_video(conn, make_entry(), origin="rss", unavailable="short")
+
+    row = conn.execute("SELECT unavailable FROM videos").fetchone()
+    assert row == ("short",)
+
+
+def test_insert_discovered_video_leaves_unavailable_null_by_default(
+    conn: psycopg.Connection,
+) -> None:
+    insert_discovered_video(conn, make_entry(), origin="rss")
+
+    row = conn.execute("SELECT unavailable FROM videos").fetchone()
+    assert row == (None,)
+
+
+def test_insert_discovered_video_rejects_an_unknown_unavailable_reason(
+    conn: psycopg.Connection,
+) -> None:
+    with pytest.raises(ValueError):
+        insert_discovered_video(conn, make_entry(), origin="rss", unavailable="banned")
+
+    assert conn.execute("SELECT count(*) FROM videos").fetchone() == (0,)
 
 
 def test_insert_discovered_video_leaves_an_existing_row_untouched(

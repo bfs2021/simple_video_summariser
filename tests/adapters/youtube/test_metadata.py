@@ -190,6 +190,40 @@ def test_short() -> None:
     assert "en" in meta.auto_caption_langs
 
 
+# --- is_short (#80): yt-dlp's media_type, never the duration -----------------
+
+
+def test_the_short_fixture_is_a_short() -> None:
+    assert fetch_json(fixture_text("short")).is_short is True
+
+
+@pytest.mark.parametrize(
+    "name", ["manual_en", "auto_only", "no_captions", "non_english_translated_en", "upcoming_premiere"]
+)
+def test_every_other_fixture_is_not_a_short(name: str) -> None:
+    assert fetch_json(fixture_text(name)).is_short is False
+
+
+@pytest.mark.parametrize("media_type", [None, "", "livestream", "story", "SHORT"])
+def test_a_missing_null_or_other_media_type_is_not_a_short(media_type: object) -> None:
+    raw = fixture_dict("short") | {"media_type": media_type}
+    assert fetch_json(raw).is_short is False
+    raw.pop("media_type")
+    assert fetch_json(raw).is_short is False
+
+
+def test_a_32_second_video_labelled_video_is_not_a_short() -> None:
+    raw = fixture_dict("short") | {"media_type": "video"}
+    assert raw["duration"] == 32
+    assert fetch_json(raw).is_short is False
+
+
+def test_a_long_short_is_still_a_short() -> None:
+    raw = fixture_dict("manual_en") | {"media_type": "short", "duration": 179}
+    assert fetch_json(raw).is_short is True
+    assert fetch_json(raw | {"duration": 600}).is_short is True
+
+
 def test_upcoming_premiere() -> None:
     meta = fetch_json(fixture_text("upcoming_premiere"))
 

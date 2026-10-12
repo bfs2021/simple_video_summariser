@@ -92,6 +92,9 @@ def _parse(info: Any, video_id: str) -> VideoMeta:
         manual_subtitle_langs=_langs(info.get("subtitles")),
         auto_caption_langs=_langs(info.get("automatic_captions")),
         release_at=_from_timestamp(info.get("release_timestamp")),
+        # The duration says nothing: a 32 s video can be a normal upload and a
+        # Short can run 179 s or longer. Only yt-dlp's own label counts (#80).
+        is_short=info.get("media_type") == "short",
     )
 
 

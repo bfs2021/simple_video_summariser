@@ -12,6 +12,9 @@ failing channel, is recorded on that channel and never stops the others.
 Database connection errors are the exception: they propagate, and the
 planner loop (#38) handles the retry.
 
+With ``skip_shorts`` (``SKIP_SHORTS``, #80) a new Short is still recorded, but
+as ``unavailable = 'short'`` and with no job, so the next poll sees it as seen.
+
 Scheduling, the singleton guard and reconnecting belong to #38.
 """
 
@@ -24,11 +27,12 @@ from typing import Any
 
 import psycopg
 
-from common.errors import MAX_ERROR_BYTES
+from common.errors import MAX_ERROR_BYTES, UnavailableReason
 from common.models import Channel, FeedSource
 from common.queue import PRIORITY_NORMAL, JobQueue
 from common.repo.channels import list_active_channels, record_poll
 from common.repo.videos import insert_discovered_video
+from common.shorts import should_skip_short
 
 _logger = logging.getLogger(__name__)
 
@@ -42,22 +46,36 @@ class PollResult:
 
     ``videos_discovered`` counts inserted ``videos`` rows and ``jobs_enqueued``
     counts ``enqueue`` calls that returned an id (not the C1-deduped ones).
+    ``shorts_skipped`` counts the inserted rows that got no job because they
+    are Shorts (#80); they are in ``videos_discovered`` too.
     """
 
     channels_polled: int
     channels_failed: int
     videos_discovered: int
     jobs_enqueued: int
+    shorts_skipped: int = 0
 
 
 @dataclass
 class _Counts:
     discovered: int = 0
     enqueued: int = 0
+    shorts_skipped: int = 0
 
 
-def poll_channels(conn: psycopg.Connection[Any], feed: FeedSource, queue: JobQueue) -> PollResult:
-    """Poll every active channel's feed once."""
+def poll_channels(
+    conn: psycopg.Connection[Any],
+    feed: FeedSource,
+    queue: JobQueue,
+    *,
+    skip_shorts: bool = False,
+) -> PollResult:
+    """Poll every active channel's feed once.
+
+    ``skip_shorts`` is ``Settings.SKIP_SHORTS``: a new Short is recorded with
+    ``unavailable = 'short'`` and gets no ``ingest`` job.
+    """
     channels = list_active_channels(conn)
     conn.commit()  # end the read transaction; nothing may stay open across a fetch
     polled = failed = 0
@@ -65,7 +83,7 @@ def poll_channels(conn: psycopg.Connection[Any], feed: FeedSource, queue: JobQue
     for channel in channels:
         try:
             entries = feed.fetch(channel.channel_id)
-            _process_entries(conn, queue, channel, entries, counts)
+            _process_entries(conn, queue, channel, entries, counts, skip_shorts)
         except psycopg.OperationalError:
             raise
         except Exception as exc:
@@ -88,7 +106,7 @@ def poll_channels(conn: psycopg.Connection[Any], feed: FeedSource, queue: JobQue
             record_poll(conn, channel.channel_id)
             polled += 1
         conn.commit()
-    result = PollResult(polled, failed, counts.discovered, counts.enqueued)
+    result = PollResult(polled, failed, counts.discovered, counts.enqueued, counts.shorts_skipped)
     _logger.info(
         "planner.poll",
         extra={
@@ -96,6 +114,7 @@ def poll_channels(conn: psycopg.Connection[Any], feed: FeedSource, queue: JobQue
             "channels_failed": result.channels_failed,
             "videos_discovered": result.videos_discovered,
             "jobs_enqueued": result.jobs_enqueued,
+            "shorts_skipped": result.shorts_skipped,
         },
     )
     return result
@@ -107,6 +126,7 @@ def _process_entries(
     channel: Channel,
     entries: list[Any],
     counts: _Counts,
+    skip_shorts: bool,
 ) -> None:
     seen: set[str] = set()
     all_new = True
@@ -137,15 +157,28 @@ def _process_entries(
         if published_at <= channel.monitor_from:
             all_new = False
             continue
+        skip = should_skip_short(is_short=entry.is_short, origin=_ORIGIN, skip_shorts=skip_shorts)
+        job_id = None
         with conn.transaction():
-            inserted = insert_discovered_video(conn, entry, _ORIGIN)
-            if inserted:
-                job_id = queue.enqueue("ingest", entry.video_id, priority=_INGEST_PRIORITY)
+            if skip:
+                inserted = insert_discovered_video(
+                    conn, entry, _ORIGIN, unavailable=UnavailableReason.SHORT.value
+                )
+            else:
+                inserted = insert_discovered_video(conn, entry, _ORIGIN)
+                if inserted:
+                    job_id = queue.enqueue("ingest", entry.video_id, priority=_INGEST_PRIORITY)
         if not inserted:
             all_new = False
             continue
         counts.discovered += 1
-        if job_id is not None:
+        if skip:
+            counts.shorts_skipped += 1
+            _logger.info(
+                "planner.poll.short_skipped",
+                extra={"channel_id": channel.channel_id, "video_id": entry.video_id},
+            )
+        elif job_id is not None:
             counts.enqueued += 1
         if oldest is None or published_at < oldest:
             oldest = published_at

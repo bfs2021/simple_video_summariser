@@ -389,7 +389,7 @@ CREATE TABLE videos (
     published_at  TIMESTAMPTZ,
     description   TEXT,
     origin        TEXT NOT NULL DEFAULT 'adhoc',   -- adhoc | rss | backfill
-    unavailable   TEXT,                            -- removed | private | geoblocked | agegated
+    unavailable   TEXT,                            -- removed | private | geoblocked | agegated | short
     discovered_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX videos_channel_pub_idx ON videos (channel_id, published_at DESC);
@@ -634,6 +634,41 @@ or already past and the video is still upcoming); `is_live` rechecks in 2 hours
 ordinary video. When `UPCOMING_MAX_WAIT_DAYS` have passed since
 `videos.discovered_at` the job dead-letters as `PERMANENT_SOURCE` with the
 reason in `last_error`; `videos.unavailable` is left alone.
+
+**Shorts policy (#80).** Owner decision (recorded on the issue): **include
+Shorts by default**, with the choice later promoted to a per-channel setting.
+Until per-channel settings exist there is one global flag, `SKIP_SHORTS`
+(default `0`, Shorts are processed exactly as before). With `SKIP_SHORTS=1`:
+
+- It applies to origins `rss` and `backfill`, never to `adhoc`: a video a human
+  submits is always processed. The decision is one pure function,
+  `common.shorts.should_skip_short(is_short, origin, skip_shorts)`; no other
+  code compares the three.
+- **Detection uses a signal YouTube supplies, never a heuristic.** In the RSS
+  feed an entry is a Short when its `<link rel="alternate">` path is
+  `/shorts/<video_id>` (`FeedEntry.is_short`); in yt-dlp metadata when
+  `media_type == "short"` (`VideoMeta.is_short`). Title, description, duration
+  and the shape of the video ID are not used: IDs are 11 random characters from
+  `[A-Za-z0-9_-]` with no marker, a leading `-` or `_` is common to all videos,
+  and a Short can be 179 s or longer while a 32 s upload can be a normal video.
+  Detection fails open: a missing, malformed or mismatching link gives
+  `is_short = false` and the entry is kept.
+- **Poll** (`services/planner/poll.py`): a new Short is still inserted, in the
+  same transaction as it would be, with `unavailable = 'short'` and no
+  `ingest` job, so the next poll sees it as seen. Logged as
+  `planner.poll.short_skipped`; `PollResult.shorts_skipped` counts them.
+- **Ingest** (`services/transcriber/ingest.py`): after the metadata fetch and
+  `upsert_video`, and before any subtitle call, a Short is recorded as
+  `unavailable = 'short'` and the job finishes `done` (INFO
+  `ingest skipped: short`); nothing is enqueued. This is what covers backfill and
+  RSS entries the feed link did not flag. A skip is a policy outcome, never a
+  `PermanentSourceError`. An `adhoc` ingest of a video marked `short` clears
+  the mark and processes it. Turning the flag off later does not re-queue
+  videos already skipped.
+- **Wiring.** `poll_channels(conn, feed, queue, skip_shorts=False)` takes the
+  flag as an argument; `services/planner/main.py` has to pass
+  `settings.SKIP_SHORTS` to it. Until it does, the poll records and queues
+  every entry and ingest is the only enforcement point.
 
 **Auto-caption policy.** D2 ranks `youtube_auto` *below* Whisper. Concretely
 `ingest` does not take auto-captions when Whisper is available; it enqueues
@@ -952,6 +987,7 @@ than reading `os.environ` directly.
 | `WHISPER_THREADS` | `0` (auto) | transcriber |
 | `PREFER_WHISPER` | `0` | transcriber |
 | `AUTO_CAPTION_FALLBACK` | `1` | transcriber, planner |
+| `SKIP_SHORTS` | `0` | planner (poll), transcriber (ingest): `1` records YouTube Shorts found by RSS polling or backfill as `unavailable = 'short'` and never processes them; `0` (default, owner decision on #80) includes them. Never applies to `adhoc` submissions. A global flag for now; the owner intends to promote it to a per-channel choice once per-channel settings exist (§7.1, Shorts policy) |
 | `AUDIO_KEEP` / `AUDIO_TTL_DAYS` / `AUDIO_MAX_GB` | `1` / `30` / `20` | transcriber, planner |
 | `AUDIO_MIN_FREE_GB` / `AUDIO_MIN_FREE_PCT` | `2` / `5` | planner: free-space floor on the `AUDIO_DIR` volume (#105). When free space is below the larger of the two, audio retention evicts the oldest audio beyond what `AUDIO_MAX_GB` would, never a running job's. `0` for either disables that half; `AUDIO_MIN_FREE_PCT` is `0 <= x < 100`. A floor at or above the volume size evicts nothing and logs `planner.audio_retention.free_space_floor_invalid` |
 | `POLL_INTERVAL_SEC` | `3600` | planner |

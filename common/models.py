@@ -34,6 +34,8 @@ class VideoMeta:
     #: The scheduled start of a premiere or live stream (yt-dlp's
     #: ``release_timestamp``), aware UTC; ``None`` when unknown (#65).
     release_at: datetime | None = None
+    #: yt-dlp's ``media_type == "short"``; never inferred from the duration (#80).
+    is_short: bool = False
 
 
 class MetadataSource(Protocol):
@@ -53,6 +55,8 @@ class FeedEntry:
     channel_id: str
     title: str
     published_at: datetime
+    #: The entry's alternate link has the path ``/shorts/<video_id>`` (#80).
+    is_short: bool = False
 
 
 class ChannelFeed(Protocol):

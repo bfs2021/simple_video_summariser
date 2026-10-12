@@ -10,6 +10,7 @@ import http.client
 import io
 import logging
 import pathlib
+import re
 import urllib.error
 import urllib.request
 from datetime import UTC, datetime, timedelta
@@ -49,6 +50,7 @@ def entry_xml(
     channel: str | None = CHANNEL,
     title: str | None = "A title",
     published: str | None = "2026-08-04T15:00:04+00:00",
+    links: tuple[str, ...] = (),
 ) -> str:
     parts = ["<entry>"]
     if video_id is not None:
@@ -59,6 +61,7 @@ def entry_xml(
         parts.append(f"<title>{title}</title>")
     if published is not None:
         parts.append(f"<published>{published}</published>")
+    parts.extend(links)
     parts.append("<media:group><media:title>other</media:title></media:group>")
     parts.append("</entry>")
     return "".join(parts)
@@ -413,12 +416,26 @@ def test_real_verge_feed_has_shorts_and_decodes_entities_in_titles() -> None:
         VERGE,
         "Would you want to know if Ghostface is at your door?",
         datetime(2026, 9, 26, 14, 0, 6, tzinfo=UTC),
+        is_short=True,
     )
     by_id = {e.video_id: e for e in entries}
     assert by_id["ol9e_269eu4"].title == 'Mark Zuckerberg shows off "Muse Charm"'
     # Shorts are not filtered out: the feed marks them only by their link.
     assert b"/shorts/9Y5BpmB8R8I" in fixture("the_verge.xml")
     assert "9Y5BpmB8R8I" in by_id
+
+
+def test_real_verge_feed_marks_exactly_the_shorts_by_their_link() -> None:
+    entries = parse_feed(fixture("the_verge.xml"), VERGE)
+    shorts = {e.video_id for e in entries if e.is_short}
+    assert len(shorts) == 13
+    linked = {m.decode() for m in re.findall(rb"/shorts/([A-Za-z0-9_-]{11})", fixture("the_verge.xml"))}
+    assert shorts == linked
+    assert len(entries) - len(shorts) == 2
+
+
+def test_real_nasa_feed_has_no_shorts() -> None:
+    assert not any(e.is_short for e in parse_feed(fixture("nasa.xml"), NASA))
 
 
 def test_real_feed_is_rejected_for_a_different_requested_channel() -> None:
@@ -640,3 +657,64 @@ def test_structured_feeds_with_arbitrary_text_never_escape_tool_failure(
     ids = [e.video_id for e in result]
     assert len(ids) == len(set(ids))
     assert all(is_video_id(i) for i in ids)
+
+
+# --- shorts (#80) ------------------------------------------------------------
+
+
+def _alt(href: str) -> str:
+    return f'<link rel="alternate" href="{href}"/>'
+
+
+VID = "aBcD3fGh1Jk"
+
+
+@pytest.mark.parametrize(
+    ("links", "expected"),
+    [
+        ((_alt(f"https://www.youtube.com/shorts/{VID}"),), True),
+        ((_alt(f"https://youtube.com/shorts/{VID}"),), True),
+        ((_alt(f"https://www.youtube.com/watch?v={VID}"),), False),
+        ((), False),
+        ((_alt(""),), False),
+        (('<link rel="alternate"/>',), False),
+        ((_alt("http://[bad"),), False),
+        ((_alt("https://www.youtube.com/shorts/zzzzzzzzzzz"),), False),
+        ((_alt(f"https://www.youtube.com/shorts/{VID}/extra"),), False),
+        ((_alt(f"https://example.com/shorts/{VID}"),), False),
+        ((f'<link rel="self" href="https://www.youtube.com/shorts/{VID}"/>',), False),
+        (
+            (
+                _alt(f"https://www.youtube.com/watch?v={VID}"),
+                _alt(f"https://www.youtube.com/shorts/{VID}"),
+            ),
+            True,
+        ),
+    ],
+    ids=[
+        "shorts_link",
+        "bare_host",
+        "watch_link",
+        "no_link",
+        "empty_href",
+        "no_href",
+        "unparseable_href",
+        "other_video_id",
+        "extra_path",
+        "other_host",
+        "not_alternate",
+        "second_link_is_shorts",
+    ],
+)
+def test_is_short_is_set_only_by_a_shorts_alternate_link_and_fails_open(
+    links: tuple[str, ...], expected: bool
+) -> None:
+    entries = parse(feed_xml(entry_xml(VID, links=links)))
+
+    assert [e.video_id for e in entries] == [VID]  # never dropped
+    assert entries[0].is_short is expected
+
+
+def test_the_title_does_not_make_an_entry_a_short() -> None:
+    entries = parse(feed_xml(entry_xml(VID, title="#Shorts everything")))
+    assert entries[0].is_short is False

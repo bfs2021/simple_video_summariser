@@ -20,7 +20,7 @@ from common.models import (
 )
 from common.repo._hygiene import clean_text
 
-_UNAVAILABLE_REASONS = {"removed", "private", "geoblocked", "agegated"}
+_UNAVAILABLE_REASONS = {"removed", "private", "geoblocked", "agegated", "short"}
 
 
 def upsert_video(conn: psycopg.Connection[Any], meta: VideoMeta, origin: str) -> None:
@@ -81,8 +81,8 @@ def _check_reason(reason: str) -> None:
 def mark_unavailable(conn: psycopg.Connection[Any], video_id: str, reason: str) -> None:
     """Record why ``video_id`` can no longer be fetched.
 
-    ``reason`` must be one of ``removed``, ``private``, ``geoblocked`` or
-    ``agegated``; anything else raises ``ValueError``.
+    ``reason`` must be one of ``removed``, ``private``, ``geoblocked``,
+    ``agegated`` or ``short``; anything else raises ``ValueError``.
     """
     _check_reason(reason)
     conn.execute(
@@ -128,7 +128,13 @@ def record_unavailable(
     )
 
 
-def insert_discovered_video(conn: psycopg.Connection[Any], entry: FeedEntry, origin: str) -> bool:
+def insert_discovered_video(
+    conn: psycopg.Connection[Any],
+    entry: FeedEntry,
+    origin: str,
+    *,
+    unavailable: str | None = None,
+) -> bool:
     """Insert the video ``entry`` lists, unless it already has a row.
 
     Returns whether a row was inserted. An existing row is left exactly as it is
@@ -137,7 +143,11 @@ def insert_discovered_video(conn: psycopg.Connection[Any], entry: FeedEntry, ori
     here: it needs full metadata and overwrites ``title`` and ``description``.
 
     A missing ``channels`` row is created inactive, as ``upsert_video`` does.
+    ``unavailable``, when given, is stored on the new row (the poll records a
+    skipped Short as ``short``, #80) and is validated like ``mark_unavailable``.
     """
+    if unavailable is not None:
+        _check_reason(unavailable)
     conn.execute(
         """
         INSERT INTO channels (channel_id, active)
@@ -148,11 +158,18 @@ def insert_discovered_video(conn: psycopg.Connection[Any], entry: FeedEntry, ori
     )
     cur = conn.execute(
         """
-        INSERT INTO videos (video_id, channel_id, title, published_at, origin)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO videos (video_id, channel_id, title, published_at, origin, unavailable)
+        VALUES (%s, %s, %s, %s, %s, %s)
         ON CONFLICT (video_id) DO NOTHING
         """,
-        (entry.video_id, entry.channel_id, clean_text(entry.title), entry.published_at, origin),
+        (
+            entry.video_id,
+            entry.channel_id,
+            clean_text(entry.title),
+            entry.published_at,
+            origin,
+            unavailable,
+        ),
     )
     return cur.rowcount == 1
 

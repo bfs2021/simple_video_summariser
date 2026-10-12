@@ -95,6 +95,7 @@ services:
       AUDIO_TTL_DAYS: ${AUDIO_TTL_DAYS:-30}
       AUDIO_MAX_GB: ${AUDIO_MAX_GB:-20}
       AUDIO_KEEP: ${AUDIO_KEEP:-1}
+      SKIP_SHORTS: ${SKIP_SHORTS:-0}
     depends_on:
       migrate: {condition: service_completed_successfully}
     volumes: [audio:/data/audio]        # needs it to unlink purged files
@@ -161,6 +162,7 @@ services:
       WHISPER_THREADS: ${WHISPER_THREADS:-3}
       PREFER_WHISPER: ${PREFER_WHISPER:-0}
       AUTO_CAPTION_FALLBACK: ${AUTO_CAPTION_FALLBACK:-1}
+      SKIP_SHORTS: ${SKIP_SHORTS:-0}
       MAX_ATTEMPTS_TRANSCRIBE: ${MAX_ATTEMPTS_TRANSCRIBE:-2}
       AUDIO_KEEP: ${AUDIO_KEEP:-1}
       AUDIO_MAX_GB: ${AUDIO_MAX_GB:-20}

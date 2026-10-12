@@ -110,6 +110,10 @@ class Settings(BaseSettings):
     WHISPER_THREADS: NonNegativeInt = 0  # 0 = auto
     PREFER_WHISPER: bool = False
     AUTO_CAPTION_FALLBACK: bool = True
+    # Skip YouTube Shorts found by RSS polling or channel backfill (#80). Off:
+    # Shorts are processed like any video. A video a human submits (`adhoc`)
+    # is never skipped. Read by the planner (poll) and the transcriber (ingest).
+    SKIP_SHORTS: bool = False
 
     AUDIO_DIR: Path = Path("/data/audio")
     AUDIO_KEEP: bool = True

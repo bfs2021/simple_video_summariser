@@ -12,11 +12,13 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import psycopg
 import pytest
 
+from adapters.youtube.feed import parse_feed
 from common.errors import MAX_ERROR_BYTES
 from common.models import Channel, FeedEntry, FeedSource
 from common.queue import PostgresQueue
@@ -27,6 +29,8 @@ from services.planner.poll import PollResult, poll_channels
 CUTOFF = datetime(2026, 3, 1, 12, 0, tzinfo=UTC)
 LATER = CUTOFF + timedelta(seconds=1)
 EARLIER = CUTOFF - timedelta(seconds=1)
+VERGE = "UCddiUEpeqJcYeBxX1IVBKvQ"
+FEEDS = Path(__file__).resolve().parents[2] / "adapters" / "youtube" / "fixtures" / "feed"
 
 
 def _entry(
@@ -34,12 +38,14 @@ def _entry(
     channel_id: str = "UCa",
     published_at: datetime | None = LATER,
     title: str = "A title",
+    is_short: bool = False,
 ) -> FeedEntry:
     return FeedEntry(
         video_id=video_id,
         channel_id=channel_id,
         title=title,
         published_at=published_at,  # type: ignore[arg-type]
+        is_short=is_short,
     )
 
 
@@ -114,17 +120,21 @@ class FakeRepo:
         self.channels = channels
         self.known = known or set()
         self.inserted: list[tuple[FeedEntry, str]] = []
+        self.unavailable: dict[str, str | None] = {}
         self.polls: list[tuple[str, str | None]] = []
         self.health: dict[str, PollHealth] = {}
 
     def list_active_channels(self, conn: Any) -> list[Channel]:
         return list(self.channels)
 
-    def insert_discovered_video(self, conn: Any, entry: FeedEntry, origin: str) -> bool:
+    def insert_discovered_video(
+        self, conn: Any, entry: FeedEntry, origin: str, *, unavailable: str | None = None
+    ) -> bool:
         if entry.video_id in self.known:
             return False
         self.known.add(entry.video_id)
         self.inserted.append((entry, origin))
+        self.unavailable[entry.video_id] = unavailable
         return True
 
     def record_poll(
@@ -154,9 +164,11 @@ def make_repo(monkeypatch: pytest.MonkeyPatch) -> Any:
     return install
 
 
-def _run(feed: FakeFeed, queue: FakeQueue | None = None) -> tuple[PollResult, FakeQueue]:
+def _run(
+    feed: FakeFeed, queue: FakeQueue | None = None, *, skip_shorts: bool = False
+) -> tuple[PollResult, FakeQueue]:
     queue = queue or FakeQueue()
-    result = poll_channels(FakeConn(), feed, queue)  # type: ignore[arg-type]
+    result = poll_channels(FakeConn(), feed, queue, skip_shorts=skip_shorts)  # type: ignore[arg-type]
     return result, queue
 
 
@@ -541,6 +553,106 @@ def test_one_info_line_carries_the_four_numbers(
     ) == (1, 1, 1, 1)
 
 
+# -- Shorts policy (#80) -----------------------------------------------------
+
+
+def test_a_short_is_recorded_as_unavailable_and_not_queued_when_skip_shorts_is_set(
+    make_repo: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    repo = make_repo([_channel()])
+    caplog.set_level(logging.INFO)
+
+    result, queue = _run(FakeFeed({"UCa": [_entry(is_short=True)]}), skip_shorts=True)
+
+    assert [(e.video_id, o) for e, o in repo.inserted] == [("vid00000001", "rss")]
+    assert repo.unavailable == {"vid00000001": "short"}
+    assert queue.calls == []
+    assert result == PollResult(1, 0, 1, 0, 1)
+    skipped = [r for r in caplog.records if r.getMessage() == "planner.poll.short_skipped"]
+    assert len(skipped) == 1
+    assert skipped[0].levelno == logging.INFO
+    assert (getattr(skipped[0], "channel_id", None), getattr(skipped[0], "video_id", None)) == (
+        "UCa",
+        "vid00000001",
+    )
+    summary = [r for r in caplog.records if r.getMessage() == "planner.poll"]
+    assert getattr(summary[0], "shorts_skipped", None) == 1
+
+
+def test_a_normal_video_is_queued_when_skip_shorts_is_set(make_repo: Any) -> None:
+    repo = make_repo([_channel()])
+
+    result, queue = _run(FakeFeed({"UCa": [_entry(is_short=False)]}), skip_shorts=True)
+
+    assert repo.unavailable == {"vid00000001": None}
+    assert queue.calls == [("ingest", "vid00000001", {"priority": 0})]
+    assert result == PollResult(1, 0, 1, 1, 0)
+
+
+@pytest.mark.parametrize("is_short", [False, True])
+def test_with_skip_shorts_off_every_entry_is_queued_shorts_included(
+    make_repo: Any, is_short: bool
+) -> None:
+    repo = make_repo([_channel()])
+
+    result, queue = _run(FakeFeed({"UCa": [_entry(is_short=is_short)]}), skip_shorts=False)
+
+    assert repo.unavailable == {"vid00000001": None}
+    assert queue.calls == [("ingest", "vid00000001", {"priority": 0})]
+    assert result == PollResult(1, 0, 1, 1, 0)
+
+
+def test_skip_shorts_defaults_to_off(make_repo: Any) -> None:
+    make_repo([_channel()])
+    queue = FakeQueue()
+
+    result = poll_channels(FakeConn(), FakeFeed({"UCa": [_entry(is_short=True)]}), queue)  # type: ignore[arg-type]
+
+    assert result.shorts_skipped == 0
+    assert len(queue.calls) == 1
+
+
+def test_a_short_that_already_has_a_row_is_not_counted_as_skipped(make_repo: Any) -> None:
+    make_repo([_channel()], known={"vid00000001"})
+
+    result, queue = _run(FakeFeed({"UCa": [_entry(is_short=True)]}), skip_shorts=True)
+
+    assert result == PollResult(1, 0, 0, 0, 0)
+    assert queue.calls == []
+
+
+def test_the_recorded_verge_feed_queues_every_entry_with_skip_shorts_off_and_only_normal_ones_with_it_on(
+    make_repo: Any,
+) -> None:
+    entries = parse_feed((FEEDS / "the_verge.xml").read_bytes(), VERGE)
+    assert all(e.published_at > CUTOFF for e in entries)
+    shorts = {e.video_id for e in entries if e.is_short}
+    assert len(shorts) == 13
+
+    make_repo([_channel(VERGE, monitor_from=CUTOFF)])
+    _, off_queue = _run(FakeFeed({VERGE: entries}), skip_shorts=False)
+    make_repo([_channel(VERGE, monitor_from=CUTOFF)])
+    on_result, on_queue = _run(FakeFeed({VERGE: entries}), skip_shorts=True)
+
+    assert {call[1] for call in off_queue.calls} == {e.video_id for e in entries}
+    assert {call[1] for call in on_queue.calls} == {e.video_id for e in entries} - shorts
+    assert on_result.shorts_skipped == 13
+    assert on_result.videos_discovered == 15
+    assert on_result.jobs_enqueued == 2
+
+
+def test_a_skipped_short_counts_as_new_for_the_feed_gap_check(
+    make_repo: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    make_repo([_channel(monitor_from=CUTOFF, last_polled=CUTOFF)])
+    caplog.set_level(logging.WARNING)
+    late = CUTOFF + timedelta(days=2)
+
+    _run(FakeFeed({"UCa": [_entry(published_at=late, is_short=True)]}), skip_shorts=True)
+
+    assert len(_gap_warnings(caplog)) == 1
+
+
 # -- integration -------------------------------------------------------------
 
 
@@ -796,3 +908,36 @@ def test_inactive_channel_columns_do_not_change(
     poll_channels(conn, FakeFeed({"UCoff": ValueError("x")}), queue)
 
     assert _health(conn)[:2] == (None, 0)
+
+
+@pytest.mark.integration
+def test_a_short_gets_an_unavailable_row_and_no_job_and_is_not_seen_as_new_again(
+    conn: psycopg.Connection[Any], queue: PostgresQueue
+) -> None:
+    _add_channel(conn)
+    feed = FakeFeed({"UCa": [_entry("vid00000001", is_short=True), _entry("vid00000002")]})
+
+    first = poll_channels(conn, feed, queue, skip_shorts=True)
+    second = poll_channels(conn, feed, queue, skip_shorts=True)
+
+    assert first == PollResult(1, 0, 2, 1, 1)
+    assert second == PollResult(1, 0, 0, 0, 0)
+    conn.commit()
+    assert conn.execute(
+        "SELECT video_id, origin, unavailable FROM videos ORDER BY video_id"
+    ).fetchall() == [("vid00000001", "rss", "short"), ("vid00000002", "rss", None)]
+    assert [(j[0], j[1]) for j in _jobs(conn)] == [("vid00000002", "ingest")]
+
+
+@pytest.mark.integration
+def test_with_skip_shorts_off_a_short_is_queued_like_any_video(
+    conn: psycopg.Connection[Any], queue: PostgresQueue
+) -> None:
+    _add_channel(conn)
+
+    result = poll_channels(conn, FakeFeed({"UCa": [_entry(is_short=True)]}), queue)
+
+    assert result == PollResult(1, 0, 1, 1, 0)
+    conn.commit()
+    assert conn.execute("SELECT unavailable FROM videos").fetchall() == [(None,)]
+    assert [(j[0], j[1]) for j in _jobs(conn)] == [("vid00000001", "ingest")]

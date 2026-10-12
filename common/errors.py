@@ -46,6 +46,9 @@ class UnavailableReason(StrEnum):
     PRIVATE = "private"
     GEOBLOCKED = "geoblocked"
     AGEGATED = "agegated"
+    #: A policy skip (SKIP_SHORTS, #80), not a source failure: never raised as a
+    #: ``PermanentSourceError``.
+    SHORT = "short"
 
 
 @dataclass(frozen=True, slots=True)

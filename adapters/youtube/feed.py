@@ -24,6 +24,7 @@ import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit
 from xml.parsers import expat
 
 from common.errors import (
@@ -44,6 +45,8 @@ _USER_AGENT = "simple-video-summary/1.0 (channel feed poller)"
 
 _ATOM = "{http://www.w3.org/2005/Atom}"
 _YT = "{http://www.youtube.com/xml/schemas/2015}"
+
+_YOUTUBE_HOSTS = frozenset({"www.youtube.com", "youtube.com", "m.youtube.com"})
 
 _SECONDS = re.compile(r"[0-9]+", re.ASCII)
 
@@ -202,7 +205,32 @@ def _parse_entry(
         return None, f"video {video_id}: missing or unparseable published time"
 
     title = (element.findtext(f"{_ATOM}title") or "").strip()
-    return FeedEntry(video_id, channel_id, title, published_at), ""
+    return (
+        FeedEntry(
+            video_id, channel_id, title, published_at, is_short=_is_short_link(element, video_id)
+        ),
+        "",
+    )
+
+
+def _is_short_link(element: ET.Element, video_id: str) -> bool:
+    """Whether the entry's ``<link rel="alternate">`` is ``/shorts/<video_id>`` (#80).
+
+    Fails open: no such link, an unparseable ``href``, another host, another
+    path or a different video ID all give ``False``, so an entry is never
+    dropped for a link that is not clearly a Short's.
+    """
+    for link in element.findall(f"{_ATOM}link"):
+        if link.get("rel") != "alternate":
+            continue
+        try:
+            parts = urlsplit((link.get("href") or "").strip())
+            host = parts.hostname
+        except ValueError:
+            continue
+        if host in _YOUTUBE_HOSTS and parts.path == f"/shorts/{video_id}":
+            return True
+    return False
 
 
 def _parse_published(text: str | None) -> datetime | None:

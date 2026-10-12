@@ -128,6 +128,7 @@ def test_defaults_match_the_architecture_table() -> None:
     assert s.WHISPER_THREADS == 0
     assert s.PREFER_WHISPER is False
     assert s.AUTO_CAPTION_FALLBACK is True
+    assert s.SKIP_SHORTS is False  # owner decision on #80: include Shorts
     assert s.AUDIO_KEEP is True
     assert s.AUDIO_TTL_DAYS == 30
     assert s.AUDIO_MAX_GB == 20
@@ -164,7 +165,7 @@ def test_every_architecture_variable_is_a_field_except_transcriber_cpus() -> Non
         "ALERT_WEBHOOK_URL", "ALERT_WEBHOOK_FORMAT", "ALERT_MIN_INTERVAL_SEC",
         "UPCOMING_MAX_WAIT_DAYS", "RECONCILE_INTERVAL_SEC", "AUDIO_MIN_FREE_GB", "AUDIO_MIN_FREE_PCT",
         "SWEEP_MAX_JOBS_ANTHROPIC", "BACKFILL_INTERVAL_SEC",
-        "DB_POOL_MIN_SIZE", "DB_POOL_MAX_SIZE", "DB_POOL_TIMEOUT_SEC",
+        "DB_POOL_MIN_SIZE", "DB_POOL_MAX_SIZE", "DB_POOL_TIMEOUT_SEC", "SKIP_SHORTS",
     }  # fmt: skip
 
     assert set(Settings.model_fields) == expected
@@ -435,6 +436,7 @@ def test_log_format_rejects_anything_else(value: str) -> None:
 BOOL_FLAGS = [
     "PREFER_WHISPER",
     "AUTO_CAPTION_FALLBACK",
+    "SKIP_SHORTS",
     "AUDIO_KEEP",
     "ANTHROPIC_BATCH",
 ]

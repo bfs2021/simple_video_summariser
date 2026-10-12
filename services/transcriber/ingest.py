@@ -34,6 +34,7 @@ from common.repo.videos import (
     record_unavailable,
     upsert_video,
 )
+from common.shorts import should_skip_short
 from common.worker import JobContext
 from common.youtube_refs import VIDEO_ID_PATTERN
 from services.transcriber.persist import enqueue_analyze, save_transcript_with_chunks
@@ -176,6 +177,16 @@ def make_ingest_handler(
             )
 
         upsert_video(conn, meta, origin)
+        # A policy outcome, not a source failure: the job finishes done (#80).
+        # Only automatic origins are skipped; a human's `adhoc` submission
+        # clears an earlier skip and is processed.
+        if should_skip_short(
+            is_short=meta.is_short, origin=origin, skip_shorts=settings.SKIP_SHORTS
+        ):
+            record_unavailable(conn, video_id, UnavailableReason.SHORT.value, origin=origin)
+            conn.commit()
+            ctx.logger.info("ingest skipped: short", video_id=video_id, origin=origin)
+            return
         clear_unavailable(conn, video_id)
         conn.commit()
 
