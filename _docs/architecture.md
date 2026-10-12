@@ -257,6 +257,13 @@ class JobQueue(Protocol):
     def heartbeat(self, job_id: int) -> None: ...
 ```
 
+`ChunkBatchSummarizer` (#88) is an optional extension: it adds
+`analyze_chunks(chunks, roster, meta) -> list[ChunkAnalysis]`, one analysis per
+chunk in input order. Only the Anthropic adapter implements it, because one
+Message Batch per episode is what it saves; a local model gains nothing from
+it, and the handler's per-chunk loop with its between-chunk cancellation checks
+stays as it is for every other summarizer.
+
 `Summarizer` has three methods rather than one because D4b's roster pass and
 D9's reduce step are distinct LLM calls with distinct prompts and distinct
 failure modes. Collapsing them into one `summarize()` would hide that a roster
@@ -729,6 +736,8 @@ proceeding. This makes a config change safe rather than silently inconsistent.
 3. roster pass:  derive_roster(meta, first ~10 min of text)      (D4b)
 4. map:  for each chunk → analyze_chunk(chunk, roster, meta)
          roster injected as a CLOSED set; model emits 'unknown' or a roster name
+         a batch-capable summarizer (ChunkBatchSummarizer, §3) takes every chunk
+         in one analyze_chunks call instead, so the map is one batch (#88)
 5. reduce: single-chunk → partial tldr; multi-chunk → reduce(partials)
 6. dedupe claims/quotes across overlap seams (normalized-text key)
 7. persist analysis + children in ONE transaction

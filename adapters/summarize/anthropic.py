@@ -24,7 +24,7 @@ import re
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
 from typing import Any
@@ -32,8 +32,10 @@ from urllib.parse import urlsplit
 
 from adapters.summarize.ollama import _partials_json
 from adapters.summarize.prompt_loader import PromptSet, format_roster, load_prompt_set
-from adapters.summarize.repair import Message, call_with_repair
+from adapters.summarize.repair import Message, call_with_repair, cap_feedback
 from adapters.summarize.schema import (
+    MAX_ERROR_CHARS,
+    MAX_FEEDBACK_CHARS,
     SchemaError,
     parse_chunk_analysis,
     parse_roster,
@@ -155,6 +157,31 @@ def _count(usage: Mapping[str, Any], field: str) -> int | None:
     return None
 
 
+@dataclass(frozen=True, slots=True)
+class _Job:
+    """One chunk's request in a batch round: where it goes, what it sends, how it parses."""
+
+    index: int
+    system: list[dict[str, Any]]
+    messages: list[Message]
+    parse: Callable[[str], ChunkAnalysis]
+
+
+def _reply_text(doc: Mapping[str, Any]) -> str:
+    return "".join(
+        block["text"]
+        for block in doc["content"]
+        if isinstance(block, dict)
+        and block.get("type") == "text"
+        and isinstance(block.get("text"), str)
+    )
+
+
+def _stop_reason(doc: Mapping[str, Any]) -> str | None:
+    stop = doc.get("stop_reason")
+    return stop if isinstance(stop, str) else None
+
+
 class AnthropicSummarizer:
     """``Summarizer`` over the Messages API. One instance per process."""
 
@@ -205,6 +232,84 @@ class AnthropicSummarizer:
     def analyze_chunk(self, chunk: Chunk, roster: Roster, meta: VideoMeta) -> ChunkAnalysis:
         if not chunk.text.strip():
             return ChunkAnalysis(topics=(), claims=(), quotes=())
+        system, user, parse = self._chunk_call(chunk, roster, meta)
+        return self._run("analyze_chunk", meta, system, user, parse)
+
+    def analyze_chunks(
+        self, chunks: Sequence[Chunk], roster: Roster, meta: VideoMeta
+    ) -> list[ChunkAnalysis]:
+        if not self._batch:
+            return [self.analyze_chunk(chunk, roster, meta) for chunk in chunks]
+        results = [ChunkAnalysis(topics=(), claims=(), quotes=()) for _ in chunks]
+        jobs: list[_Job] = []
+        for index, chunk in enumerate(chunks):
+            if not chunk.text.strip():
+                continue
+            system, user, parse = self._chunk_call(chunk, roster, meta)
+            jobs.append(_Job(index, system, [{"role": "user", "content": user}], parse))
+        if not jobs:
+            return results
+
+        hard: dict[int, JobError] = {}
+        invalid: dict[int, tuple[str, str]] = {}
+        parsed: dict[int, ChunkAnalysis] = {}
+        first = self._batch_round("analyze_chunks", meta, jobs, repair=False)
+        for job in jobs:
+            outcome = first[job.index]
+            if isinstance(outcome, JobError):
+                hard[job.index] = outcome
+                continue
+            text, stop = _reply_text(outcome), _stop_reason(outcome)
+            try:
+                parsed[job.index] = self._checked(job.parse, text, stop)
+            except SchemaError as err:
+                invalid[job.index] = (text, str(err)[:MAX_FEEDBACK_CHARS])
+            except LLMInvalidOutputError as err:
+                hard[job.index] = err
+        if hard:
+            raise hard[min(hard)]
+
+        if invalid:
+            repairs: list[_Job] = []
+            for job in jobs:
+                if job.index not in invalid:
+                    continue
+                text, feedback = invalid[job.index]
+                repair_text = self._prompts.render_repair(error=cap_feedback(feedback))
+                followup: list[Message] = [
+                    *job.messages,
+                    {"role": "assistant", "content": text},
+                    {"role": "user", "content": repair_text},
+                ]
+                repairs.append(_Job(job.index, job.system, followup, job.parse))
+            second = self._batch_round("analyze_chunks", meta, repairs, repair=True)
+            for job in repairs:
+                outcome = second[job.index]
+                if isinstance(outcome, JobError):
+                    hard[job.index] = outcome
+                    continue
+                try:
+                    parsed[job.index] = self._checked(
+                        job.parse, _reply_text(outcome), _stop_reason(outcome)
+                    )
+                except SchemaError as err:
+                    message = (
+                        "LLM output failed schema validation after one repair attempt: "
+                        f"{err}"
+                    )
+                    hard[job.index] = LLMInvalidOutputError(message[:MAX_ERROR_CHARS])
+                except LLMInvalidOutputError as err:
+                    hard[job.index] = err
+            if hard:
+                raise hard[min(hard)]
+
+        for index, analysis in parsed.items():
+            results[index] = analysis
+        return results
+
+    def _chunk_call(
+        self, chunk: Chunk, roster: Roster, meta: VideoMeta
+    ) -> tuple[list[dict[str, Any]], str, Callable[[str], ChunkAnalysis]]:
         prompt = self._prompts.render_chunk(
             title=meta.title,
             roster=format_roster([(s.name, s.role) for s in roster.speakers]),
@@ -222,13 +327,17 @@ class AnthropicSummarizer:
             + json.dumps(speakers, ensure_ascii=False),
             "cache_control": _EPHEMERAL,
         }
-        return self._run(
-            "analyze_chunk",
-            meta,
-            [self._instructions(prompt.system), roster_block],
-            prompt.user,
-            lambda raw: parse_chunk_analysis(raw, roster=roster, chunk=chunk),
-        )
+        system = [self._instructions(prompt.system), roster_block]
+        return system, prompt.user, lambda raw: parse_chunk_analysis(raw, roster=roster, chunk=chunk)
+
+    def _checked(self, parse: Callable[[str], ChunkAnalysis], text: str, stop: str | None) -> ChunkAnalysis:
+        if stop == "refusal":
+            raise LLMInvalidOutputError("Anthropic refused to answer (stop_reason=refusal)")
+        if stop == "max_tokens":
+            raise SchemaError(
+                f"output was cut off at max_tokens ({self._max_tokens}); it is incomplete"
+            )
+        return parse(text)
 
     def reduce(self, partials: list[ChunkAnalysis], meta: VideoMeta) -> str:
         if not partials:
@@ -298,19 +407,7 @@ class AnthropicSummarizer:
         is_repair: bool,
     ) -> tuple[str, str | None]:
         """One request in the configured mode. Returns (text, stop_reason)."""
-        params = {
-            "model": self.model,
-            "max_tokens": self._max_tokens,
-            "system": system,
-            # The API rejects an empty assistant turn; a blank reply is
-            # possible (that is what the repair is for).
-            "messages": [
-                {**m, "content": m["content"] or "(no output)"}
-                if m["role"] == "assistant" and not m["content"].strip()
-                else m
-                for m in messages
-            ],
-        }
+        params = self._params(system, messages)
         started = self._clock()
         doc = (
             self._batched(method, meta, params)
@@ -318,15 +415,8 @@ class AnthropicSummarizer:
             else self._sync(params)
         )
         self._account(doc)
-        stop = doc.get("stop_reason")
-        stop_reason = stop if isinstance(stop, str) else None
-        text = "".join(
-            block["text"]
-            for block in doc["content"]
-            if isinstance(block, dict)
-            and block.get("type") == "text"
-            and isinstance(block.get("text"), str)
-        )
+        stop_reason = _stop_reason(doc)
+        text = _reply_text(doc)
         usage = doc["usage"]
         _logger.info(
             "anthropic_call",
@@ -359,10 +449,22 @@ class AnthropicSummarizer:
         self, method: str, meta: VideoMeta, params: dict[str, Any]
     ) -> dict[str, Any]:
         custom_id = self._custom_id(method, meta)
+        batch_id, entries = self._run_batch(method, [(custom_id, params)])
+        outcome = self._outcome(batch_id, entries.get(custom_id))
+        if isinstance(outcome, JobError):
+            raise outcome
+        return outcome
+
+    def _run_batch(
+        self, method: str, requests: Sequence[tuple[str, dict[str, Any]]]
+    ) -> tuple[str, dict[str, dict[str, Any]]]:
+        """Submit ``requests`` as one batch, wait for it, return its result lines by custom_id."""
         create = self._send(
             "POST",
             "/v1/messages/batches",
-            self._dump({"requests": [{"custom_id": custom_id, "params": params}]}),
+            self._dump(
+                {"requests": [{"custom_id": cid, "params": p} for cid, p in requests]}
+            ),
             PLUMBING_TIMEOUT_SEC,
         )
         self._check_status(create)
@@ -371,11 +473,57 @@ class AnthropicSummarizer:
             raise LLMUnavailableError("Anthropic batch create response has no usable id")
         _logger.info(
             "anthropic_batch_submitted",
-            extra={"method": method, "batch_id": batch_id, "custom_id": custom_id},
+            extra={"method": method, "batch_id": batch_id, "requests": len(requests)},
         )
-
         results_url = self._wait_for_batch(batch_id)
-        return self._batch_result(batch_id, custom_id, results_url)
+        return batch_id, self._batch_entries(batch_id, results_url)
+
+    def _batch_round(
+        self, method: str, meta: VideoMeta, jobs: Sequence[_Job], *, repair: bool
+    ) -> dict[int, dict[str, Any] | JobError]:
+        """One batch for ``jobs``; each job's message, or the error it ended with."""
+        tag = "repair" if repair else "chunk"
+        video = re.sub(r"[^A-Za-z0-9_-]", "_", meta.video_id)[:32] or "video"
+        requests = [
+            (f"{tag}-{job.index}-{video}"[:64], self._params(job.system, job.messages))
+            for job in jobs
+        ]
+        batch_id, entries = self._run_batch(method, requests)
+        outcomes: dict[int, dict[str, Any] | JobError] = {}
+        for job, (custom_id, _) in zip(jobs, requests, strict=True):
+            outcome = self._outcome(batch_id, entries.get(custom_id))
+            if isinstance(outcome, dict):
+                self._account(outcome)
+                _logger.info(
+                    "anthropic_call",
+                    extra={
+                        "method": method,
+                        "model": self.model,
+                        "batch": True,
+                        "input_tokens": outcome["usage"]["input_tokens"],
+                        "output_tokens": outcome["usage"]["output_tokens"],
+                        "stop_reason": _stop_reason(outcome),
+                        "repair": repair,
+                        "response_chars": len(_reply_text(outcome)),
+                    },
+                )
+            outcomes[job.index] = outcome
+        return outcomes
+
+    def _params(self, system: list[dict[str, Any]], messages: list[Message]) -> dict[str, Any]:
+        return {
+            "model": self.model,
+            "max_tokens": self._max_tokens,
+            "system": system,
+            # The API rejects an empty assistant turn; a blank reply is
+            # possible (that is what the repair is for).
+            "messages": [
+                {**m, "content": m["content"] or "(no output)"}
+                if m["role"] == "assistant" and not m["content"].strip()
+                else m
+                for m in messages
+            ],
+        }
 
     def _custom_id(self, method: str, meta: VideoMeta) -> str:
         self._request_seq += 1
@@ -458,10 +606,11 @@ class AnthropicSummarizer:
                 },
             )
 
-    def _batch_result(self, batch_id: str, custom_id: str, url: str) -> dict[str, Any]:
+    def _batch_entries(self, batch_id: str, url: str) -> dict[str, dict[str, Any]]:
+        """The result lines by custom_id; the first line for an id wins."""
         response = self._send("GET", url, None, PLUMBING_TIMEOUT_SEC)
         self._check_status(response)
-        entry: dict[str, Any] | None = None
+        entries: dict[str, dict[str, Any]] = {}
         for line in response.body.decode("utf-8", "replace").splitlines():
             if not line.strip():
                 continue
@@ -470,22 +619,31 @@ class AnthropicSummarizer:
             except (ValueError, RecursionError):
                 _logger.debug("anthropic_results_bad_line", extra={"batch_id": batch_id})
                 continue
-            if isinstance(doc, dict) and doc.get("custom_id") == custom_id:
-                entry = doc
-                break
+            if not isinstance(doc, dict) or not isinstance(doc.get("custom_id"), str):
+                continue
+            if doc["custom_id"] in entries:
+                _logger.debug("anthropic_results_duplicate_line", extra={"batch_id": batch_id})
+                continue
+            entries[doc["custom_id"]] = doc
+        return entries
+
+    def _outcome(self, batch_id: str, entry: dict[str, Any] | None) -> dict[str, Any] | JobError:
+        """A succeeded request's message, or the error it ended with."""
         if entry is None:
-            raise LLMUnavailableError(
+            return LLMUnavailableError(
                 f"Anthropic batch {batch_id} results have no line for our request"
             )
         result = entry.get("result")
         kind = result.get("type") if isinstance(result, dict) else None
         if kind == "succeeded" and isinstance(result, dict):
-            return self._message(result.get("message"))
+            try:
+                return self._message(result.get("message"))
+            except LLMUnavailableError as err:
+                return err
         if kind == "errored" and isinstance(result, dict):
-            error = result.get("error")
-            error_type, detail = self._error_fields(error)
-            raise self._classify(None, error_type, detail, None)
-        raise LLMUnavailableError(
+            error_type, detail = self._error_fields(result.get("error"))
+            return self._classify(None, error_type, detail, None)
+        return LLMUnavailableError(
             f"Anthropic batch {batch_id} request ended as {self._detail(kind)}"
         )
 

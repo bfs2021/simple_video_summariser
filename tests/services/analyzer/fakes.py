@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -132,6 +132,36 @@ class FakeSummarizer:
         self._cost = None
         self._cost_unknown = False
         return usage
+
+
+class BatchSummarizer(FakeSummarizer):
+    """A ``ChunkBatchSummarizer``: ``analyze_chunks`` answers every chunk in one call.
+
+    ``result_delta`` adds or drops analyses from the list it returns, to test the
+    handler's length check. Successful chunks add the same usage as per-chunk calls.
+    """
+
+    def __init__(self, *, result_delta: int = 0, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.result_delta = result_delta
+        self.batch_calls = 0
+
+    def analyze_chunks(
+        self, chunks: Sequence[Chunk], roster: Roster, meta: VideoMeta
+    ) -> list[ChunkAnalysis]:
+        self.batch_calls += 1
+        self.calls.append(("chunks", list(chunks), roster, meta))
+        if chunks:
+            self._begin("chunk", "chunks")
+        results = []
+        for chunk in chunks:
+            self._succeed("chunk")
+            results.append(self.chunks.get(chunk.seq, self.default_chunk))
+        if self.result_delta > 0:
+            results += [self.default_chunk] * self.result_delta
+        elif self.result_delta < 0:
+            results = results[: len(results) + self.result_delta]
+        return results
 
 
 class FakeClock:

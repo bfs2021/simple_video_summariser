@@ -1,10 +1,10 @@
 """Domain dataclasses shared across services and adapters."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 
 @dataclass(frozen=True, slots=True)
@@ -358,6 +358,21 @@ class Summarizer(Protocol):
     def reduce(self, partials: list[ChunkAnalysis], meta: VideoMeta) -> str: ...
 
     def take_usage(self) -> Usage: ...  # totals since the last call, then reset to zero
+
+
+@runtime_checkable
+class ChunkBatchSummarizer(Summarizer, Protocol):
+    """A summarizer that can analyze every chunk of an episode in one call (#88).
+
+    Optional: the analyze handler uses it when present and keeps the per-chunk
+    loop otherwise, so Ollama and the fake do not implement it.
+    """
+
+    def analyze_chunks(
+        self, chunks: Sequence[Chunk], roster: Roster, meta: VideoMeta
+    ) -> list[ChunkAnalysis]:
+        """One analysis per chunk, in input order; ``[]`` for no chunks."""
+        ...
 
 
 # ActiveJob, JobFailure, VideoSummary, VideoPage, AnalysisRun, TranscriptInfo,

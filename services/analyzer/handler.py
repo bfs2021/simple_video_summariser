@@ -32,6 +32,7 @@ from common.models import (
     Analysis,
     Chunk,
     ChunkAnalysis,
+    ChunkBatchSummarizer,
     Claim,
     Quote,
     Roster,
@@ -334,17 +335,29 @@ def make_analyze_handler(
             roster = Roster(())
             summarizer.take_usage()  # the failed call adds nothing
 
+        ordered = sorted(chunks, key=lambda c: c.seq)
+        timed = [timestamped_chunk(chunk, segments) for chunk in ordered]
         partials: list[ChunkAnalysis] = []
+        if isinstance(summarizer, ChunkBatchSummarizer):
+            ctx.check_cancelled()
+            partials = summarizer.analyze_chunks(timed, roster, meta)
+            if len(partials) != total_chunks:
+                raise BugError(
+                    f"analyze_chunks returned {len(partials)} analyses for {total_chunks} chunks"
+                )
+            tally.add(summarizer)
+        else:
+            for number, chunk in enumerate(timed, start=1):
+                ctx.check_cancelled()
+                ctx.progress("analyze", number, total_chunks, phase="chunk", chunk=number)
+                partials.append(summarizer.analyze_chunk(chunk, roster, meta))
+                tally.add(summarizer)
+
         topics: list[Topic] = []
         claims: list[Claim] = []
         quotes: list[Quote] = []
         coerced = 0
-        for number, chunk in enumerate(sorted(chunks, key=lambda c: c.seq), start=1):
-            ctx.check_cancelled()
-            ctx.progress("analyze", number, total_chunks, phase="chunk", chunk=number)
-            partial = summarizer.analyze_chunk(timestamped_chunk(chunk, segments), roster, meta)
-            tally.add(summarizer)
-            partials.append(partial)
+        for chunk, partial in zip(ordered, partials, strict=True):
             chunk_topics, chunk_claims, chunk_quotes, chunk_coerced = sanitize_chunk(
                 chunk, partial, roster
             )

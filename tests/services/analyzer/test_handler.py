@@ -50,7 +50,12 @@ from services.analyzer.handler import (
     sanitize_chunk,
     timestamped_chunk,
 )
-from tests.services.analyzer.fakes import FakeClock, FakeSummarizer, make_job
+from tests.services.analyzer.fakes import (
+    BatchSummarizer,
+    FakeClock,
+    FakeSummarizer,
+    make_job,
+)
 from tests.services.transcriber.fakes import make_ctx, make_settings
 
 integration = pytest.mark.integration
@@ -1265,3 +1270,87 @@ def test_the_worker_default_logs_one_structured_line_per_llm_call(
         ("reduce", 2, 2),
     ]
     assert all(r["stage"] == "analyze" for r in lines)
+
+
+# ------------------------------------------------- batch-capable summarizers (#88)
+
+BATCH_CHUNKS = {
+    0: analysis(
+        topics=(Topic(0, "T0a"), Topic(1, "T0b")),
+        claims=(claim("claim one", "Alice", 10),),
+        quotes=(quote("quote one", "Bob", 20),),
+    ),
+    1: analysis(
+        topics=(Topic(0, "T1a", "sum", 900.0),),
+        claims=(claim("claim two", "Bob", 1000),),
+    ),
+}
+
+
+@integration
+def test_a_batch_capable_summarizer_gets_every_chunk_in_one_call(
+    rig_factory: Callable[..., Rig],
+) -> None:
+    summarizer = BatchSummarizer(roster=ROSTER, chunks=BATCH_CHUNKS, tldr="done")
+    rig = rig_factory(summarizer)
+
+    rig.run()
+
+    assert summarizer.batch_calls == 1
+    assert summarizer.kinds == ["roster", "chunks", "reduce"]
+    batch = summarizer.calls[1][1]
+    assert [c.seq for c in batch] == [0, 1]
+    assert all("[" in c.text for c in batch)  # timestamped, as per-chunk calls are
+
+
+@integration
+@pytest.mark.parametrize("batch", [False, True])
+def test_both_paths_persist_the_same_analysis(
+    rig_factory: Callable[..., Rig], batch: bool
+) -> None:
+    kwargs: dict[str, Any] = {"roster": ROSTER, "chunks": BATCH_CHUNKS, "tldr": "  The story.  "}
+    summarizer = BatchSummarizer(**kwargs) if batch else FakeSummarizer(**kwargs)
+    rig = rig_factory(summarizer, clock=FakeClock(start=100.0, step=2.5))
+
+    rig.run()
+
+    got = rig.latest()
+    assert got.tldr == "The story."
+    assert got.speaker_roster == {
+        "speakers": [{"name": "Alice", "role": "host"}, {"name": "Bob", "role": "guest"}]
+    }
+    assert [(t.seq, t.title) for t in got.topics] == [(0, "T0a"), (1, "T0b"), (2, "T1a")]
+    assert sorted((c.text, c.speaker, c.source_chunk_seq) for c in got.claims) == [
+        ("claim one", "Alice", 0),
+        ("claim two", "Bob", 1),
+    ]
+    assert [(q.text, q.source_chunk_seq) for q in got.quotes] == [("quote one", 0)]
+
+
+@integration
+def test_a_batch_returning_the_wrong_number_of_analyses_is_a_bug_and_persists_nothing(
+    rig_factory: Callable[..., Rig],
+) -> None:
+    rig = rig_factory(BatchSummarizer(roster=ROSTER, chunks=BATCH_CHUNKS, result_delta=1))
+    before = rig.rows()
+
+    with pytest.raises(BugError, match="returned 3 analyses for 2 chunks"):
+        rig.run()
+
+    assert rig.rows() == before
+
+
+@integration
+def test_an_error_from_the_batch_call_propagates_and_persists_nothing(
+    rig_factory: Callable[..., Rig],
+) -> None:
+    summarizer = BatchSummarizer(
+        roster=ROSTER, chunks=BATCH_CHUNKS, fail_on={"chunks": LLMUnavailableError("down")}
+    )
+    rig = rig_factory(summarizer)
+    before = rig.rows()
+
+    with pytest.raises(LLMUnavailableError, match="down"):
+        rig.run()
+
+    assert rig.rows() == before
