@@ -350,9 +350,16 @@ key already has work or the video already has an analysis at that version (#100)
 
 ```sql
 UPDATE jobs SET state='pending', locked_by=NULL, locked_at=NULL,
-                error_class=NULL, last_error='worker lost: heartbeat stale'
+                error_class=NULL, last_error='worker lost: heartbeat stale',
+                run_after = CASE WHEN attempts >= <max> THEN run_after
+                                 ELSE now() + LEAST(5min * 2^(GREATEST(attempts,1)-1), 6h) * (1 ± 10%) END,
+                state = CASE WHEN attempts >= <max> THEN 'dead' ELSE 'pending' END
 WHERE state='running' AND heartbeat_at < now() - interval '5 minutes';
 ```
+
+A reaped job that goes back to `pending` follows the Backoff schedule below
+(keyed on its current `attempts`, which the reap does not change), so another
+replica does not claim a job that may have killed its worker straight away.
 
 ### Backoff
 

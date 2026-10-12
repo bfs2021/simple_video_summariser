@@ -842,6 +842,15 @@ class PostgresQueue:
                                           WHEN 'transcribe' THEN %(max_transcribe)s
                                           ELSE %(max_default)s END
                                  THEN now() ELSE j.finished_at END,
+                    run_after = CASE WHEN j.attempts >= CASE j.kind
+                                          WHEN 'transcribe' THEN %(max_transcribe)s
+                                          ELSE %(max_default)s END
+                                 THEN j.run_after
+                                 ELSE now() + make_interval(secs => LEAST(
+                                          %(base_backoff)s * power(2, GREATEST(j.attempts, 1) - 1),
+                                          %(max_backoff)s)
+                                      * (1 + (random() * 2 - 1) * %(jitter)s))
+                            END,
                     locked_by = NULL, locked_at = NULL,
                     last_error = %(last_error)s, error_class = NULL
                 FROM stale
@@ -849,28 +858,32 @@ class PostgresQueue:
                   AND (j.heartbeat_at IS NULL
                        OR j.heartbeat_at < now() - (%(threshold)s * interval '1 second'))
                 RETURNING j.id, stale.video_id, stale.kind, stale.attempts,
-                          stale.locked_by AS lost_worker, j.state AS outcome
+                          stale.locked_by AS lost_worker, j.state AS outcome,
+                          j.run_after AS run_after
                 """,
                 {
                     "threshold": threshold,
                     "max_transcribe": self._kind_max_attempts("transcribe"),
                     "max_default": self._kind_max_attempts("ingest"),
+                    "base_backoff": _BASE_BACKOFF_SEC,
+                    "max_backoff": _MAX_BACKOFF_SEC,
+                    "jitter": _JITTER_FRACTION,
                     "last_error": _REAP_LAST_ERROR,
                 },
             )
             reaped = cur.fetchall()
         for row in reaped:
-            _logger.warning(
-                "queue.job_reaped",
-                extra={
-                    "job_id": row["id"],
-                    "video_id": row["video_id"],
-                    "kind": row["kind"],
-                    "locked_by": row["lost_worker"],
-                    "attempts": row["attempts"],
-                    "outcome": row["outcome"],
-                },
-            )
+            extra: dict[str, Any] = {
+                "job_id": row["id"],
+                "video_id": row["video_id"],
+                "kind": row["kind"],
+                "locked_by": row["lost_worker"],
+                "attempts": row["attempts"],
+                "outcome": row["outcome"],
+            }
+            if row["outcome"] == "pending":
+                extra["run_after"] = row["run_after"]
+            _logger.warning("queue.job_reaped", extra=extra)
         return len(reaped)
 
     # -- resolve_stale_analyze -------------------------------------------------

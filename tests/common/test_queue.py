@@ -1935,3 +1935,130 @@ def test_raise_priority_commits_on_a_default_connection(
     with psycopg.connect(head_dsn) as other:
         row = other.execute("SELECT priority FROM jobs WHERE id = %s", (job_id,)).fetchone()
     assert row == (10,)
+
+
+# ---------------------------------------------------------------------------
+# reap_stale backoff (issue #87)
+# ---------------------------------------------------------------------------
+
+
+def _db_now(conn: psycopg.Connection[Any]) -> datetime:
+    row = conn.execute("SELECT now()").fetchone()
+    assert row is not None
+    now: datetime = row[0]
+    return now
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("attempts", "low_sec", "high_sec"),
+    [(1, 270, 330), (2, 540, 660), (3, 1080, 1320)],
+)
+def test_reap_stale_backs_off_a_requeued_job_by_its_attempts(
+    queue: PostgresQueue,
+    conn: psycopg.Connection[Any],
+    attempts: int,
+    low_sec: int,
+    high_sec: int,
+) -> None:
+    job_id = _make_running(queue, conn, attempts=attempts)
+
+    before = _db_now(conn)
+    queue.reap_stale(older_than_sec=300)
+    after = _db_now(conn)
+
+    run_after = _row(conn, job_id)["run_after"]
+    assert before + timedelta(seconds=low_sec) <= run_after
+    assert run_after <= after + timedelta(seconds=high_sec)
+
+
+@pytest.mark.integration
+def test_reap_stale_backoff_is_per_job_in_one_pass(
+    queue: PostgresQueue, conn: psycopg.Connection[Any]
+) -> None:
+    one = _make_running(queue, conn, video_id="a", attempts=1)
+    three = _make_running(queue, conn, video_id="b", attempts=3)
+
+    queue.reap_stale(older_than_sec=300)
+
+    gap_one = _row(conn, one)["run_after"] - _db_now(conn)
+    gap_three = _row(conn, three)["run_after"] - _db_now(conn)
+    assert gap_three > gap_one * 3
+
+
+@pytest.mark.integration
+def test_a_reaped_job_is_not_claimable_until_its_backoff_passes(
+    queue: PostgresQueue, conn: psycopg.Connection[Any]
+) -> None:
+    job_id = _make_running(queue, conn, attempts=1)
+    queue.reap_stale(older_than_sec=300)
+
+    with queue.claim(["ingest"], worker="w2") as early:
+        assert early is None
+
+    _set(conn, job_id, run_after=_db_now(conn) - timedelta(seconds=1))
+    with queue.claim(["ingest"], worker="w2") as claimed:
+        assert claimed is not None
+        assert claimed.id == job_id
+        assert claimed.attempts == 2
+
+
+@pytest.mark.integration
+def test_reap_stale_treats_attempts_zero_as_one(
+    queue: PostgresQueue, conn: psycopg.Connection[Any]
+) -> None:
+    job_id = _make_running(queue, conn, attempts=0)
+
+    before = _db_now(conn)
+    queue.reap_stale(older_than_sec=300)
+
+    run_after = _row(conn, job_id)["run_after"]
+    assert run_after >= before + timedelta(seconds=270)
+
+
+@pytest.mark.integration
+def test_reap_stale_dead_letter_keeps_run_after_unchanged(
+    queue: PostgresQueue, conn: psycopg.Connection[Any]
+) -> None:
+    job_id = _make_running(queue, conn, kind="analyze", attempts=4)
+    original = _row(conn, job_id)["run_after"]
+
+    queue.reap_stale(older_than_sec=300)
+
+    row = _row(conn, job_id)
+    assert row["state"] == "dead"
+    assert row["finished_at"] is not None
+    assert row["run_after"] == original
+
+
+@pytest.mark.integration
+def test_reap_stale_second_pass_does_not_move_run_after(
+    queue: PostgresQueue, conn: psycopg.Connection[Any]
+) -> None:
+    job_id = _make_running(queue, conn, attempts=1)
+    queue.reap_stale(older_than_sec=300)
+    first = _row(conn, job_id)["run_after"]
+
+    assert queue.reap_stale(older_than_sec=300) == 0
+    assert _row(conn, job_id)["run_after"] == first
+
+
+@pytest.mark.integration
+def test_reap_stale_warning_carries_run_after_only_for_requeued_jobs(
+    queue: PostgresQueue,
+    conn: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    requeued = _make_running(queue, conn, video_id="a", attempts=1)
+    dead = _make_running(queue, conn, video_id="b", kind="analyze", attempts=4)
+
+    with caplog.at_level(logging.DEBUG, logger="common.queue"):
+        queue.reap_stale(older_than_sec=300)
+
+    by_id = {
+        r.__dict__["job_id"]: r.__dict__
+        for r in caplog.records
+        if r.getMessage() == "queue.job_reaped"
+    }
+    assert by_id[requeued]["run_after"] == _row(conn, requeued)["run_after"]
+    assert "run_after" not in by_id[dead]

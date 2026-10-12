@@ -582,6 +582,12 @@ def test_split_brain_leaves_b_as_sole_owner_after_a_resolves(
             )
         reaped = queue_a.reap_stale(older_than_sec=300)
         assert reaped == 1
+        # The reap backs the job off (#87); expire that backoff without sleeping.
+        with conn_a.cursor() as cur:
+            cur.execute(
+                "UPDATE jobs SET run_after = now() - interval '1 second' WHERE id = %s",
+                (job_id,),
+            )
 
         # Worker B claims the now-pending job.
         cm_b = queue_b.claim(["ingest"], worker="B")
@@ -692,6 +698,12 @@ def test_crash_mid_job_is_reaped_and_reclaimed(
     count = queue.reap_stale(older_than_sec=300)
     assert count == 1
     assert _row(conn, job_id)["state"] == "pending"
+    # The reap backs the job off (#87); expire that backoff without sleeping.
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE jobs SET run_after = now() - interval '1 second' WHERE id = %s",
+            (job_id,),
+        )
 
     with queue.claim(["ingest"], worker="w2") as job2:
         assert job2 is not None
