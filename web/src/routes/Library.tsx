@@ -17,8 +17,9 @@ import {
   type VideoStatus,
 } from '../lib/library'
 
-// Plain semantic HTML on purpose: styling is #120. Filter and page state lives
-// in the URL only; TanStack Query owns the server state (architecture §9).
+// Semantic HTML first; styling is class hooks into web/index.css (design-system
+// §11, #120). Filter and page state lives in the URL only; TanStack Query owns
+// the server state (architecture §9).
 export function Library() {
   const [params, setParams] = useSearchParams()
   const { state, invalid } = parseLibraryParams(params)
@@ -56,19 +57,32 @@ export function Library() {
           ?.channel_title ?? null)
 
   return (
-    <section>
+    <section className="page">
       <h1>Library</h1>
 
-      <form onSubmit={(e) => e.preventDefault()}>
-        <label>
-          From <input type="date" value={state.from ?? ''} onChange={(e) => onDate('from', e.target.value)} />
-        </label>{' '}
-        <label>
-          To <input type="date" value={state.to ?? ''} onChange={(e) => onDate('to', e.target.value)} />
-        </label>{' '}
-        <label>
+      <form className="card filters" onSubmit={(e) => e.preventDefault()}>
+        <label className="field">
+          From{' '}
+          <input
+            className="input"
+            type="date"
+            value={state.from ?? ''}
+            onChange={(e) => onDate('from', e.target.value)}
+          />
+        </label>
+        <label className="field">
+          To{' '}
+          <input
+            className="input"
+            type="date"
+            value={state.to ?? ''}
+            onChange={(e) => onDate('to', e.target.value)}
+          />
+        </label>
+        <label className="field">
           Status{' '}
           <select
+            className="input"
             value={state.status ?? ''}
             onChange={(e) => go({ status: (e.target.value || null) as VideoStatus | null })}
           >
@@ -79,40 +93,48 @@ export function Library() {
               </option>
             ))}
           </select>
-        </label>{' '}
+        </label>
         {hasFilters(state) && (
-          <button type="button" onClick={() => setParams(new URLSearchParams())}>
+          <button className="btn" type="button" onClick={() => setParams(new URLSearchParams())}>
             Clear all filters
           </button>
         )}
       </form>
 
-      {reversed && <p role="alert">'From' is after 'To'</p>}
+      {reversed && (
+        <p className="alert alert--danger" role="alert">
+          'From' is after 'To'
+        </p>
+      )}
 
       {state.channel !== null && (
-        <div role="group" aria-label="Active filters">
+        <div className="row" role="group" aria-label="Active filters">
           Channel: <strong>{channelTitle ?? state.channel}</strong>{' '}
-          <button type="button" onClick={() => go({ channel: null })}>
+          <button className="btn" type="button" onClick={() => go({ channel: null })}>
             Clear
           </button>
         </div>
       )}
 
       {q.isError ? (
-        <div role="alert">
+        <div className="alert alert--danger" role="alert">
           <p>
             {q.error instanceof ApiError && q.error.status === 503
               ? 'The database is unavailable. Try again shortly.'
               : 'Could not load videos'}
           </p>
-          <button type="button" onClick={() => void q.refetch()}>
+          <button className="btn btn--primary" type="button" onClick={() => void q.refetch()}>
             Retry
           </button>
         </div>
       ) : (
         <>
-          {(q.isFetching && data === undefined) || switching ? <p role="status">Loading…</p> : null}
-          <p role="status" aria-label="Results" aria-live="polite">
+          {(q.isFetching && data === undefined) || switching ? (
+            <p className="muted" role="status">
+              Loading…
+            </p>
+          ) : null}
+          <p className="muted" role="status" aria-label="Results" aria-live="polite">
             {data !== undefined && data.items.length > 0
               ? `${offset + 1}–${offset + data.items.length} of ${data.total}`
               : ''}
@@ -134,59 +156,65 @@ export function Library() {
           )}
 
           {data !== undefined && data.items.length > 0 && (
-            <table>
-              <thead>
-                <tr>
-                  <th scope="col">Title</th>
-                  <th scope="col">Channel</th>
-                  <th scope="col">Published</th>
-                  <th scope="col">Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.items.map((v) => {
-                  const status = statusLabel(v)
-                  const id = v.channel_id
-                  return (
-                    <tr key={v.video_id}>
-                      <td>
-                        <Link to={`/videos/${v.video_id}`}>{v.title ?? v.video_id}</Link>
-                      </td>
-                      <td>
-                        {id !== null ? (
-                          <button type="button" onClick={() => go({ channel: id })}>
-                            {v.channel_title ?? id}
-                          </button>
-                        ) : (
-                          (v.channel_title ?? 'Unknown channel')
-                        )}
-                      </td>
-                      <td>{publishedDate(v.published_at) ?? 'Date unknown'}</td>
-                      <td>
-                        <span>{status.label}</span>
-                        {status.detail !== null && (
-                          <>
-                            {' '}
-                            (<span>{status.detail}</span>)
-                          </>
-                        )}
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
+            <div className="card card--flush table-scroll" role="region" aria-label="Videos" tabIndex={0}>
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th scope="col">Title</th>
+                    <th scope="col">Channel</th>
+                    <th scope="col">Published</th>
+                    <th scope="col">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.items.map((v) => {
+                    const status = statusLabel(v)
+                    const id = v.channel_id
+                    return (
+                      <tr key={v.video_id}>
+                        <td>
+                          <Link to={`/videos/${v.video_id}`}>{v.title ?? v.video_id}</Link>
+                        </td>
+                        <td>
+                          {id !== null ? (
+                            <button className="btn" type="button" onClick={() => go({ channel: id })}>
+                              {v.channel_title ?? id}
+                            </button>
+                          ) : (
+                            (v.channel_title ?? 'Unknown channel')
+                          )}
+                        </td>
+                        <td>{publishedDate(v.published_at) ?? 'Date unknown'}</td>
+                        <td>
+                          <span className={`badge badge--${statusTone(v.status)}`}>
+                            <span>{status.label}</span>
+                            {status.detail !== null && (
+                              <>
+                                {' '}
+                                (<span>{status.detail}</span>)
+                              </>
+                            )}
+                          </span>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
           )}
 
-          <nav aria-label="Pagination">
+          <nav className="pagination" aria-label="Pagination">
             <button
+              className="btn"
               type="button"
               disabled={state.page <= 1 || switching || reversed}
               onClick={() => go({ page: state.page - 1 })}
             >
               Previous
-            </button>{' '}
+            </button>
             <button
+              className="btn btn--primary"
               type="button"
               disabled={!hasNext || switching || reversed}
               onClick={() => go({ page: state.page + 1 })}
@@ -202,5 +230,21 @@ export function Library() {
   function onDate(key: 'from' | 'to', value: string) {
     if (value === '') go({ [key]: null })
     else if (isValidDate(value)) go({ [key]: value })
+  }
+}
+
+type StatusTone = 'success' | 'warning' | 'danger' | 'neutral'
+
+// Badge colour per video status; unknown and idle states stay neutral.
+function statusTone(status: VideoStatus): StatusTone {
+  switch (status) {
+    case 'done':
+      return 'success'
+    case 'processing':
+      return 'warning'
+    case 'failed':
+      return 'danger'
+    default:
+      return 'neutral'
   }
 }
