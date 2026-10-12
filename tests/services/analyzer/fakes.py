@@ -203,3 +203,33 @@ def make_job(
         finished_at=None,
         created_at=_NOW,
     )
+
+
+class CheckpointingSummarizer(FakeSummarizer):
+    """A ``JobScopedSummarizer``: records a checkpoint for roster and reduce, as the adapter does."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.scope: Any = None
+        self.begun = 0
+        self.ended = 0
+
+    def begin_job(self, scope: Any) -> None:
+        self.scope = scope
+        self.begun += 1
+
+    def end_job(self) -> None:
+        self.scope = None
+        self.ended += 1
+
+    def derive_roster(self, meta: VideoMeta, opening: str) -> Roster:
+        self._checkpoint("roster")
+        return super().derive_roster(meta, opening)
+
+    def reduce(self, partials: list[ChunkAnalysis], meta: VideoMeta) -> str:
+        self._checkpoint("reduce")
+        return super().reduce(partials, meta)
+
+    def _checkpoint(self, step: str) -> None:
+        if self.scope is not None:
+            self.scope.record(step, f"msgbatch_{step}", f"sha-{step}")

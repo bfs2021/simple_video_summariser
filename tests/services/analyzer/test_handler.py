@@ -37,6 +37,7 @@ from common.models import (
     Topic,
     VideoMeta,
 )
+from common.queue import PostgresQueue
 from common.repo.analyses import latest_analysis
 from common.repo.transcripts import get_chunks, save_chunks, save_transcript
 from common.repo.videos import upsert_video
@@ -52,6 +53,7 @@ from services.analyzer.handler import (
 )
 from tests.services.analyzer.fakes import (
     BatchSummarizer,
+    CheckpointingSummarizer,
     FakeClock,
     FakeSummarizer,
     make_job,
@@ -1354,3 +1356,54 @@ def test_an_error_from_the_batch_call_propagates_and_persists_nothing(
         rig.run()
 
     assert rig.rows() == before
+
+
+# ------------------------------------------------------ batch checkpoints (#89)
+
+
+def _enqueue_analyze(conn: psycopg.Connection[Any]) -> int:
+    job_id = PostgresQueue(conn).enqueue("analyze", VIDEO, dedupe_key="v1:fake")
+    conn.commit()
+    assert job_id is not None
+    return job_id
+
+
+def _checkpoint_steps(rig: Rig, job_id: int) -> set[str]:
+    rows = rig.conn.execute(
+        "SELECT step_key FROM llm_batches WHERE job_id = %s", (job_id,)
+    ).fetchall()
+    rig.conn.rollback()
+    return {str(row[0]) for row in rows}
+
+
+@integration
+def test_a_saved_analysis_clears_the_jobs_batch_checkpoints(
+    rig_factory: Callable[..., Rig], conn: psycopg.Connection[Any]
+) -> None:
+    summarizer = CheckpointingSummarizer(roster=ROSTER, chunks=BATCH_CHUNKS, tldr="done")
+    rig = rig_factory(summarizer)
+    job_id = _enqueue_analyze(conn)
+
+    rig.handler(replace(make_job(VIDEO), id=job_id), rig.ctx)
+
+    assert _checkpoint_steps(rig, job_id) == set()
+    assert (summarizer.begun, summarizer.ended) == (1, 1)
+
+
+@integration
+def test_a_failed_job_keeps_its_checkpoints_for_the_retry(
+    rig_factory: Callable[..., Rig], conn: psycopg.Connection[Any]
+) -> None:
+    summarizer = CheckpointingSummarizer(
+        roster=ROSTER,
+        chunks=BATCH_CHUNKS,
+        fail_on={"reduce": LLMUnavailableError("down")},
+    )
+    rig = rig_factory(summarizer)
+    job_id = _enqueue_analyze(conn)
+
+    with pytest.raises(LLMUnavailableError):
+        rig.handler(replace(make_job(VIDEO), id=job_id), rig.ctx)
+
+    assert _checkpoint_steps(rig, job_id) == {"roster", "reduce"}
+    assert (summarizer.begun, summarizer.ended) == (1, 1)

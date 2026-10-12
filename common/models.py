@@ -375,6 +375,47 @@ class ChunkBatchSummarizer(Summarizer, Protocol):
         ...
 
 
+@dataclass(frozen=True, slots=True)
+class BatchCheckpoint:
+    """A Message Batch a job's step submitted, recorded before the first poll (#89)."""
+
+    step_key: str
+    batch_id: str
+    request_sha256: str
+    submitted_at: datetime
+
+
+class JobScope(Protocol):
+    """What a checkpointing summarizer needs from one analyze job (#89).
+
+    The handler builds it from the job's own connection; the adapter never
+    touches the database itself.
+    """
+
+    job_id: int
+
+    def cancelled(self) -> bool: ...
+
+    def now(self) -> datetime: ...
+
+    def checkpoint(self, step_key: str) -> BatchCheckpoint | None: ...
+
+    def record(self, step_key: str, batch_id: str, request_sha256: str) -> BatchCheckpoint:
+        """Store a batch for ``step_key``; the stored row wins if there already is one."""
+        ...
+
+    def forget(self, step_key: str) -> None: ...
+
+
+@runtime_checkable
+class JobScopedSummarizer(Protocol):
+    """A summarizer that checkpoints its batches per job (#89). Optional, like ``ChunkBatchSummarizer``."""
+
+    def begin_job(self, scope: JobScope) -> None: ...
+
+    def end_job(self) -> None: ...
+
+
 # ActiveJob, JobFailure, VideoSummary, VideoPage, AnalysisRun, TranscriptInfo,
 # IndexedSegment and TranscriptPage belong to #42 (read endpoints). They are
 # what the common/repo/ read functions behind GET /videos... return.

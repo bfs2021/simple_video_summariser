@@ -18,6 +18,7 @@ can replace it; ``urllib_transport`` is the real one.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -44,17 +45,28 @@ from adapters.summarize.schema import (
 from common.config import Settings
 from common.errors import (
     BugError,
+    Cancelled,
     JobError,
     LLMInvalidOutputError,
     LLMUnavailableError,
     RateLimitedError,
 )
-from common.models import Chunk, ChunkAnalysis, Roster, Usage, VideoMeta
+from common.models import (
+    BatchCheckpoint,
+    Chunk,
+    ChunkAnalysis,
+    JobScope,
+    Roster,
+    Usage,
+    VideoMeta,
+)
 
 _logger = logging.getLogger(__name__)
 
 API_BASE = "https://api.anthropic.com"
 API_VERSION = "2023-06-01"
+#: A cancelled job stops waiting within this long (#89).
+_CANCEL_SLICE_SEC = 1.0
 
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 #: One completion can take minutes (4096 output tokens); batch plumbing is quick.
@@ -157,6 +169,35 @@ def _count(usage: Mapping[str, Any], field: str) -> int | None:
     return None
 
 
+class _TimedOut(LLMUnavailableError):
+    """A batch did not end within ANTHROPIC_BATCH_MAX_WAIT_SEC; cancel was requested."""
+
+
+class _BatchGone(Exception):
+    """The API no longer knows a recorded batch, or its requests expired (#89)."""
+
+    def __init__(self, batch_id: str) -> None:
+        super().__init__(batch_id)
+
+
+def _request_digest(requests: Sequence[tuple[str, dict[str, Any]]]) -> str:
+    """Identifies a step's requests, so a changed prompt, model or transcript never resumes."""
+    canonical = json.dumps(
+        [[cid, params] for cid, params in requests],
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _unusable(entry: dict[str, Any] | None) -> bool:
+    if entry is None:
+        return False
+    result = entry.get("result")
+    return isinstance(result, dict) and result.get("type") in ("expired", "canceled")
+
+
 @dataclass(frozen=True, slots=True)
 class _Job:
     """One chunk's request in a batch round: where it goes, what it sends, how it parses."""
@@ -213,11 +254,19 @@ class AnthropicSummarizer:
         self._host = urlsplit(API_BASE).hostname
         self._price = _PRICES.get(self.model)
         self._warned_price = False
-        self._request_seq = 0
+        self._scope: JobScope | None = None
         self._reset_usage()
 
     def __repr__(self) -> str:
         return f"AnthropicSummarizer(model={self.model!r}, batch={self._batch})"
+
+    # --- per-job checkpoints (#89) -----------------------------------------------
+
+    def begin_job(self, scope: JobScope) -> None:
+        self._scope = scope
+
+    def end_job(self) -> None:
+        self._scope = None
 
     # --- port ---------------------------------------------------------------
 
@@ -226,14 +275,19 @@ class AnthropicSummarizer:
             title=meta.title, description=meta.description, opening=opening
         )
         return self._run(
-            "derive_roster", meta, [self._instructions(prompt.system)], prompt.user, parse_roster
+            "derive_roster",
+            meta,
+            [self._instructions(prompt.system)],
+            prompt.user,
+            parse_roster,
+            step="roster",
         )
 
     def analyze_chunk(self, chunk: Chunk, roster: Roster, meta: VideoMeta) -> ChunkAnalysis:
         if not chunk.text.strip():
             return ChunkAnalysis(topics=(), claims=(), quotes=())
         system, user, parse = self._chunk_call(chunk, roster, meta)
-        return self._run("analyze_chunk", meta, system, user, parse)
+        return self._run("analyze_chunk", meta, system, user, parse, step=f"chunk:{chunk.seq}")
 
     def analyze_chunks(
         self, chunks: Sequence[Chunk], roster: Roster, meta: VideoMeta
@@ -344,7 +398,12 @@ class AnthropicSummarizer:
             raise BugError("reduce needs at least one partial analysis")
         prompt = self._prompts.render_reduce(title=meta.title, partials=_partials_json(partials))
         return self._run(
-            "reduce", meta, [self._instructions(prompt.system)], prompt.user, parse_tldr
+            "reduce",
+            meta,
+            [self._instructions(prompt.system)],
+            prompt.user,
+            parse_tldr,
+            step="reduce",
         )
 
     def take_usage(self) -> Usage:
@@ -375,12 +434,16 @@ class AnthropicSummarizer:
         system: list[dict[str, Any]],
         user: str,
         parse: Callable[[str], T],
+        *,
+        step: str,
     ) -> T:
         truncated = False
 
         def call(messages: list[Message], is_repair: bool) -> str:
             nonlocal truncated
-            text, stop_reason = self._complete(method, meta, system, messages, is_repair)
+            text, stop_reason = self._complete(
+                method, meta, system, messages, is_repair, step=step
+            )
             truncated = stop_reason == "max_tokens"
             return text
 
@@ -405,12 +468,14 @@ class AnthropicSummarizer:
         system: list[dict[str, Any]],
         messages: list[Message],
         is_repair: bool,
+        *,
+        step: str,
     ) -> tuple[str, str | None]:
         """One request in the configured mode. Returns (text, stop_reason)."""
         params = self._params(system, messages)
         started = self._clock()
         doc = (
-            self._batched(method, meta, params)
+            self._batched(method, meta, params, step_key=f"{step}:repair" if is_repair else step)
             if self._batch
             else self._sync(params)
         )
@@ -446,19 +511,115 @@ class AnthropicSummarizer:
     # --- batch mode --------------------------------------------------------
 
     def _batched(
-        self, method: str, meta: VideoMeta, params: dict[str, Any]
+        self, method: str, meta: VideoMeta, params: dict[str, Any], *, step_key: str
     ) -> dict[str, Any]:
-        custom_id = self._custom_id(method, meta)
-        batch_id, entries = self._run_batch(method, [(custom_id, params)])
+        custom_id = self._step_custom_id(step_key, meta)
+        batch_id, entries = self._run_batch(method, [(custom_id, params)], step_key)
         outcome = self._outcome(batch_id, entries.get(custom_id))
         if isinstance(outcome, JobError):
             raise outcome
         return outcome
 
     def _run_batch(
-        self, method: str, requests: Sequence[tuple[str, dict[str, Any]]]
+        self,
+        method: str,
+        requests: Sequence[tuple[str, dict[str, Any]]],
+        step_key: str,
     ) -> tuple[str, dict[str, dict[str, Any]]]:
-        """Submit ``requests`` as one batch, wait for it, return its result lines by custom_id."""
+        """Run ``requests`` as one batch; return its id and result lines by custom_id.
+
+        Inside an analyze job the batch is recorded before the first poll. A
+        retried job resumes the recorded batch if the requests are unchanged,
+        and submits again only if that batch is gone or its requests expired.
+        """
+        scope = self._scope
+        if scope is None:
+            batch_id = self._create_batch(method, requests, step_key)
+            return batch_id, self._batch_entries(batch_id, self._wait_for_batch(batch_id))
+
+        digest = _request_digest(requests)
+        stored = scope.checkpoint(step_key)
+        superseded: tuple[str, str] | None = None
+        if stored is not None and stored.request_sha256 == digest:
+            _logger.info(
+                "anthropic_batch_resumed",
+                extra={
+                    "step_key": step_key,
+                    "batch_id": stored.batch_id,
+                    "age_sec": round((scope.now() - stored.submitted_at).total_seconds()),
+                },
+            )
+            try:
+                return self._await_checkpointed(stored, requests, step_key, resumed=True)
+            except _BatchGone:
+                scope.forget(step_key)
+                superseded = (stored.batch_id, "recorded batch gone or its requests expired")
+        elif stored is not None:
+            self._cancel(stored.batch_id)
+            scope.forget(step_key)
+            superseded = (stored.batch_id, "requests changed")
+
+        batch_id = self._create_batch(method, requests, step_key)
+        row = scope.record(step_key, batch_id, digest)
+        if superseded is not None:
+            _logger.info(
+                "anthropic_batch_superseded",
+                extra={
+                    "step_key": step_key,
+                    "old_batch_id": superseded[0],
+                    "new_batch_id": batch_id,
+                    "reason": superseded[1],
+                },
+            )
+        if row.batch_id != batch_id:
+            _logger.info(
+                "anthropic_batch_superseded",
+                extra={
+                    "step_key": step_key,
+                    "old_batch_id": batch_id,
+                    "new_batch_id": row.batch_id,
+                    "reason": "lost the insert race",
+                },
+            )
+            self._cancel(batch_id)
+            return self._await_checkpointed(row, requests, step_key, resumed=False)
+        return self._await_checkpointed(row, requests, step_key, resumed=False)
+
+    def _await_checkpointed(
+        self,
+        row: BatchCheckpoint,
+        requests: Sequence[tuple[str, dict[str, Any]]],
+        step_key: str,
+        *,
+        resumed: bool,
+    ) -> tuple[str, dict[str, dict[str, Any]]]:
+        scope = self._scope
+        if scope is None:
+            raise BugError("a checkpointed batch needs a job scope")
+
+        def age() -> float:
+            return (scope.now() - row.submitted_at).total_seconds()
+
+        try:
+            url = self._wait_for_batch(row.batch_id, age_sec=age)
+        except _TimedOut:
+            scope.forget(step_key)
+            raise
+        except _BatchGone:
+            if resumed:
+                raise
+            raise LLMUnavailableError(f"Anthropic batch {row.batch_id} was not found") from None
+        entries = self._batch_entries(row.batch_id, url)
+        if resumed and any(_unusable(entries.get(cid)) for cid, _ in requests):
+            raise _BatchGone(row.batch_id)
+        return row.batch_id, entries
+
+    def _create_batch(
+        self,
+        method: str,
+        requests: Sequence[tuple[str, dict[str, Any]]],
+        step_key: str,
+    ) -> str:
         create = self._send(
             "POST",
             "/v1/messages/batches",
@@ -473,10 +634,14 @@ class AnthropicSummarizer:
             raise LLMUnavailableError("Anthropic batch create response has no usable id")
         _logger.info(
             "anthropic_batch_submitted",
-            extra={"method": method, "batch_id": batch_id, "requests": len(requests)},
+            extra={
+                "method": method,
+                "step_key": step_key,
+                "batch_id": batch_id,
+                "requests": len(requests),
+            },
         )
-        results_url = self._wait_for_batch(batch_id)
-        return batch_id, self._batch_entries(batch_id, results_url)
+        return batch_id
 
     def _batch_round(
         self, method: str, meta: VideoMeta, jobs: Sequence[_Job], *, repair: bool
@@ -488,7 +653,8 @@ class AnthropicSummarizer:
             (f"{tag}-{job.index}-{video}"[:64], self._params(job.system, job.messages))
             for job in jobs
         ]
-        batch_id, entries = self._run_batch(method, requests)
+        step_key = "chunks:repair" if repair else "chunks"
+        batch_id, entries = self._run_batch(method, requests, step_key)
         outcomes: dict[int, dict[str, Any] | JobError] = {}
         for job, (custom_id, _) in zip(jobs, requests, strict=True):
             outcome = self._outcome(batch_id, entries.get(custom_id))
@@ -525,25 +691,41 @@ class AnthropicSummarizer:
             ],
         }
 
-    def _custom_id(self, method: str, meta: VideoMeta) -> str:
-        self._request_seq += 1
+    @staticmethod
+    def _step_custom_id(step_key: str, meta: VideoMeta) -> str:
+        """Deterministic, so a resumed batch's requests still match their result lines."""
         video = re.sub(r"[^A-Za-z0-9_-]", "_", meta.video_id)[:32] or "video"
-        return f"{self._request_seq}_{method}_{video}"[:64]
+        step = re.sub(r"[^A-Za-z0-9_-]", "_", step_key)
+        return f"{step}-{video}"[:64]
 
-    def _wait_for_batch(self, batch_id: str) -> str:
-        """Poll until the batch has ended; returns the results URL."""
+    def _wait_for_batch(
+        self, batch_id: str, *, age_sec: Callable[[], float] | None = None
+    ) -> str:
+        """Poll until the batch has ended; returns the results URL.
+
+        ``age_sec`` measures how long the batch has existed (from its recorded
+        submission for a resumed one); the default counts from this call.
+        """
         path = f"/v1/messages/batches/{batch_id}"
-        started = self._clock()
+        if age_sec is None:
+            started = self._clock()
+
+            def age_sec() -> float:
+                return self._clock() - started
+
         failures = 0
         while True:
-            if self._clock() - started > self._max_wait_sec:
+            self._check_cancelled()
+            if age_sec() > self._max_wait_sec:
                 self._cancel(batch_id)
-                raise LLMUnavailableError(
+                raise _TimedOut(
                     f"Anthropic batch {batch_id} did not end within "
                     f"{self._max_wait_sec}s; cancel requested"
                 )
             try:
                 response = self._send("GET", path, None, PLUMBING_TIMEOUT_SEC)
+                if response.status == 404:
+                    raise _BatchGone(batch_id)
                 if response.status >= 500 or response.status == 429:
                     raise LLMUnavailableError(f"Anthropic poll returned HTTP {response.status}")
                 self._check_status(response)
@@ -567,7 +749,26 @@ class AnthropicSummarizer:
                 if status == "ended":
                     url = doc.get("results_url")
                     return self._trusted_results_url(batch_id, url)
-            self._sleep(self._poll_sec)
+            self._pause(self._poll_sec)
+
+    def _pause(self, seconds: float) -> None:
+        """Sleep ``seconds``; inside a job, in slices that check for cancellation."""
+        if self._scope is None:
+            self._sleep(seconds)
+            return
+        remaining = seconds
+        while True:
+            self._check_cancelled()
+            if remaining <= 0:
+                return
+            step = min(_CANCEL_SLICE_SEC, remaining)
+            self._sleep(step)
+            remaining -= step
+
+    def _check_cancelled(self) -> None:
+        scope = self._scope
+        if scope is not None and scope.cancelled():
+            raise Cancelled()
 
     def _trusted_results_url(self, batch_id: str, url: object) -> str:
         """The key goes to ``results_url`` only when it is https on the API host."""

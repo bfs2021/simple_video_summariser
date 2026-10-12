@@ -34,6 +34,7 @@ from common.models import (
     ChunkAnalysis,
     ChunkBatchSummarizer,
     Claim,
+    JobScopedSummarizer,
     Quote,
     Roster,
     Segment,
@@ -45,6 +46,7 @@ from common.repo.analyses import analysis_exists, save_analysis
 from common.repo.transcripts import get_best_transcript, get_chunks, save_chunks
 from common.repo.videos import get_video_meta
 from common.worker import JobContext
+from services.analyzer.checkpoints import JobCheckpoints
 
 #: Segments starting within this many seconds of the first one feed the roster pass (D4b).
 OPENING_SEC = 600
@@ -244,12 +246,24 @@ def make_analyze_handler(
             )
         conn = connect()
         try:
-            _analyze(conn, job, ctx, started)
+            if isinstance(summarizer, JobScopedSummarizer):
+                checkpoints = JobCheckpoints(conn, job.id, lambda: ctx.cancelled)
+                summarizer.begin_job(checkpoints)
+                try:
+                    _analyze(conn, job, ctx, started, checkpoints)
+                finally:
+                    summarizer.end_job()
+            else:
+                _analyze(conn, job, ctx, started, None)
         finally:
             conn.close()
 
     def _analyze(
-        conn: psycopg.Connection[Any], job: Job, ctx: JobContext, started: float
+        conn: psycopg.Connection[Any],
+        job: Job,
+        ctx: JobContext,
+        started: float,
+        checkpoints: JobCheckpoints | None,
     ) -> None:
         video_id = job.video_id
         meta = get_video_meta(conn, video_id)
@@ -401,5 +415,7 @@ def make_analyze_handler(
                 "quotes_deduped": len(quotes) - len(kept_quotes),
             },
         )
+        if checkpoints is not None:
+            checkpoints.clear()
 
     return handler

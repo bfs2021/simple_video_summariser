@@ -264,6 +264,14 @@ Message Batch per episode is what it saves; a local model gains nothing from
 it, and the handler's per-chunk loop with its between-chunk cancellation checks
 stays as it is for every other summarizer.
 
+`JobScopedSummarizer` (#89) is a second optional extension: `begin_job(scope)`
+and `end_job()` bracket one analyze job. The scope (`JobScope`: the job id,
+`cancelled()`, `now()` and a per-step checkpoint store) is built by the handler
+from the job's own connection, so the adapter never touches the database. Only
+the Anthropic adapter implements it. Its batches are recorded in `llm_batches`
+before the first poll; a retried job resumes them, and a cancelled job stops
+waiting within a second and leaves its batch running.
+
 `Summarizer` has three methods rather than one because D4b's roster pass and
 D9's reduce step are distinct LLM calls with distinct prompts and distinct
 failure modes. Collapsing them into one `summarize()` would hide that a roster
@@ -609,6 +617,21 @@ CREATE TABLE planner_task_runs (
     last_count             INTEGER,                    -- value fn() returned; NULL on failure or None
     last_ok_at             TIMESTAMPTZ,                -- finish time of the last ok run
     last_skipped_locked_at TIMESTAMPTZ                 -- another planner held the lock; touches no other column
+);
+
+-- ============ analyze batches (#89) ============
+
+-- The Anthropic Message Batch each analyze step submitted, recorded before the
+-- first poll. A retried job resumes the batch when request_sha256 still matches,
+-- instead of submitting and paying for it again. Rows go when the analysis is
+-- saved, or with the job (ON DELETE CASCADE). Migration 0013.
+CREATE TABLE llm_batches (
+    job_id         BIGINT NOT NULL REFERENCES jobs (id) ON DELETE CASCADE,
+    step_key       TEXT NOT NULL,        -- 'roster', 'chunks', 'chunks:repair', 'reduce', 'chunk:<seq>', ...:repair
+    batch_id       TEXT NOT NULL,
+    request_sha256 TEXT NOT NULL,        -- SHA-256 of the step's requests (custom_id and params)
+    submitted_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (job_id, step_key)
 );
 ```
 
