@@ -1,6 +1,7 @@
 """Read routes (issues #39, #42; architecture.md 8.3, 9; D2, D7, D13).
 
 - ``GET /videos``: the library, filtered and paged.
+- ``GET /channels``: every known channel with its video count, paged (#119).
 - ``GET /videos/{video_id}``: one video, its best transcript and latest analysis.
 - ``GET /videos/{video_id}/analyses``: every analysis run, newest first.
 - ``GET /videos/{video_id}/transcript``: one page of the best transcript's segments.
@@ -45,7 +46,7 @@ from common.repo.analyses import (
     list_analysis_runs,
 )
 from common.repo.backfill_requests import get_request
-from common.repo.channels import get_channel_title
+from common.repo.channels import get_channel_title, list_channels
 from common.repo.search import search_transcripts
 from common.repo.transcripts import best_transcript_info, best_transcript_page
 from common.repo.videos import get_video, get_video_meta, list_videos, video_exists
@@ -203,6 +204,13 @@ def _search_q(value: object) -> object:
     return stripped
 
 
+class ChannelListQuery(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    offset: QueryInt = Field(0, ge=0, le=MAX_OFFSET)
+    limit: QueryInt = Field(200, ge=1, le=200)
+
+
 class SearchQuery(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -308,6 +316,17 @@ def get_videos(
         offset=params.offset,
         limit=params.limit,
     )
+
+
+@router.get("/channels", response_model=schemas.ChannelList)
+def get_channels(
+    _: Annotated[None, Depends(_gate(ChannelListQuery))],
+    params: Annotated[ChannelListQuery, Query()],
+    conn: ReadConn,
+) -> schemas.ChannelList:
+    """Every channel, active or not, by title; ``total`` counts them all (#119)."""
+    page = list_channels(conn, offset=params.offset, limit=params.limit)
+    return schemas.channel_list(page, offset=params.offset, limit=params.limit)
 
 
 @router.get(

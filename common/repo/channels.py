@@ -8,7 +8,7 @@ from typing import Any
 
 import psycopg
 
-from common.models import Channel
+from common.models import Channel, ChannelListItem, ChannelPage
 from common.repo._hygiene import clean_text
 
 
@@ -100,6 +100,39 @@ def list_active_channels(conn: psycopg.Connection[Any]) -> list[Channel]:
         """
     ).fetchall()
     return [_channel(row) for row in rows]
+
+
+def list_channels(conn: psycopg.Connection[Any], *, offset: int, limit: int) -> ChannelPage:
+    """One page of every channel, active or not, plus the total count (#119).
+
+    Ordered by ``title ASC NULLS LAST, channel_id ASC`` (a total order).
+    ``video_count`` is the number of ``videos`` rows with that ``channel_id``;
+    videos without a channel count nowhere. Two statements, however large
+    ``limit`` is: the page with its counts, and the total.
+    """
+    rows = conn.execute(
+        """
+        SELECT c.channel_id, c.title, c.active, count(v.video_id)
+        FROM (
+            SELECT channel_id, title, active FROM channels
+            ORDER BY title ASC NULLS LAST, channel_id ASC
+            OFFSET %(offset)s LIMIT %(limit)s
+        ) c
+        LEFT JOIN videos v ON v.channel_id = c.channel_id
+        GROUP BY c.channel_id, c.title, c.active
+        ORDER BY c.title ASC NULLS LAST, c.channel_id ASC
+        """,
+        {"offset": offset, "limit": limit},
+    ).fetchall()
+    total_row = conn.execute("SELECT count(*) FROM channels").fetchone()
+    assert total_row is not None
+    return ChannelPage(
+        items=tuple(
+            ChannelListItem(channel_id=r[0], title=r[1], active=r[2], video_count=int(r[3]))
+            for r in rows
+        ),
+        total=int(total_row[0]),
+    )
 
 
 @dataclass(frozen=True, slots=True)

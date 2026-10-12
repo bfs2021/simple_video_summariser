@@ -835,6 +835,72 @@
         "title": "CancelBackfillResponse",
         "type": "object"
       },
+      "ChannelItem": {
+        "properties": {
+          "active": {
+            "title": "Active",
+            "type": "boolean"
+          },
+          "channel_id": {
+            "title": "Channel Id",
+            "type": "string"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "video_count": {
+            "title": "Video Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "channel_id",
+          "title",
+          "active",
+          "video_count"
+        ],
+        "title": "ChannelItem",
+        "type": "object"
+      },
+      "ChannelList": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ChannelItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "offset",
+          "limit"
+        ],
+        "title": "ChannelList",
+        "type": "object"
+      },
       "ChannelRegistration": {
         "properties": {
           "active": {
@@ -2007,6 +2073,59 @@
   "openapi": "3.1.0",
   "paths": {
     "/channels": {
+      "get": {
+        "description": "Every channel, active or not, by title; ``total`` counts them all (#119).",
+        "operationId": "get_channels_channels_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "maximum": 1000000,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Channels"
+      },
       "post": {
         "operationId": "post_channels_channels_post",
         "requestBody": {

@@ -743,6 +743,7 @@ separated per D13.
 |---|---|---|
 | `POST` | `/videos` | body `{url}`; priority `+10`; returns job id |
 | `POST` | `/channels` | forward-only; sets `monitor_from` |
+| `GET` | `/channels` | paginated channel list (id, title, active, video count), powers the Library channel filter |
 | `POST` | `/channels/{id}/backfill` | `{limit, dry_run}`; priority `-10` (D9b) |
 | `POST` | `/channels/{id}/backfill-requests` | `{limit <= 5000, dry_run}`; only records a request, the planner `channel_backfill` task runs it (#115); `409` while the channel has a pending or running one |
 | `GET` | `/channels/{id}/backfill-requests/{request_id}` | state, attempts, enqueued, timestamps and `result` (the shape of the synchronous response) (#115) |

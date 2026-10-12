@@ -173,6 +173,82 @@ def test_channel_filter_and_an_unknown_channel(
     assert (unknown.status_code, unknown.json()["total"]) == (200, 0)
 
 
+# --- GET /channels (issue #119) -------------------------------------------------
+
+
+def _channel_ids(prefix: str, n: int) -> list[str]:
+    return [f"UC{prefix}{i:0{22 - len(prefix)}d}" for i in range(n)]
+
+
+def test_an_empty_channel_list(api: TestClient) -> None:
+    response = api.get("/channels")
+
+    assert response.status_code == 200
+    assert response.json() == {"items": [], "total": 0, "offset": 0, "limit": 200}
+
+
+def test_channel_list_items_counts_and_order(
+    api: TestClient, db: psycopg.Connection[Any]
+) -> None:
+    html = "<script>alert(1)</script>"
+    seed.channel(db, "UCb", "Bravo")
+    seed.channel(db, "UCa", html)
+    seed.channel(db, "UCz", None)  # untitled: last
+    seed.channel(db, "UCe", "Echo")  # no videos yet
+    db.execute("UPDATE channels SET active = false WHERE channel_id = 'UCz'")
+    seed.video(db, "chl00000001", channel_id="UCb")
+    seed.video(db, "chl00000002", channel_id="UCb")
+    seed.video(db, "chl00000003", channel_id="UCz")
+    seed.video(db, "chl00000004")  # NULL channel: counted nowhere
+
+    response = api.get("/channels")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/json"
+    body = response.json()
+    assert (body["total"], body["offset"], body["limit"]) == (4, 0, 200)
+    assert body["items"] == [
+        {"channel_id": "UCa", "title": html, "active": True, "video_count": 0},
+        {"channel_id": "UCb", "title": "Bravo", "active": True, "video_count": 2},
+        {"channel_id": "UCe", "title": "Echo", "active": True, "video_count": 0},
+        {"channel_id": "UCz", "title": None, "active": False, "video_count": 1},
+    ]
+
+
+def test_channel_video_count_equals_the_library_total_for_that_channel(
+    api: TestClient, db: psycopg.Connection[Any]
+) -> None:
+    [one, two] = _channel_ids("m", 2)
+    seed.channel(db, one, "One")
+    seed.channel(db, two, "Two")
+    for n, channel_id in enumerate([one, one, one, two]):
+        seed.video(db, f"cnt{n:08d}", channel_id=channel_id)
+
+    items = api.get("/channels").json()["items"]
+
+    for item in items:
+        library = api.get("/videos", params={"channel": item["channel_id"]}).json()
+        assert item["video_count"] == library["total"]
+    assert [i["video_count"] for i in items] == [3, 1]
+
+
+def test_channel_list_paging_boundaries_and_unknown_params(
+    api: TestClient, db: psycopg.Connection[Any]
+) -> None:
+    for n, channel_id in enumerate(_channel_ids("p", 3)):
+        seed.channel(db, channel_id, "ABC"[n])
+
+    first = api.get("/channels", params={"limit": 2, "ignored": "x"}).json()
+    second = api.get("/channels", params={"limit": 2, "offset": 2}).json()
+    beyond = api.get("/channels", params={"offset": 3}).json()
+
+    assert ([i["title"] for i in first["items"]], first["total"], first["limit"]) == (
+        ["A", "B"], 3, 2,
+    )
+    assert ([i["title"] for i in second["items"]], second["offset"]) == (["C"], 2)
+    assert (beyond["items"], beyond["total"], beyond["offset"]) == ([], 3, 3)
+
+
 # --- GET /videos/{id} -----------------------------------------------------------
 
 

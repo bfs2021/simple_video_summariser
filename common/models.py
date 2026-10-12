@@ -407,6 +407,22 @@ class VideoPage:
 
 
 @dataclass(frozen=True, slots=True)
+class ChannelListItem:
+    """One row of ``GET /channels`` (#119): no poll fields, those are #158's."""
+
+    channel_id: str
+    title: str | None
+    active: bool
+    video_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class ChannelPage:
+    items: tuple[ChannelListItem, ...]
+    total: int
+
+
+@dataclass(frozen=True, slots=True)
 class AnalysisRun:
     """An analysis plus the ``source`` of the transcript it was made from."""
 

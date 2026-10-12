@@ -12,7 +12,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * Get Channels
+         * @description Every channel, active or not, by title; ``total`` counts them all (#119).
+         */
+        get: operations["get_channels_channels_get"];
         put?: never;
         /** Post Channels */
         post: operations["post_channels_channels_post"];
@@ -661,6 +665,28 @@ export interface components {
             /** Videos Removed */
             videos_removed: number;
         };
+        /** ChannelItem */
+        ChannelItem: {
+            /** Active */
+            active: boolean;
+            /** Channel Id */
+            channel_id: string;
+            /** Title */
+            title: string | null;
+            /** Video Count */
+            video_count: number;
+        };
+        /** ChannelList */
+        ChannelList: {
+            /** Items */
+            items: components["schemas"]["ChannelItem"][];
+            /** Limit */
+            limit: number;
+            /** Offset */
+            offset: number;
+            /** Total */
+            total: number;
+        };
         /** ChannelRegistration */
         ChannelRegistration: {
             /** Active */
@@ -997,6 +1023,38 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    get_channels_channels_get: {
+        parameters: {
+            query?: {
+                offset?: number;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChannelList"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     post_channels_channels_post: {
         parameters: {
             query?: never;

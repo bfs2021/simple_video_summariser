@@ -14,6 +14,7 @@ from common.repo.channels import (
     channel_exists,
     get_channel_title,
     list_active_channels,
+    list_channels,
     record_poll,
     register_channel,
 )
@@ -291,3 +292,96 @@ def test_list_active_channels_fills_the_failure_run(conn: psycopg.Connection) ->
 
     assert channel.poll_failures == 2
     assert channel.poll_failing_since is not None
+
+
+# --- list_channels (issue #119) -------------------------------------------------
+
+
+def _seed_channel(
+    conn: psycopg.Connection[Any],
+    channel_id: str,
+    title: str | None,
+    *,
+    active: bool = True,
+) -> None:
+    conn.execute(
+        "INSERT INTO channels (channel_id, title, active, added_at)"
+        " VALUES (%s, %s, %s, %s)",
+        (channel_id, title, active, datetime(2026, 1, 1, tzinfo=UTC)),
+    )
+
+
+def _seed_video(conn: psycopg.Connection[Any], video_id: str, channel_id: str | None) -> None:
+    conn.execute(
+        "INSERT INTO videos (video_id, channel_id, discovered_at) VALUES (%s, %s, %s)",
+        (video_id, channel_id, datetime(2026, 1, 1, tzinfo=UTC)),
+    )
+
+
+def test_list_channels_on_an_empty_table(conn: psycopg.Connection) -> None:
+    page = list_channels(conn, offset=0, limit=200)
+
+    assert (page.items, page.total) == ((), 0)
+
+
+def test_list_channels_lists_every_row_with_its_video_count(conn: psycopg.Connection) -> None:
+    _seed_channel(conn, "UCa", "Alpha")
+    _seed_channel(conn, "UCb", "Bravo", active=False)
+    _seed_channel(conn, "UCc", None, active=False)  # an ad-hoc row: no title
+    _seed_channel(conn, "UCd", "Delta")  # registered, no videos yet
+    for n, channel_id in enumerate(["UCa", "UCa", "UCb", "UCc", None]):
+        _seed_video(conn, f"v{n:010d}", channel_id)  # NULL channel_id counts nowhere
+
+    page = list_channels(conn, offset=0, limit=200)
+
+    assert page.total == 4
+    assert [(c.channel_id, c.title, c.active, c.video_count) for c in page.items] == [
+        ("UCa", "Alpha", True, 2),
+        ("UCb", "Bravo", False, 1),
+        ("UCd", "Delta", True, 0),
+        ("UCc", None, False, 1),
+    ]
+
+
+def test_list_channels_orders_untitled_last_and_breaks_ties_by_id(
+    conn: psycopg.Connection,
+) -> None:
+    _seed_channel(conn, "UC3", "Same")
+    _seed_channel(conn, "UC1", "Same")
+    _seed_channel(conn, "UC9", None)
+    _seed_channel(conn, "UC8", None)
+
+    page = list_channels(conn, offset=0, limit=200)
+
+    assert [c.channel_id for c in page.items] == ["UC1", "UC3", "UC8", "UC9"]
+
+
+def test_list_channels_page_boundaries(conn: psycopg.Connection) -> None:
+    for n, letter in enumerate("ABCDE"):
+        _seed_channel(conn, f"UC{n}", letter)
+
+    full = list_channels(conn, offset=0, limit=5)
+    first = list_channels(conn, offset=0, limit=4)
+    second = list_channels(conn, offset=4, limit=4)
+    beyond = list_channels(conn, offset=5, limit=4)
+
+    assert (len(full.items), full.total) == (5, 5)
+    assert ([c.title for c in first.items], first.total) == (list("ABCD"), 5)
+    assert ([c.title for c in second.items], second.total) == (["E"], 5)
+    assert (beyond.items, beyond.total) == ((), 5)
+
+
+def test_walking_pages_returns_every_channel_exactly_once(conn: psycopg.Connection) -> None:
+    for channel_id, title in [
+        ("UC1", "Same"), ("UC2", "Same"), ("UC3", "Other"),
+        ("UC4", None), ("UC5", None), ("UC6", None),
+    ]:
+        _seed_channel(conn, channel_id, title)
+
+    walked = [
+        c.channel_id
+        for offset in range(0, 8, 2)
+        for c in list_channels(conn, offset=offset, limit=2).items
+    ]
+
+    assert walked == ["UC3", "UC1", "UC2", "UC4", "UC5", "UC6"]

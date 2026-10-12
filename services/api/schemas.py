@@ -14,6 +14,7 @@ from pydantic import AfterValidator, BaseModel, Field, JsonValue
 from common.models import (
     Analysis,
     AnalysisRun,
+    ChannelPage,
     TranscriptInfo,
     TranscriptPage,
     VideoSummary,
@@ -71,6 +72,37 @@ class VideoList(BaseModel):
     total: int
     offset: int
     limit: int
+
+
+class ChannelItem(BaseModel):
+    channel_id: str
+    title: str | None
+    active: bool
+    video_count: int
+
+
+class ChannelList(BaseModel):
+    items: list[ChannelItem]
+    total: int
+    offset: int
+    limit: int
+
+
+def channel_list(page: ChannelPage, *, offset: int, limit: int) -> ChannelList:
+    return ChannelList(
+        items=[
+            ChannelItem(
+                channel_id=c.channel_id,
+                title=c.title,
+                active=c.active,
+                video_count=c.video_count,
+            )
+            for c in page.items
+        ],
+        total=page.total,
+        offset=offset,
+        limit=limit,
+    )
 
 
 class TopicOut(BaseModel):

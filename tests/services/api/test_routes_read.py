@@ -84,6 +84,50 @@ def test_bad_library_query_params_are_422_before_the_database(
 
 
 @pytest.mark.parametrize(
+    "params",
+    [
+        {"limit": "0"},
+        {"limit": "201"},
+        {"limit": "1.5"},
+        {"limit": "abc"},
+        {"limit": "1e3"},
+        {"limit": MARKER},
+        {"limit": str(2**63)},
+        {"offset": "-1"},
+        {"offset": "1000001"},
+        {"offset": "1.5"},
+        {"offset": "abc"},
+        {"offset": "1e3"},
+        {"offset": MARKER},
+        {"offset": str(2**63 + 1)},
+    ],
+)
+def test_bad_channel_list_params_are_422_before_the_database(
+    api: TestClient, params: dict[str, str]
+) -> None:
+    _assert_422_without_echo(api.get("/channels", params=params))
+
+
+@pytest.mark.parametrize("params", [{"limit": "1"}, {"limit": "200"}, {"offset": "1000000"}])
+def test_channel_list_bounds_pass_validation(
+    app: FastAPI, params: dict[str, str]
+) -> None:
+    """Edge values are accepted; the fake connection proves the gate let them through."""
+    reached: list[bool] = []
+
+    def spy() -> Iterator[Any]:
+        reached.append(True)
+        yield _FailingConn(psycopg.OperationalError("stop here"))
+
+    app.dependency_overrides[deps.get_conn] = spy
+    with TestClient(app) as client:
+        response = client.get("/channels", params=params)
+
+    assert reached == [True]
+    assert response.status_code == 503
+
+
+@pytest.mark.parametrize(
     "path",
     [
         "a" * 10,
@@ -204,7 +248,7 @@ def test_an_operational_error_is_503_with_a_fixed_body_and_logged(
     assert "OperationalError" in line["exception"] or "QueryCanceled" in line["exception"]
 
 
-@pytest.mark.parametrize("path", ["/videos", f"/videos/{VID}"])
+@pytest.mark.parametrize("path", ["/videos", f"/videos/{VID}", "/channels"])
 def test_a_failing_connect_is_503_with_the_read_body(
     app: FastAPI, logs: LogSink, use_pool: Any, path: str
 ) -> None:
@@ -247,6 +291,7 @@ def test_openapi_lists_the_four_paths_with_params_and_response_schemas(app: Fast
         "/videos/{video_id}": {"video_id"},
         "/videos/{video_id}/analyses": {"video_id", "offset", "limit"},
         "/videos/{video_id}/transcript": {"video_id", "offset", "limit"},
+        "/channels": {"offset", "limit"},
     }
     for path, params in expected.items():
         operation = paths[path]["get"]
