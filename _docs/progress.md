@@ -125,6 +125,20 @@ Dependencies added (owner-approved): `yt-dlp==2026.8.19`,
   manual 6 videos (1.95 h), auto-only 64 (48.72 h), none 0, error 2
   (transient), 63 Shorts excluded. Speech-to-text load is ~0 by default and
   ~48.7 h per this window with `PREFER_WHISPER=1`. Input for #64.
+- **Phase 0 decisions recorded (#64), owner, 2026-10-13** (architecture §15):
+  - **O1 — STT deferred from Phase 1; subtitles-only.** Coverage is ~100%
+    (0 videos with no captions), so the default does ~0 h of speech-to-text.
+    The #20 adapter stays built but off (`PREFER_WHISPER` unset); revisit for
+    STT quality or an uncaptioned channel.
+  - **O2 — `faster-whisper large-v3` (int8), Option A / D3 default**, as the
+    Phase-1 engine. Provisional, not measured: the #3 deploy-host bake-off is
+    still owed, but O1 means no Phase-1 flow depends on the engine. The
+    `Transcriber` port keeps B (`large-v3-turbo`) a config flip and C
+    (Parakeet) a one-adapter add (§16.6). D4 diarization revisit untriggered.
+  - **O3 — `AUDIO_TTL_DAYS=30`.** With STT deferred, audio fetch is ~0 by
+    default and `AUDIO_MAX_GB` (20) is the binding cap, not the TTL.
+  - **O7 — resolved (see above):** no 3.13 transcriber split; #56 derives
+    from the 3.14 backend.
 
 ### In flight
 
