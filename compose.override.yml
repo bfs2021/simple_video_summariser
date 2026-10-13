@@ -108,6 +108,7 @@ services:
     volumes:
       - ./web/src:/home/node/app/src:ro
       - ./web/index.html:/home/node/app/index.html:ro
+      - ./web/index.css:/home/node/app/index.css:ro
       - ./web/package.json:/home/node/app/package.json:ro
       - ./web/package-lock.json:/home/node/app/package-lock.json:ro
       - ./web/tsconfig.json:/home/node/app/tsconfig.json:ro
