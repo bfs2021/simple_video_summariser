@@ -1529,6 +1529,10 @@ as an additional context from `migrate`, so it never builds on a stale base.
 
 ### 11.5 Deployment mechanics worth calling out
 
+Host setup — installing Docker Engine and Compose v2, storage, access, `.env`,
+egress, Ollama and the first deploy — is in `_docs/deploy-host.md`, with a
+read-only preflight at `ops/host/preflight.sh` (#78).
+
 **Migration ordering.** `migrate` is a one-shot container; every service gates
 on `service_completed_successfully`. Running `alembic upgrade head` on service
 startup instead would mean N replicas racing the same migration — a classic

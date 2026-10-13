@@ -58,6 +58,9 @@ Activate `.venv` first; all Python commands assume it.
   against the dev DB on `127.0.0.1:5432` (`compose.override.yml`); needs
   `DATABASE_URL` set in the shell, since `common/config.py` reads only the
   process environment, never `.env` (task #7)
+- `ops/host/preflight.sh` - read-only deploy-host preflight (#78); prints
+  PASS/WARN/FAIL per host requirement. Run on the server, not in dev; see
+  `_docs/deploy-host.md`
 - `docker compose run --rm migrate` - apply migrations in the stack (the
   one-shot `migrate` service in `compose.yml`, #55/#58); in dev, `./migrations`
   is mounted read-only, so a new revision needs no rebuild
