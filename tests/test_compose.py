@@ -558,6 +558,7 @@ def test_overlay_mounts_nothing_else_from_the_repo() -> None:
         "./migrations",
         "./web/src",
         "./web/index.html",
+        "./web/index.css",
         "./web/package.json",
         "./web/package-lock.json",
         "./web/tsconfig.json",
