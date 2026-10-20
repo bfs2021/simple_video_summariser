@@ -31,7 +31,7 @@ if (process.argv.includes('--check')) {
       console.error(
         'src/api/schema.d.ts is out of date with openapi.json. Run: npm run gen:api',
       )
-      process.exit(1)
+      process.exitCode = 1
     }
   } finally {
     rmSync(dir, { recursive: true, force: true })
