@@ -24,7 +24,7 @@ from adapters.summarize.prompt_loader import PromptSet, format_roster, load_prom
 from adapters.summarize.schema import MAX_CLAIMS, MAX_QUOTES, MAX_TOPICS
 from common.config import Settings
 from common.errors import LLMInvalidOutputError, LLMUnavailableError
-from common.models import Chunk, Roster, VideoMeta
+from common.models import Chunk, ChunkAnalysis, Claim, Roster, Topic, Usage, VideoMeta
 from tests.adapters.summarize.test_ollama import (
     META,
     ROSTER,
@@ -119,8 +119,193 @@ def sent_span(req: Recorded) -> tuple[int, int]:
 
 
 def sent_cost(req: Recorded) -> int:
-    system, user = req.body["messages"]
+    system, user = req.body["messages"][:2]
     return estimate_tokens(system["content"]) + estimate_tokens(user["content"])
+
+
+def reduce_cost(prompts: PromptSet, partials: list[ChunkAnalysis]) -> int:
+    rendered = prompts.render_reduce(
+        title=META.title,
+        partials=json.dumps(
+            [
+                {
+                    "topics": [
+                        {"title": t.title, "summary": t.summary, "start_sec": t.start_sec}
+                        for t in partial.topics
+                    ],
+                    "claims": [
+                        {
+                            "text": claim.text,
+                            "speaker": claim.speaker,
+                            "start_sec": claim.start_sec,
+                            "confidence": claim.confidence,
+                        }
+                        for claim in partial.claims
+                    ],
+                    "quotes": [],
+                }
+                for partial in partials
+            ],
+            ensure_ascii=False,
+            indent=1,
+        ),
+    )
+    return estimate_tokens(rendered.system) + estimate_tokens(rendered.user)
+
+
+def reduce_partial(marker: str, width: int = 80) -> ChunkAnalysis:
+    return ChunkAnalysis(
+        topics=(Topic(seq=0, title=marker, summary=marker + "s" * width, start_sec=1.0),),
+        claims=(Claim(text=marker + "c" * width, speaker="unknown", start_sec=2.0),),
+        quotes=(),
+    )
+
+
+def sent_reduce_partials(req: Recorded) -> list[dict[str, Any]]:
+    user = req.body["messages"][1]["content"]
+    match = re.search(r"<partials>\n(.*)\n</partials>", user, re.DOTALL)
+    assert match, user
+    value = json.loads(match.group(1))
+    assert isinstance(value, list)
+    return value
+
+
+# --- reduce ------------------------------------------------------------------
+
+
+def test_reduce_exactly_at_budget_keeps_the_one_shot_path(
+    prompts: PromptSet, caplog: pytest.LogCaptureFixture
+) -> None:
+    partials = [reduce_partial("A"), reduce_partial("B")]
+    cost = reduce_cost(prompts, partials)
+    transport = FakeTransport(reply("final"))
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        assert build(prompts, transport, budget=cost).reduce(partials, META) == "final"
+    assert len(transport.requests) == 1
+    assert not [r for r in caplog.records if r.getMessage() == "ollama_reduce_hierarchical"]
+
+
+def test_reduce_one_token_over_budget_uses_fewest_consecutive_groups(prompts: PromptSet) -> None:
+    partials = [reduce_partial(marker) for marker in "ABCD"]
+    budget = reduce_cost(prompts, partials) - 1
+    transport = FakeTransport(reply("AB"), reply("CD"), reply("final"))
+    assert build(prompts, transport, budget=budget).reduce(partials, META) == "final"
+    sent = [sent_reduce_partials(req) for req in transport.requests]
+    assert [[p["topics"][0]["title"] for p in group] for group in sent[:2]] == [
+        ["A", "B", "C"],
+        ["D"],
+    ]
+    assert [p["topics"][0]["title"] for p in sent[2]] == [
+        "Original partials 1-3",
+        "Original partials 4-4",
+    ]
+    assert [p["topics"][0]["summary"] for p in sent[2]] == ["AB", "CD"]
+    assert all(p["topics"][0]["start_sec"] is None for p in sent[2])
+    assert all(p["claims"] == [] and p["quotes"] == [] for p in sent[2])
+    assert all(sent_cost(req) <= budget for req in transport.requests)
+
+
+def test_reduce_repeats_intermediate_levels_in_order_and_accounts_for_every_call(
+    prompts: PromptSet,
+) -> None:
+    partials = [reduce_partial(marker, 170) for marker in "ABCDEFGH"]
+    pair_cost = max(reduce_cost(prompts, partials[i : i + 2]) for i in range(0, 8, 2))
+    summaries = ["summary " + marker * 300 for marker in "abcd"]
+    transport = FakeTransport(
+        *(ok(text, prompt_eval_count=10, eval_count=1) for text in summaries),
+        ok("left", prompt_eval_count=20, eval_count=2),
+        ok("right", prompt_eval_count=30, eval_count=3),
+        ok("final", prompt_eval_count=40, eval_count=4),
+    )
+    summarizer = build(prompts, transport, budget=pair_cost)
+    assert summarizer.reduce(partials, META) == "final"
+    assert len(transport.requests) == 7
+    assert all(sent_cost(req) <= pair_cost for req in transport.requests)
+    assert summarizer.take_usage() == Usage(input_tokens=130, output_tokens=13, calls=7)
+    assert summarizer.take_usage() == Usage()
+
+
+def test_reduce_repairs_an_intermediate_and_stops_after_a_later_failure(
+    prompts: PromptSet,
+) -> None:
+    partials = [reduce_partial(marker) for marker in "ABCD"]
+    budget = reduce_cost(prompts, partials) - 1
+    transport = FakeTransport(reply(""), reply("AB"), ConnectionRefusedError("down"), reply("later"))
+    summarizer = build(prompts, transport, budget=budget)
+    with pytest.raises(LLMUnavailableError):
+        summarizer.reduce(partials, META)
+    assert len(transport.requests) == 3
+
+
+def test_reduce_invalid_after_repair_stops_before_later_groups(prompts: PromptSet) -> None:
+    partials = [reduce_partial(marker) for marker in "ABCD"]
+    budget = reduce_cost(prompts, partials) - 1
+    transport = FakeTransport(reply(""), reply(""), reply("later"))
+    with pytest.raises(LLMInvalidOutputError):
+        build(prompts, transport, budget=budget).reduce(partials, META)
+    assert len(transport.requests) == 2
+
+
+def test_reduce_post_call_overflow_stops_before_later_groups(prompts: PromptSet) -> None:
+    partials = [reduce_partial(marker) for marker in "ABCD"]
+    budget = reduce_cost(prompts, partials) - 1
+    transport = FakeTransport(
+        ok("AB", prompt_eval_count=budget + RESERVE - 1, eval_count=1), reply("later")
+    )
+    with pytest.raises(LLMInvalidOutputError, match="ran out of context"):
+        build(prompts, transport, budget=budget).reduce(partials, META)
+    assert len(transport.requests) == 1
+
+
+def test_reduce_level_that_cannot_shrink_names_the_blocking_range_without_calls(
+    prompts: PromptSet,
+) -> None:
+    partials = [reduce_partial(marker) for marker in "ABC"]
+    budget = max(reduce_cost(prompts, [partial]) for partial in partials)
+    level_estimate = reduce_cost(prompts, partials)
+    assert level_estimate > budget
+    transport = FakeTransport()
+    with pytest.raises(LLMInvalidOutputError) as excinfo:
+        build(prompts, transport, budget=budget).reduce(partials, META)
+    message = str(excinfo.value)
+    assert transport.requests == []
+    assert "original partials 1-3" in message
+    assert f"{level_estimate} tokens" in message
+
+
+def test_reduce_impossible_singleton_names_range_and_settings_without_call(
+    prompts: PromptSet,
+) -> None:
+    partial = reduce_partial("SECRET", 500)
+    estimated = reduce_cost(prompts, [partial])
+    budget = estimated - 1
+    transport = FakeTransport()
+    with pytest.raises(LLMInvalidOutputError) as excinfo:
+        build(prompts, transport, budget=budget).reduce([partial], META)
+    message = str(excinfo.value)
+    assert transport.requests == []
+    assert "reduce" in message
+    assert "original partial 1" in message
+    assert f"{estimated} tokens" in message
+    assert f"OLLAMA_NUM_CTX={budget + RESERVE}" in message
+    assert f"OLLAMA_OUTPUT_RESERVE_TOKENS={RESERVE}" in message
+
+
+def test_reduce_hierarchical_log_is_once_and_contains_no_content(
+    prompts: PromptSet, caplog: pytest.LogCaptureFixture
+) -> None:
+    partials = [reduce_partial(marker) for marker in ("SECRET-A", "SECRET-B", "SECRET-C", "SECRET-D")]
+    initial = reduce_cost(prompts, partials)
+    transport = FakeTransport(reply("SECRET-SUMMARY-1"), reply("SECRET-SUMMARY-2"), reply("final"))
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        build(prompts, transport, budget=initial - 1).reduce(partials, META)
+    [record] = [r for r in caplog.records if r.getMessage() == "ollama_reduce_hierarchical"]
+    assert record.__dict__["original_partials"] == 4
+    assert record.__dict__["initial_estimated_tokens"] == initial
+    assert record.__dict__["budget"] == initial - 1
+    assert record.__dict__["levels"] == 1
+    assert record.__dict__["reduce_calls"] == 3
+    assert not any("SECRET" in record.getMessage() for record in caplog.records)
 
 
 # --- estimate_tokens ---------------------------------------------------------

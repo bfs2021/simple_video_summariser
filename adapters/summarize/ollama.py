@@ -44,6 +44,7 @@ from common.models import (
     Chunk,
     ChunkAnalysis,
     Roster,
+    Topic,
     Usage,
     VideoMeta,
 )
@@ -608,9 +609,102 @@ class OllamaSummarizer:
     def reduce(self, partials: list[ChunkAnalysis], meta: VideoMeta) -> str:
         if not partials:
             raise BugError("reduce needs at least one partial analysis")
-        prompt = self._prompts.render_reduce(title=meta.title, partials=_partials_json(partials))
-        return self._run(
-            "reduce", prompt.system, prompt.user, format=None, parse=parse_tldr
+        prompt = self._reduce_prompt(partials, meta)
+        initial_estimate = self._prompt_tokens(prompt)
+        if initial_estimate <= self._budget:
+            return self._reduce_prompt_run(prompt)
+
+        nodes = [(partial, i, i) for i, partial in enumerate(partials)]
+        levels = 0
+        calls = 0
+        while self._prompt_tokens(self._reduce_prompt([node[0] for node in nodes], meta)) > self._budget:
+            groups = self._reduce_groups(nodes, meta)
+            if len(groups) >= len(nodes):
+                self._raise_reduce_too_large(
+                    nodes[0][1],
+                    nodes[-1][2],
+                    self._prompt_tokens(self._reduce_prompt([node[0] for node in nodes], meta)),
+                )
+            reduced: list[tuple[ChunkAnalysis, int, int]] = []
+            for group in groups:
+                group_prompt = self._reduce_prompt([node[0] for node in group], meta)
+                summary = self._reduce_prompt_run(group_prompt)
+                calls += 1
+                start, end = group[0][1], group[-1][2]
+                reduced.append((self._synthetic_partial(summary, start, end), start, end))
+            nodes = reduced
+            levels += 1
+        result = self._reduce_prompt_run(self._reduce_prompt([node[0] for node in nodes], meta))
+        calls += 1
+        _logger.info(
+            "ollama_reduce_hierarchical",
+            extra={
+                "original_partials": len(partials),
+                "initial_estimated_tokens": initial_estimate,
+                "budget": self._budget,
+                "levels": levels,
+                "reduce_calls": calls,
+            },
+        )
+        return result
+
+    def _reduce_prompt(self, partials: list[ChunkAnalysis], meta: VideoMeta) -> RenderedPrompt:
+        return self._prompts.render_reduce(title=meta.title, partials=_partials_json(partials))
+
+    @staticmethod
+    def _prompt_tokens(prompt: RenderedPrompt) -> int:
+        return estimate_tokens(prompt.system) + estimate_tokens(prompt.user)
+
+    def _reduce_prompt_run(self, prompt: RenderedPrompt) -> str:
+        return self._run("reduce", prompt.system, prompt.user, format=None, parse=parse_tldr)
+
+    def _reduce_groups(
+        self, nodes: list[tuple[ChunkAnalysis, int, int]], meta: VideoMeta
+    ) -> list[list[tuple[ChunkAnalysis, int, int]]]:
+        groups: list[list[tuple[ChunkAnalysis, int, int]]] = []
+        i = 0
+        while i < len(nodes):
+            singleton = self._reduce_prompt([nodes[i][0]], meta)
+            estimated = self._prompt_tokens(singleton)
+            if estimated > self._budget:
+                self._raise_reduce_too_large(nodes[i][1], nodes[i][2], estimated)
+            lo, hi = i + 1, len(nodes)
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                prompt = self._reduce_prompt([node[0] for node in nodes[i:mid]], meta)
+                if self._prompt_tokens(prompt) <= self._budget:
+                    lo = mid
+                else:
+                    hi = mid - 1
+            groups.append(nodes[i:lo])
+            i = lo
+        return groups
+
+    @staticmethod
+    def _synthetic_partial(summary: str, start: int, end: int) -> ChunkAnalysis:
+        return ChunkAnalysis(
+            topics=(
+                Topic(
+                    seq=0,
+                    title=f"Original partials {start + 1}-{end + 1}",
+                    summary=summary,
+                    start_sec=None,
+                ),
+            ),
+            claims=(),
+            quotes=(),
+        )
+
+    def _raise_reduce_too_large(self, start: int, end: int, estimated: int) -> None:
+        affected = (
+            f"original partial {start + 1}"
+            if start == end
+            else f"original partials {start + 1}-{end + 1}"
+        )
+        raise LLMInvalidOutputError(
+            f"reduce: {affected} needs about {estimated} tokens by itself, more than the prompt "
+            f"budget of {self._budget} (OLLAMA_NUM_CTX={self._num_ctx} minus "
+            f"OLLAMA_OUTPUT_RESERVE_TOKENS={self._reserve}); raise OLLAMA_NUM_CTX"
         )
 
     def take_usage(self) -> Usage:

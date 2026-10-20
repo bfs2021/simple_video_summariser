@@ -768,7 +768,11 @@ proceeding. This makes a config change safe rather than silently inconsistent.
 
 Steps 3–5 are separate LLM calls with separate retry semantics: a roster
 failure falls back to an empty roster (all speakers `unknown`) and continues;
-a chunk failure fails the job.
+a chunk failure fails the job. When Ollama's flat reduce prompt exceeds its
+configured prompt budget, the adapter hierarchically reduces consecutive
+in-memory groups until the final prompt fits. The synthetic intermediate
+partials are not persisted; stored chunks and analyses retain their current
+shape.
 
 ---
 
