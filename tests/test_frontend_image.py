@@ -228,8 +228,9 @@ def test_dockerfile_never_sets_a_user() -> None:
 # ---- .dockerignore ----
 
 
-def test_dockerignore_excludes_web_dist() -> None:
-    assert "web/dist" in _dockerignore_lines()
+@pytest.mark.parametrize("path", ["web/dist", "web/tsconfig.tsbuildinfo"])
+def test_dockerignore_excludes_generated_frontend_artifacts(path: str) -> None:
+    assert path in _dockerignore_lines()
 
 
 def test_dockerignore_still_excludes_node_modules_and_env_files() -> None:
@@ -263,9 +264,9 @@ def test_dockerignore_keeps_what_the_build_needs(path: str) -> None:
             )
 
 
-def test_dockerignore_web_dist_is_appended_after_the_55_entries() -> None:
+def test_dockerignore_frontend_artifacts_are_appended_after_the_55_entries() -> None:
     lines = _dockerignore_lines()
-    assert lines[-1] == "web/dist"
+    assert lines[-2:] == ["web/dist", "web/tsconfig.tsbuildinfo"]
     assert lines.index(".git") < lines.index("web/dist")
     assert lines.index("*:Zone.Identifier") < lines.index("web/dist")
 

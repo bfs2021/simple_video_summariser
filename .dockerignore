@@ -34,3 +34,4 @@ scripts/
 
 # Frontend build output (issue #57): a stale local build never enters the context.
 web/dist
+web/tsconfig.tsbuildinfo
