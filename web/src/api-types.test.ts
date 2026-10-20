@@ -21,7 +21,7 @@ function fixture(): { root: string; schema: string; temp: string } {
   const temp = join(root, 'tmp')
   mkdirSync(dirname(schema), { recursive: true })
   mkdirSync(join(root, 'scripts'))
-  mkdirSync(temp)
+  mkdirSync(join(temp, 'node-compile-cache'), { recursive: true })
   writeFileSync(
     join(root, 'scripts', 'api-types.mjs'),
     readFileSync(join(webRoot, 'scripts', 'api-types.mjs')),
@@ -52,10 +52,11 @@ describe('API type drift check', () => {
       'src/api/schema.d.ts is out of date with openapi.json. Run: npm run gen:api',
     )
     expect(readFileSync(schema, 'utf8')).toBe(`${original}\ninterface DriftMarker {}\n`)
-    expect(readdirSync(temp)).toEqual([])
+    expect(readdirSync(temp).filter((entry) => entry.startsWith('gen-api-'))).toEqual([])
+    expect(readdirSync(temp)).toEqual(['node-compile-cache'])
   })
 
-  it('exits successfully without files or committed changes when clean', () => {
+  it('exits successfully without generated temp directories or committed changes when clean', () => {
     const { root, schema, temp } = fixture()
     const original = readFileSync(schema, 'utf8')
 
@@ -67,6 +68,7 @@ describe('API type drift check', () => {
 
     expect(result.status).toBe(0)
     expect(readFileSync(schema, 'utf8')).toBe(original)
-    expect(readdirSync(temp)).toEqual([])
+    expect(readdirSync(temp).filter((entry) => entry.startsWith('gen-api-'))).toEqual([])
+    expect(readdirSync(temp)).toEqual(['node-compile-cache'])
   })
 })
