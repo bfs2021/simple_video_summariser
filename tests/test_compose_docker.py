@@ -180,7 +180,7 @@ Config = dict[str, dict[str, object]]
 SOURCE_DIRS = ("common", "adapters", "services")
 # The web files the dev overlay binds (read-only) into /home/node/app.
 WEB_SOURCE_FILES = (
-    "src", "index.html", "package.json", "package-lock.json", "tsconfig.json",
+    "src", "index.html", "index.css", "package.json", "package-lock.json", "tsconfig.json",
     "vite.config.ts",
 )  # fmt: skip
 BACKEND_SERVICES = ("api", "planner", "analyzer", "transcriber")
@@ -350,6 +350,83 @@ def test_dev_config_adds_no_secrets_or_new_env_keys(
         assert added <= {"API_PROXY_TARGET"}, name
     assert "ANTHROPIC_API_KEY" not in _env_of(dev["transcriber"])
     assert _env_of(dev["transcriber"]).keys() == _env_of(prod["transcriber"]).keys()
+
+
+def test_anthropic_overlay_requires_host_file_configuration(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _hermetic(monkeypatch)
+    monkeypatch.delenv("ANTHROPIC_API_KEY_FILE", raising=False)
+    env_file = tmp_path / "empty.env"
+    env_file.write_text("")
+
+    result = _run(
+        "--env-file", str(env_file), "-f", "compose.yml", "-f",
+        "compose.anthropic.yml", "config",
+    )
+
+    assert result.returncode != 0
+    assert "ANTHROPIC_API_KEY_FILE" in result.stderr
+
+
+def _anthropic_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, dev: bool
+) -> tuple[Config, str]:
+    secret_file = tmp_path / "anthropic-key"
+    secret_file.write_text("file-backed-fake-key")
+    _hermetic(
+        monkeypatch,
+        ANTHROPIC_API_KEY="environment-sentinel-key",
+        ANTHROPIC_API_KEY_FILE=str(secret_file),
+    )
+    env_file = tmp_path / "empty.env"
+    env_file.write_text("")
+    args = ["--env-file", str(env_file), "-f", "compose.yml"]
+    if dev:
+        args += ["-f", "compose.override.yml"]
+    args += ["-f", "compose.anthropic.yml", "config", "--format", "json"]
+    result = _run(*args)
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    return data["services"], result.stdout
+
+
+@pytest.mark.parametrize("dev", [False, True])
+def test_anthropic_overlay_resolves_without_key_in_any_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, dev: bool
+) -> None:
+    services, raw = _anthropic_config(monkeypatch, tmp_path, dev=dev)
+
+    assert "environment-sentinel-key" not in raw
+    for name, service in services.items():
+        raw_env = service.get("environment", {})
+        assert isinstance(raw_env, dict)
+        env: dict[str, str] = raw_env
+        assert "ANTHROPIC_API_KEY" not in env, name
+        if name == "analyzer":
+            assert env["ANTHROPIC_API_KEY_FILE"] == "/run/secrets/anthropic_api_key"
+            assert service["secrets"] == [
+                {"source": "anthropic_api_key", "target": "anthropic_api_key"}
+            ]
+        else:
+            assert "ANTHROPIC_API_KEY_FILE" not in env, name
+            assert "secrets" not in service, name
+
+
+def test_anthropic_development_overlay_preserves_dev_behavior(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    services, _ = _anthropic_config(monkeypatch, tmp_path, dev=True)
+
+    command = services["api"]["command"]
+    assert isinstance(command, list) and "--reload" in command
+    assert _env_of(services["transcriber"])["WHISPER_MODEL"] == "tiny"
+    assert _binds(services["analyzer"])["/app/common"] == (
+        str(REPO_ROOT / "common"), True
+    )
+    ports = services["web"]["ports"]
+    assert isinstance(ports, list)
+    assert str(ports[0]["published"]) == "5173"
 
 
 def test_prod_config_has_none_of_the_dev_overlay(

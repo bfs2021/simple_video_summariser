@@ -306,7 +306,7 @@ def test_entry_of_another_channel_is_skipped_with_a_warning(
 
 @pytest.mark.parametrize(
     "published_at",
-    [None, datetime(2030, 1, 1)],  # noqa: DTZ001 - naive on purpose
+    [None, datetime(2030, 1, 1)],
     ids=["none", "naive"],
 )
 def test_entry_with_a_missing_or_naive_timestamp_is_skipped_with_a_warning(

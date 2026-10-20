@@ -1,0 +1,12 @@
+services:
+  analyzer:
+    environment:
+      ANTHROPIC_API_KEY: !reset null
+      ANTHROPIC_API_KEY_FILE: /run/secrets/anthropic_api_key
+    secrets:
+      - source: anthropic_api_key
+        target: anthropic_api_key
+
+secrets:
+  anthropic_api_key:
+    file: ${ANTHROPIC_API_KEY_FILE:?set ANTHROPIC_API_KEY_FILE to the host secret file}

@@ -18,6 +18,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 COMPOSE_YML = REPO_ROOT / "compose.yml"
 COMPOSE_OVERRIDE_YML = REPO_ROOT / "compose.override.yml"
+COMPOSE_ANTHROPIC_YML = REPO_ROOT / "compose.anthropic.yml"
 
 
 def _service_block(compose_text: str, service: str) -> str:
@@ -241,6 +242,23 @@ def test_anthropic_api_key_is_on_the_analyzer_only() -> None:
     assert "ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}" in _block("analyzer")
     for name in ("db", "migrate", "api", "planner", "transcriber", "web"):
         assert "ANTHROPIC_API_KEY" not in _block(name)
+
+
+def test_anthropic_overlay_is_explicit_and_analyzer_only() -> None:
+    text = COMPOSE_ANTHROPIC_YML.read_text()
+    analyzer = _service_block(text, "analyzer")
+    assert "ANTHROPIC_API_KEY: !reset null" in analyzer
+    assert "ANTHROPIC_API_KEY_FILE: /run/secrets/anthropic_api_key" in analyzer
+    assert "source: anthropic_api_key" in analyzer
+    assert "target: anthropic_api_key" in analyzer
+    assert set(re.findall(r"^  (\w+):$", _top_level_section(text, "services"), re.MULTILINE)) == {
+        "analyzer"
+    }
+    secrets = _top_level_section(text, "secrets")
+    assert "anthropic_api_key:" in secrets
+    assert "file: ${ANTHROPIC_API_KEY_FILE:?" in secrets
+    for forbidden in ("sk-ant", "/dev/null", "dummy"):
+        assert forbidden not in text.lower()
 
 
 def test_every_interpolated_variable_is_listed_in_env_example() -> None:

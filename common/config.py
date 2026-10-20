@@ -9,11 +9,11 @@ Importing the module validates nothing: tests, Alembic and tooling can import
 it with an empty environment. Only ``get_settings()`` builds and checks the
 object.
 
-Values come from the process environment only. There is deliberately no
-``.env`` or secrets-directory source, so a stray file in the working
-directory cannot change behaviour. Secrets (``DATABASE_URL``,
-``ANTHROPIC_API_KEY``) are ``SecretStr`` and never appear in ``repr``,
-``str`` or validation errors.
+Values come from the process environment only, except for the explicit
+``ANTHROPIC_API_KEY_FILE`` path. There is deliberately no ``.env`` or
+secrets-directory source, so a stray file in the working directory cannot
+change behaviour. Secrets (``DATABASE_URL``, ``ANTHROPIC_API_KEY``) are
+``SecretStr`` and never appear in ``repr``, ``str`` or validation errors.
 """
 
 from __future__ import annotations
@@ -89,6 +89,7 @@ class Settings(BaseSettings):
     # CPU inference on a 4B model is slow (architecture.md 16.7).
     OLLAMA_TIMEOUT_SEC: PositiveInt = 900
     ANTHROPIC_API_KEY: SecretStr | None = None
+    ANTHROPIC_API_KEY_FILE: Path | None = None
     ANTHROPIC_MODEL: str = "claude-haiku-4-5"
     ANTHROPIC_BATCH: bool = True
     ANTHROPIC_MAX_TOKENS: PositiveInt = 4096
@@ -183,12 +184,41 @@ class Settings(BaseSettings):
         return value
 
     @field_validator(
-        "ANTHROPIC_API_KEY", "YTDLP_COOKIE_FILE", "ALERT_WEBHOOK_URL", mode="before"
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_API_KEY_FILE",
+        "YTDLP_COOKIE_FILE",
+        "ALERT_WEBHOOK_URL",
+        mode="before",
     )
     @classmethod
     def _empty_means_unset(cls, value: Any) -> Any:
         # Compose passes `${VAR:-}` through as an empty string.
         return None if value == "" else value
+
+    @field_validator("ANTHROPIC_API_KEY_FILE")
+    @classmethod
+    def _anthropic_key_file(
+        cls, value: Path | None, info: ValidationInfo
+    ) -> Path | None:
+        if value is None:
+            return None
+        if info.data.get("ANTHROPIC_API_KEY") is not None:
+            raise ValueError(
+                "ANTHROPIC_API_KEY_FILE and ANTHROPIC_API_KEY cannot both be non-empty"
+            )
+        try:
+            if not value.is_file():
+                raise OSError
+            raw = value.read_bytes()
+            key = raw.decode("utf-8").rstrip("\r\n")
+        except (OSError, UnicodeError):
+            raise ValueError(
+                "ANTHROPIC_API_KEY_FILE must name a readable regular UTF-8 file"
+            ) from None
+        if not key:
+            raise ValueError("ANTHROPIC_API_KEY_FILE must not be empty")
+        info.data["ANTHROPIC_API_KEY"] = SecretStr(key)
+        return value
 
     @field_validator("OLLAMA_HOST")
     @classmethod

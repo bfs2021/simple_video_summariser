@@ -151,7 +151,7 @@ def test_every_architecture_variable_is_a_field_except_transcriber_cpus() -> Non
     expected = {
         "DATABASE_URL", "SUMMARIZER", "OLLAMA_MODEL", "OLLAMA_HOST",
         "OLLAMA_NUM_CTX", "OLLAMA_OUTPUT_RESERVE_TOKENS", "OLLAMA_TIMEOUT_SEC",
-        "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "ANTHROPIC_BATCH",
+        "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY_FILE", "ANTHROPIC_MODEL", "ANTHROPIC_BATCH",
         "ANTHROPIC_MAX_TOKENS", "ANTHROPIC_BATCH_POLL_SEC",
         "ANTHROPIC_BATCH_MAX_WAIT_SEC",
         "PROMPT_VERSION", "CHUNK_SEC", "OVERLAP_SEC", "WHISPER_MODEL",
@@ -259,6 +259,126 @@ def test_api_key_is_read_from_the_environment(
     key = get_settings().ANTHROPIC_API_KEY
     assert key is not None
     assert key.get_secret_value() == API_KEY
+
+
+@pytest.mark.parametrize(
+    ("suffix", "expected"),
+    [(b"", API_KEY), (b"\n", API_KEY), (b"\r\n", API_KEY), (b"\r\n\n", API_KEY)],
+)
+def test_api_key_file_removes_only_terminal_cr_lf(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, suffix: bytes, expected: str
+) -> None:
+    secret_file = tmp_path / "anthropic-key"
+    secret_file.write_bytes(b" " + API_KEY.encode() + b" " + suffix)
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    monkeypatch.setenv("ANTHROPIC_API_KEY_FILE", str(secret_file))
+
+    settings = get_settings()
+
+    assert settings.ANTHROPIC_API_KEY_FILE == secret_file
+    key = settings.ANTHROPIC_API_KEY
+    assert key is not None
+    assert key.get_secret_value() == f" {expected} "
+
+
+@pytest.mark.parametrize("file_value", [None, ""])
+def test_unset_or_empty_api_key_file_keeps_environment_behavior(
+    monkeypatch: pytest.MonkeyPatch, file_value: str | None
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", API_KEY)
+    if file_value is not None:
+        monkeypatch.setenv("ANTHROPIC_API_KEY_FILE", file_value)
+
+    settings = get_settings()
+
+    assert settings.ANTHROPIC_API_KEY_FILE is None
+    key = settings.ANTHROPIC_API_KEY
+    assert key is not None
+    assert key.get_secret_value() == API_KEY
+
+
+@pytest.mark.parametrize("env_key", [None, ""])
+def test_unset_or_empty_environment_key_permits_api_key_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, env_key: str | None
+) -> None:
+    secret_file = tmp_path / "anthropic-key"
+    secret_file.write_text(API_KEY)
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    monkeypatch.setenv("ANTHROPIC_API_KEY_FILE", str(secret_file))
+    if env_key is not None:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", env_key)
+
+    key = get_settings().ANTHROPIC_API_KEY
+
+    assert key is not None
+    assert key.get_secret_value() == API_KEY
+
+
+def test_nonempty_api_key_sources_are_rejected_naming_both(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    secret_file = tmp_path / "anthropic-key"
+    secret_file.write_text("different-fake-key")
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", API_KEY)
+    monkeypatch.setenv("ANTHROPIC_API_KEY_FILE", str(secret_file))
+
+    with pytest.raises(ValidationError) as exc_info:
+        get_settings()
+
+    [error] = exc_info.value.errors()
+    assert error["loc"] == ("ANTHROPIC_API_KEY_FILE",)
+    assert "ANTHROPIC_API_KEY_FILE" in error["msg"]
+    assert "ANTHROPIC_API_KEY" in error["msg"]
+
+
+@pytest.mark.parametrize("kind", ["missing", "directory", "invalid_utf8", "empty", "newlines"])
+def test_invalid_api_key_file_fails_at_file_setting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, kind: str
+) -> None:
+    secret_file = tmp_path / "anthropic-key"
+    if kind == "directory":
+        secret_file.mkdir()
+    elif kind == "invalid_utf8":
+        secret_file.write_bytes(b"\xff\xfe")
+    elif kind == "empty":
+        secret_file.write_bytes(b"")
+    elif kind == "newlines":
+        secret_file.write_bytes(b"\r\n\n")
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    monkeypatch.setenv("ANTHROPIC_API_KEY_FILE", str(secret_file))
+
+    with pytest.raises(ValidationError) as exc_info:
+        get_settings()
+
+    [error] = exc_info.value.errors()
+    assert error["loc"] == ("ANTHROPIC_API_KEY_FILE",)
+    assert "ANTHROPIC_API_KEY_FILE" in error["msg"]
+
+
+def test_unreadable_api_key_file_fails_at_file_setting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    secret_file = tmp_path / "anthropic-key"
+    secret_file.write_text(API_KEY)
+    original = Path.read_bytes
+
+    def deny_read(path: Path) -> bytes:
+        if path == secret_file:
+            raise PermissionError("permission denied")
+        return original(path)
+
+    monkeypatch.setattr(Path, "read_bytes", deny_read)
+    monkeypatch.setenv("DATABASE_URL", DB_URL)
+    monkeypatch.setenv("ANTHROPIC_API_KEY_FILE", str(secret_file))
+
+    with pytest.raises(ValidationError) as exc_info:
+        get_settings()
+
+    [error] = exc_info.value.errors()
+    assert error["loc"] == ("ANTHROPIC_API_KEY_FILE",)
+    assert "ANTHROPIC_API_KEY_FILE" in error["msg"]
 
 
 # --- chunking -----------------------------------------------------------------
@@ -676,12 +796,20 @@ PLACEHOLDER = "<redacted>"
 
 def _leak_surfaces(exc: BaseException) -> dict[str, str]:
     assert isinstance(exc, ValidationError)
+    chain: list[str] = []
+    link: BaseException | None = exc
+    seen: set[int] = set()
+    while link is not None and id(link) not in seen:
+        seen.add(id(link))
+        chain.extend((str(link), repr(link)))
+        link = link.__cause__ or link.__context__
     return {
         "str": str(exc),
         "repr": repr(exc),
         "json": exc.json(),
         "errors": repr(exc.errors()),
         "traceback": "".join(traceback.format_exception(exc)),
+        "chain": "".join(chain),
     }
 
 
@@ -792,6 +920,33 @@ def test_failed_get_settings_is_not_cached(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("OVERLAP_SEC", "60")
 
     assert isinstance(get_settings(), Settings)
+
+
+@pytest.mark.parametrize("failure", ["read", "conflict"])
+def test_api_key_file_failures_do_not_leak_key_content(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str], failure: str
+) -> None:
+    secret_file = tmp_path / "anthropic-key"
+    secret_file.write_text(SECRET_KEY)
+    monkeypatch.setenv("DATABASE_URL", SECRET_DSN)
+    monkeypatch.setenv("ANTHROPIC_API_KEY_FILE", str(secret_file))
+    if failure == "conflict":
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "another-secret-key")
+    else:
+        def deny_read(path: Path) -> bytes:
+            raise PermissionError(SECRET_KEY)
+
+        monkeypatch.setattr(Path, "read_bytes", deny_read)
+
+    with pytest.raises(ValidationError) as exc_info:
+        get_settings()
+
+    _assert_no_secret_anywhere(exc_info.value)
+    captured = capsys.readouterr()
+    for rendered in (*_leak_surfaces(exc_info.value).values(), caplog.text, captured.out, captured.err):
+        assert SECRET_KEY not in rendered
+        assert "another-secret-key" not in rendered
 
 
 # --- sources ------------------------------------------------------------------

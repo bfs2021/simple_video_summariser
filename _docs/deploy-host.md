@@ -178,10 +178,34 @@ Then edit `.env`:
   tr -dc 'A-Za-z0-9_-' < /dev/urandom | head -c 40; echo
   ```
 
-- **`ANTHROPIC_API_KEY`** — only if running `SUMMARIZER=anthropic`. Put it in
-  `.env` (mode 600), never in a shell profile, shell history, or on a command
-  line. (Reading it from a Docker secret file instead is #136.) The default
-  `SUMMARIZER=ollama` needs no key.
+- **Anthropic, legacy environment mode** — only if running
+  `SUMMARIZER=anthropic`: put `ANTHROPIC_API_KEY` in `.env` (mode 600), never in
+  a shell profile, shell history, or on a command line. Leave
+  `ANTHROPIC_API_KEY_FILE` empty and deploy with the base command below.
+- **Ollama mode** — leave both Anthropic variables empty and use the base
+  command. No secret file is required.
+- **Anthropic, recommended file mode** — create the file outside the checkout
+  as the deploy account, without putting the key in a command argument or shell
+  history:
+
+  ```bash
+  install -d -m 700 "$HOME/.config/ytdigest"
+  umask 077
+  read -rsp 'Anthropic API key: ' ANTHROPIC_KEY; printf '\n'
+  printf '%s' "$ANTHROPIC_KEY" > "$HOME/.config/ytdigest/anthropic_api_key"
+  unset ANTHROPIC_KEY
+  chmod 600 "$HOME/.config/ytdigest/anthropic_api_key"
+  ```
+
+  The deploy account must own the file. Remove the legacy
+  `ANTHROPIC_API_KEY` line from `.env`, then set only the non-secret path:
+
+  ```dotenv
+  ANTHROPIC_API_KEY_FILE=/home/<deploy-user>/.config/ytdigest/anthropic_api_key
+  ```
+
+  A missing variable makes Compose configuration fail; a missing file makes
+  deployment fail. Do not create a dummy or empty fallback.
 
 `.env` is gitignored; never commit it.
 
@@ -279,13 +303,37 @@ variables.
 Migrations run as a standalone one-shot, never automatically on startup
 (AGENTS.md; concurrent replicas racing a migration can corrupt the schema).
 
-```bash
-# apply migrations in the stack (the one-shot `migrate` service, #55/#58)
-docker compose run --rm migrate
+Ollama or legacy Anthropic environment mode:
 
-# bring the stack up (the production path — never merges the dev overlay)
+```bash
+docker compose -f compose.yml run --rm migrate
+# The production path never merges the dev overlay.
 docker compose -f compose.yml up -d --build
 ```
+
+Anthropic file mode instead uses both files for migration and startup:
+
+```bash
+docker compose -f compose.yml -f compose.anthropic.yml run --rm migrate
+docker compose -f compose.yml -f compose.anthropic.yml up -d --build
+```
+
+Before and after an Anthropic file-mode deployment, verify that neither the
+resolved model nor the analyzer container environment carries the key. These
+commands print names and paths only; inspect the output and do not paste the
+key into either command:
+
+```bash
+docker compose -f compose.yml -f compose.anthropic.yml config --format json \
+  | grep -E 'ANTHROPIC_API_KEY|anthropic_api_key'
+docker inspect ytdigest-analyzer-1 --format '{{range .Config.Env}}{{println .}}{{end}}' \
+  | grep ANTHROPIC
+```
+
+The resolved config must contain only `ANTHROPIC_API_KEY_FILE` and the secret
+path/source, never `ANTHROPIC_API_KEY`. The inspect output must contain only
+`ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic_api_key`. Container names can
+differ; obtain the analyzer name with `docker compose ps analyzer`.
 
 Sanity checks:
 

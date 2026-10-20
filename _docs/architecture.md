@@ -1015,7 +1015,7 @@ than reading `os.environ` directly.
 | `SUMMARIZER` | `ollama` | analyzer |
 | `OLLAMA_MODEL` / `OLLAMA_HOST` | `qwen3.5:4b` | analyzer (see 16.7) |
 | `OLLAMA_OUTPUT_RESERVE_TOKENS` | `2048` | analyzer: tokens of `OLLAMA_NUM_CTX` kept free for the reply; prompt budget is `OLLAMA_NUM_CTX - OLLAMA_OUTPUT_RESERVE_TOKENS`, and startup fails if it is `>= OLLAMA_NUM_CTX` (#85) |
-| `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` | — / `claude-haiku-4-5` | analyzer (D6: API key only) |
+| `ANTHROPIC_API_KEY` / `ANTHROPIC_API_KEY_FILE` / `ANTHROPIC_MODEL` | — / — / `claude-haiku-4-5` | analyzer (D6: API key only); the explicit file path is the opt-in Compose-secret source |
 | `ANTHROPIC_BATCH` | `1` | use Batch API — 50% cost (16.8) |
 | `PROMPT_VERSION` | `v1` | analyzer, planner |
 | `SWEEP_MAX_JOBS_ANTHROPIC` | `100` | planner: cumulative per-`PROMPT_VERSION` count of re-analysis sweep jobs allowed while `SUMMARIZER=anthropic` (`0` = none); ignored for ollama (#99) |
@@ -1516,6 +1516,14 @@ networks:
   egress: {}
 ```
 
+For Anthropic secret-file deployments, merge the opt-in
+`compose.anthropic.yml` after this base file. It declares a required host file,
+mounts it read-only at `/run/secrets/anthropic_api_key` on `analyzer` only,
+sets `ANTHROPIC_API_KEY_FILE` to that target, and resets the direct key
+environment entry. Development may merge `compose.override.yml` between the
+base and secret overlay; the ordinary automatic development stack does not
+include the secret.
+
 Corrections to the earlier listing, all shipped in #58: `db` mounts
 `pgdata:/var/lib/postgresql` (#7); `planner`, `analyzer` and `transcriber`
 also join a new ordinary `egress` network, because an `internal: true`
@@ -1576,8 +1584,15 @@ multi-GB models.
 
 **Secrets.** `.env` is gitignored; `.env.example` is committed with placeholder
 values. `POSTGRES_PASSWORD` uses `:?required` so the stack refuses to start
-rather than silently defaulting. For `ANTHROPIC_API_KEY`, prefer a Docker
-secret or host-level env over `.env` once this leaves the development phase.
+rather than silently defaulting. The analyzer accepts the Anthropic key either
+from non-empty `ANTHROPIC_API_KEY` or from the regular UTF-8 file explicitly
+named by `ANTHROPIC_API_KEY_FILE`; setting both non-empty is an error. File
+loading strips terminal CR/LF only, and missing, unreadable, empty or malformed
+files fail startup without exposing content. No general secrets directory is
+read. `compose.anthropic.yml` is opt-in, mounts its secret only on `analyzer`,
+removes `ANTHROPIC_API_KEY` from that container's environment, and is deployed
+with `docker compose -f compose.yml -f compose.anthropic.yml up -d --build`.
+The base file retains Ollama and direct-environment compatibility.
 
 **`.dockerignore` is load-bearing**, not hygiene: without it, `web/node_modules`
 and `.git` enter the build context, inflating it by hundreds of MB and

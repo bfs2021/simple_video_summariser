@@ -679,7 +679,7 @@ def test_run_logs_one_structured_line_with_the_report_fields(
 
 def test_naive_now_is_rejected(conn: psycopg.Connection, audio_dir: Path) -> None:
     with pytest.raises(ValueError):
-        run(conn, audio_dir, now=datetime(2026, 6, 1))  # noqa: DTZ001 - naive on purpose
+        run(conn, audio_dir, now=datetime(2026, 6, 1))
 
 
 @pytest.fixture(autouse=True)
