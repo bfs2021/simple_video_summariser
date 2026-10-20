@@ -3,13 +3,18 @@
 import type { components, operations } from '../api'
 
 type VideoItem = components['schemas']['VideoItem']
+type VideoQuery = NonNullable<operations['get_videos_videos_get']['parameters']['query']>
 export type VideoStatus = VideoItem['status']
+export type VideoSort = NonNullable<VideoQuery['sort']>
+export type SortOrder = NonNullable<VideoQuery['order']>
 
 export const PAGE_SIZE = 50
 // #42 rejects an offset above this.
 export const MAX_OFFSET = 1_000_000
 
 export const STATUSES: readonly VideoStatus[] = ['done', 'processing', 'failed', 'unavailable', 'idle']
+export const SORTS: readonly VideoSort[] = ['title', 'published', 'status', 'channel']
+export const ORDERS: readonly SortOrder[] = ['asc', 'desc']
 
 // ---- status label -------------------------------------------------------
 
@@ -111,15 +116,25 @@ export interface LibraryState {
   from: string | null
   to: string | null
   status: VideoStatus | null
+  sort: VideoSort
+  order: SortOrder
   page: number
 }
 
-export const EMPTY_STATE: LibraryState = { channel: null, from: null, to: null, status: null, page: 1 }
+export const EMPTY_STATE: LibraryState = {
+  channel: null,
+  from: null,
+  to: null,
+  status: null,
+  sort: 'published',
+  order: 'desc',
+  page: 1,
+}
 
 const CHANNEL_ID = /^UC[A-Za-z0-9_-]{22}$/
 const WHOLE_NUMBER = /^[1-9][0-9]*$/
 
-export type LibraryKey = 'channel' | 'from' | 'to' | 'status' | 'page'
+export type LibraryKey = 'channel' | 'from' | 'to' | 'status' | 'sort' | 'order' | 'page'
 
 export interface ParsedParams {
   state: LibraryState
@@ -129,6 +144,14 @@ export interface ParsedParams {
 
 function isStatus(s: string): s is VideoStatus {
   return (STATUSES as readonly string[]).includes(s)
+}
+
+function isSort(s: string): s is VideoSort {
+  return (SORTS as readonly string[]).includes(s)
+}
+
+function isOrder(s: string): s is SortOrder {
+  return (ORDERS as readonly string[]).includes(s)
 }
 
 function isPage(s: string): boolean {
@@ -158,6 +181,10 @@ export function parseLibraryParams(params: URLSearchParams): ParsedParams {
   state.to = read('to', isValidDate)
   const status = read('status', isStatus)
   state.status = status === null ? null : (status as VideoStatus)
+  const sort = read('sort', isSort)
+  state.sort = sort === null ? 'published' : (sort as VideoSort)
+  const order = read('order', isOrder)
+  state.order = order === null ? 'desc' : (order as SortOrder)
   const page = read('page', isPage)
   state.page = page === null ? 1 : Number(page)
   return { state, invalid }
@@ -170,6 +197,10 @@ export function toSearchParams(state: LibraryState): URLSearchParams {
   if (state.from !== null) p.set('from', state.from)
   if (state.to !== null) p.set('to', state.to)
   if (state.status !== null) p.set('status', state.status)
+  if (state.sort !== 'published' || state.order !== 'desc') {
+    p.set('sort', state.sort)
+    p.set('order', state.order)
+  }
   if (state.page > 1) p.set('page', String(state.page))
   return p
 }
@@ -195,6 +226,10 @@ export function videosQuery(
     // The UI's "To" is inclusive; #42's published_before is exclusive.
     const before = addOneDay(state.to)
     if (before !== null) q.published_before = before
+  }
+  if (state.sort !== 'published' || state.order !== 'desc') {
+    q.sort = state.sort
+    q.order = state.order
   }
   q.limit = PAGE_SIZE
   q.offset = (state.page - 1) * PAGE_SIZE

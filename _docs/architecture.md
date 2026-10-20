@@ -823,7 +823,7 @@ separated per D13.
 | `GET` | `/channels/{id}/backfill-requests/{request_id}` | state, attempts, enqueued, timestamps and `result` (the shape of the synchronous response) (#115) |
 | `POST` | `/channels/{id}/backfill/cancel` | `{backfill_id}`; deletes that backfill's pending `ingest` jobs (#116) |
 | `POST` | `/videos/{id}/reanalyze` | force new `analyze` at current version |
-| `GET` | `/videos` | paginated library view; filters: channel, state, date |
+| `GET` | `/videos` | paginated library view; filters: channel, state, date; scalar `sort=title|published|status|channel`, `order=asc|desc` |
 | `GET` | `/videos/{id}` | latest analysis + job state |
 | `GET` | `/videos/{id}/analyses` | all runs (Compare view, D7) |
 | `GET` | `/videos/{id}/transcript` | paginated segments |
@@ -833,6 +833,15 @@ separated per D13.
 | `POST` | `/ops/jobs/{id}/retry` | resurrect a dead job |
 | `GET` | `/healthz` | liveness + queue depth by kind/state |
 | `GET` | `/metrics` | Prometheus text format (optional) |
+
+`GET /videos` defaults `sort` and `order` independently to `published` and
+`desc`. It applies one server-side sort before offset pagination. Title and
+channel compare `lower(...) COLLATE "C"`; title, channel and publication NULLs
+are last in either direction. Published ties retain `discovered_at DESC`.
+Status rank ascending is `idle`, `processing`, `done`, `unavailable`, `failed`.
+Every mode ends with immutable `video_id ASC`; the requested direction never
+reverses this tie-break. Invalid, empty, wrong-case or repeated known sort
+parameters are `422`. Unknown unrelated query parameters remain ignored.
 
 Every route passes through `deps.require_auth` — a no-op returning `None` in
 v1, one implementation change away from enforcing a bearer token (D13).

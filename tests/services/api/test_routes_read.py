@@ -70,6 +70,12 @@ def _assert_422_without_echo(response: Any, *markers: str) -> None:
         {"status": MARKER},
         {"status": "pending"},
         {"status": "DONE"},
+        {"sort": ""},
+        {"sort": "TITLE"},
+        {"sort": "unknown"},
+        {"order": ""},
+        {"order": "ASC"},
+        {"order": "sideways"},
         {"published_after": "2026-13-01"},
         {"published_after": "yesterday"},
         {"published_before": "2026-02-30"},
@@ -173,6 +179,27 @@ def test_bad_paging_params_are_422_before_the_database(
     api: TestClient, suffix: str, params: dict[str, str]
 ) -> None:
     _assert_422_without_echo(api.get(f"/videos/{VID}{suffix}", params=params))
+
+
+@pytest.mark.parametrize("query", ["sort=title&sort=channel", "order=asc&order=desc"])
+def test_repeated_sort_params_are_422_before_the_database(api: TestClient, query: str) -> None:
+    _assert_422_without_echo(api.get(f"/videos?{query}"))
+
+
+@pytest.mark.parametrize(
+    ("raw", "sort", "order"),
+    [
+        ({}, "published", "desc"),
+        ({"sort": "title"}, "title", "desc"),
+        ({"order": "asc"}, "published", "asc"),
+        ({"sort": "status", "order": "asc"}, "status", "asc"),
+    ],
+)
+def test_library_sort_defaults_are_independent(
+    raw: dict[str, str], sort: str, order: str
+) -> None:
+    query = routes_read.VideoListQuery.model_validate(raw)
+    assert (query.sort, query.order) == (sort, order)
 
 
 def test_a_naive_datetime_is_read_as_utc() -> None:
@@ -286,8 +313,8 @@ def test_healthz_keeps_its_own_unavailable_body(
 def test_openapi_lists_the_four_paths_with_params_and_response_schemas(app: FastAPI) -> None:
     paths = app.openapi()["paths"]
     expected = {
-        "/videos": {"channel", "status", "published_after", "published_before", "offset",
-                    "limit"},
+        "/videos": {"channel", "status", "published_after", "published_before", "sort", "order",
+                    "offset", "limit"},
         "/videos/{video_id}": {"video_id"},
         "/videos/{video_id}/analyses": {"video_id", "offset", "limit"},
         "/videos/{video_id}/transcript": {"video_id", "offset", "limit"},
@@ -298,6 +325,19 @@ def test_openapi_lists_the_four_paths_with_params_and_response_schemas(app: Fast
         assert {p["name"] for p in operation["parameters"]} == params, path
         schema = operation["responses"]["200"]["content"]["application/json"]["schema"]
         assert "$ref" in schema, path
+    video_params = {p["name"]: p["schema"] for p in paths["/videos"]["get"]["parameters"]}
+    assert video_params["sort"] == {
+        "type": "string",
+        "enum": ["title", "published", "status", "channel"],
+        "default": "published",
+        "title": "Sort",
+    }
+    assert video_params["order"] == {
+        "type": "string",
+        "enum": ["asc", "desc"],
+        "default": "desc",
+        "title": "Order",
+    }
 
 
 def test_read_routes_are_sync_and_declare_response_models() -> None:

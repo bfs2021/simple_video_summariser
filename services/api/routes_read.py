@@ -182,6 +182,8 @@ class VideoListQuery(BaseModel):
     status: Literal["done", "processing", "unavailable", "failed", "idle"] | None = None
     published_after: QueryDatetime | None = None
     published_before: QueryDatetime | None = None
+    sort: Literal["title", "published", "status", "channel"] = "published"
+    order: Literal["asc", "desc"] = "desc"
     offset: QueryInt = Field(0, ge=0, le=MAX_OFFSET)
     limit: QueryInt = Field(50, ge=1, le=200)
 
@@ -245,6 +247,12 @@ def _gate(model: type[BaseModel]) -> Callable[[Request], None]:
 
     def gate(request: Request) -> None:
         try:
+            if model is VideoListQuery:
+                for key in ("sort", "order"):
+                    if len(request.query_params.getlist(key)) > 1:
+                        raise RequestValidationError(
+                            [{"loc": ("query", key), "msg": "must be supplied once", "type": "value_error"}]
+                        )
             model.model_validate(dict(request.query_params))
         except ValidationError as exc:
             errors = exc.errors(include_input=False, include_context=False, include_url=False)
@@ -300,13 +308,15 @@ def get_videos(
     params: Annotated[VideoListQuery, Query()],
     conn: ReadConn,
 ) -> schemas.VideoList:
-    """The library, newest published first; ``total`` counts every match."""
+    """The filtered library in the requested single-column order."""
     page = list_videos(
         conn,
         channel_id=params.channel,
         status=params.status,
         published_after=params.published_after,
         published_before=params.published_before,
+        sort=params.sort,
+        order=params.order,
         offset=params.offset,
         limit=params.limit,
     )

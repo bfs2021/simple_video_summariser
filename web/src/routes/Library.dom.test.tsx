@@ -154,6 +154,73 @@ describe('request construction', () => {
   })
 })
 
+describe('sorting', () => {
+  it('marks only Published descending and gives every header an action name', async () => {
+    stubFetch(serverWith(2))
+    await mount()
+    const headers = screen.getAllByRole('columnheader')
+    expect(headers.map((header) => [header.textContent, header.getAttribute('aria-sort')])).toEqual([
+      ['Title', null],
+      ['Channel', null],
+      ['Published descending', 'descending'],
+      ['Status', null],
+    ])
+    expect(screen.getByRole('button', { name: 'Sort by Title ascending' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Sort by Channel ascending' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Sort by Published ascending' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Sort by Status ascending' })).toBeTruthy()
+  })
+
+  it.each([
+    ['Title', 'title', 'asc'],
+    ['Channel', 'channel', 'asc'],
+    ['Status', 'status', 'asc'],
+  ])('selects %s with its default direction, preserving filters and resetting page', async (label, sort, order) => {
+    stubFetch(serverWith(120))
+    const router = await mount('/?status=idle&page=2')
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: `Sort by ${label} ascending` }))
+    })
+    await settle()
+    expect(search(router)).toBe(`?status=idle&sort=${sort}&order=${order}`)
+    expect(last().searchParams.get('sort')).toBe(sort)
+    expect(last().searchParams.get('order')).toBe(order)
+    expect(last().searchParams.get('offset')).toBe('0')
+  })
+
+  it('toggles an active header and Back restores the prior sort', async () => {
+    stubFetch(serverWith(2))
+    const router = await mount('/?sort=title&order=asc')
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Sort by Title descending' }))
+    })
+    await settle()
+    expect(search(router)).toBe('?sort=title&order=desc')
+    expect(screen.getByRole('columnheader', { name: 'Title descending' }).getAttribute('aria-sort')).toBe(
+      'descending',
+    )
+    await act(async () => {
+      await router.navigate(-1)
+    })
+    await settle()
+    expect(search(router)).toBe('?sort=title&order=asc')
+    expect(screen.getByRole('columnheader', { name: 'Title ascending' }).getAttribute('aria-sort')).toBe(
+      'ascending',
+    )
+  })
+
+  it('clear all filters preserves sorting and sorting alone does not show it', async () => {
+    stubFetch(serverWith(2))
+    const router = await mount('/?status=done&sort=channel&order=desc')
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Clear all filters' }))
+    })
+    await settle()
+    expect(search(router)).toBe('?sort=channel&order=desc')
+    expect(screen.queryByRole('button', { name: 'Clear all filters' })).toBeNull()
+  })
+})
+
 describe('rows', () => {
   it('shows title link, channel, UTC date and status', async () => {
     stubFetch(() => list(1, [vid(1, { published_at: '2026-09-01T02:00:00Z' })]))
@@ -168,7 +235,7 @@ describe('rows', () => {
     expect(screen.getAllByRole('columnheader').map((h) => h.textContent)).toEqual([
       'Title',
       'Channel',
-      'Published',
+      'Published descending',
       'Status',
     ])
   })
@@ -408,7 +475,7 @@ describe('untrusted URL parameters', () => {
     stubFetch(serverWith(2))
     const m = 'MARKER'
     const router = await mount(
-      `/?channel=${m}&from=${m}&to=${m}&status=${m}&page=${m}&q=${m}&before=${m}&offset=${m}&limit=${m}`,
+      `/?channel=${m}&from=${m}&to=${m}&status=${m}&sort=${m}&order=${m}&page=${m}&q=${m}&before=${m}&offset=${m}&limit=${m}`,
     )
     expect(requests).toHaveLength(1)
     expect(last().search).toBe('?limit=50&offset=0')
@@ -417,7 +484,7 @@ describe('untrusted URL parameters', () => {
     expect(document.body.textContent).not.toContain(m)
     expect((screen.getByLabelText('From') as HTMLInputElement).value).toBe('')
     // Invalid known params are gone from the URL, replaced rather than pushed.
-    expect(search(router)).not.toMatch(/channel|from|to=|status|page/)
+    expect(search(router)).not.toMatch(/channel|from|to=|status|sort|order|page/)
     expect(router.state.historyAction).toBe('REPLACE')
   })
 

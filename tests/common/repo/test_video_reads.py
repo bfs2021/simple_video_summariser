@@ -170,6 +170,110 @@ def test_order_is_total_and_pages_cover_every_video_once(conn: psycopg.Connectio
     ]
 
 
+@pytest.mark.parametrize(
+    ("sort", "order", "expected"),
+    [
+        ("title", "asc", ["sort_titlea", "sort_titleb", "sort_nullttl"]),
+        ("title", "desc", ["sort_titleb", "sort_titlea", "sort_nullttl"]),
+        ("channel", "asc", ["sort_titlea", "sort_titleb", "sort_nullttl"]),
+        ("channel", "desc", ["sort_titleb", "sort_titlea", "sort_nullttl"]),
+        ("published", "asc", ["sort_titlea", "sort_titleb", "sort_nullttl"]),
+        ("published", "desc", ["sort_titleb", "sort_titlea", "sort_nullttl"]),
+    ],
+)
+def test_text_and_published_sorts_are_directional_and_null_last(
+    conn: psycopg.Connection[Any], sort: str, order: str, expected: list[str]
+) -> None:
+    a = "UC" + "a" * 22
+    b = "UC" + "b" * 22
+    seed.channel(conn, a, "alpha")
+    seed.channel(conn, b, "Zulu")
+    seed.video(
+        conn, "sort_titleb", channel_id=b, title="zulu",
+        published_at=datetime(2026, 2, 1, tzinfo=UTC),
+    )
+    seed.video(
+        conn, "sort_titlea", channel_id=a, title="Alpha",
+        published_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    seed.video(conn, "sort_nullttl", title=None, published_at=None)
+
+    page = list_videos(conn, sort=sort, order=order)
+
+    assert [v.video_id for v in page.items] == expected
+
+
+def test_case_only_text_ties_use_video_id_ascending(conn: psycopg.Connection[Any]) -> None:
+    lower = "UC" + "l" * 22
+    upper = "UC" + "u" * 22
+    seed.channel(conn, lower, "channel")
+    seed.channel(conn, upper, "CHANNEL")
+    seed.video(conn, "case_tie002", channel_id=lower, title="title")
+    seed.video(conn, "case_tie001", channel_id=upper, title="TITLE")
+
+    for sort in ("title", "channel"):
+        for order in ("asc", "desc"):
+            assert [v.video_id for v in list_videos(conn, sort=sort, order=order).items] == [
+                "case_tie001",
+                "case_tie002",
+            ]
+
+
+def test_published_ties_keep_discovered_desc_then_id_asc_in_both_directions(
+    conn: psycopg.Connection[Any],
+) -> None:
+    published = datetime(2026, 1, 1, tzinfo=UTC)
+    seed.video(conn, "pub_tie0002", published_at=published, discovered_at=seed.at(2))
+    seed.video(conn, "pub_tie0001", published_at=published, discovered_at=seed.at(2))
+    seed.video(conn, "pub_older01", published_at=published, discovered_at=seed.at(1))
+
+    expected = ["pub_tie0001", "pub_tie0002", "pub_older01"]
+    assert [v.video_id for v in list_videos(conn).items] == expected
+    assert [v.video_id for v in list_videos(conn, sort="published", order="asc").items] == expected
+
+
+def test_status_sort_uses_pipeline_rank_and_done_reanalysis_stays_done(
+    conn: psycopg.Connection[Any],
+) -> None:
+    seed.video(conn, "rank_idle01")
+    seed.video(conn, "rank_proc01")
+    seed.job(conn, "rank_proc01", "ingest", "pending", created=1)
+    seed.video(conn, "rank_done01")
+    transcript_id = seed.transcript(conn, "rank_done01")
+    seed.analysis(conn, "rank_done01", transcript_id, created=1)
+    seed.job(conn, "rank_done01", "analyze", "pending", created=2)
+    seed.video(conn, "rank_unav01", unavailable="removed")
+    seed.video(conn, "rank_fail01")
+    seed.job(conn, "rank_fail01", "ingest", "dead", created=1)
+    ascending = ["rank_idle01", "rank_proc01", "rank_done01", "rank_unav01", "rank_fail01"]
+
+    assert [v.video_id for v in list_videos(conn, sort="status", order="asc").items] == ascending
+    assert [v.video_id for v in list_videos(conn, sort="status", order="desc").items] == ascending[::-1]
+
+
+def test_each_sort_walks_filtered_pages_once(conn: psycopg.Connection[Any]) -> None:
+    other = "UC" + "o" * 22
+    seed.channel(conn, CH, "Same")
+    seed.channel(conn, other, "Other")
+    for video_id in ("walk0000001", "walk0000002", "walk0000003"):
+        seed.video(
+            conn, video_id, channel_id=CH, title="Same",
+            published_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+    seed.video(conn, "excluded001", channel_id=other, title="Same")
+
+    for sort in ("title", "published", "status", "channel"):
+        for order in ("asc", "desc"):
+            walked = [
+                video.video_id
+                for offset in (0, 2)
+                for video in list_videos(
+                    conn, channel_id=CH, sort=sort, order=order, offset=offset, limit=2
+                ).items
+            ]
+            assert walked == ["walk0000001", "walk0000002", "walk0000003"]
+
+
 def test_filters_combine_with_and(conn: psycopg.Connection[Any]) -> None:
     other = "UC" + "o" * 22
     seed.channel(conn, CH)
