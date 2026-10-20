@@ -17,6 +17,19 @@ export default defineConfig({
     },
   },
   test: {
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'html'],
+      reportsDirectory: './coverage',
+      include: ['src/**/*.{ts,tsx}'],
+      exclude: [
+        'src/**/*.test.{ts,tsx}',
+        'src/**/*.dom.test.{ts,tsx}',
+        'src/test/**',
+        'src/**/*.d.ts',
+        'vite.config.ts',
+      ],
+    },
     // Pinned here, not in a developer's shell, so UTC-only date handling fails.
     env: { TZ: TEST_TIME_ZONE },
     // Two mutually exclusive projects. `extends: true` reuses the plugin list

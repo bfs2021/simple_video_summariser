@@ -11,6 +11,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "coverage": "vitest run --coverage --testTimeout=15000",
     "gen:api": "node scripts/api-types.mjs",
     "gen:api:check": "node scripts/api-types.mjs --check",
     "prebuild": "npm run gen:api"
@@ -28,6 +29,7 @@
     "@testing-library/react": "16.3.3",
     "@testing-library/user-event": "14.6.8",
     "@types/babel__core": "7.20.5",
+    "@vitest/coverage-v8": "5.0.3",
     "@types/node": "24.19.1",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
