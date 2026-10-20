@@ -1,8 +1,11 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { render, screen } from '@testing-library/react'
+import { setupUser } from '../test/user'
 import { StrictMode } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import { FakePlayerProvider } from './FakePlayerProvider'
 import { Timestamp } from './Timestamp'
+
+const user = setupUser
 
 function withPlayer(seconds: number | null | undefined, seeks: number[] = []) {
   return render(
@@ -40,21 +43,21 @@ describe('Timestamp with a provider', () => {
     expect(time?.getAttribute('datetime')).toBe(iso)
   })
 
-  it('a click seeks exactly once with the exact, unfloored value', () => {
+  it('a click seeks exactly once with the exact, unfloored value', async () => {
     const seeks: number[] = []
     withPlayer(12.999, seeks)
-    fireEvent.click(screen.getByRole('button'))
+    await user().click(screen.getByRole('button'))
     expect(seeks).toEqual([12.999])
   })
 
-  it('seeks to 0 (a valid time, not falsy-skipped)', () => {
+  it('seeks to 0 (a valid time, not falsy-skipped)', async () => {
     const seeks: number[] = []
     withPlayer(0, seeks)
-    fireEvent.click(screen.getByRole('button'))
+    await user().click(screen.getByRole('button'))
     expect(seeks).toEqual([0])
   })
 
-  it('does not submit a surrounding form', () => {
+  it('does not submit a surrounding form', async () => {
     const onSubmit = vi.fn((e: { preventDefault: () => void }) => e.preventDefault())
     render(
       <form onSubmit={onSubmit}>
@@ -63,7 +66,7 @@ describe('Timestamp with a provider', () => {
         </FakePlayerProvider>
       </form>,
     )
-    fireEvent.click(screen.getByRole('button'))
+    await user().click(screen.getByRole('button'))
     expect(onSubmit).not.toHaveBeenCalled()
   })
 
@@ -78,7 +81,7 @@ describe('Timestamp with a provider', () => {
     expect(button.hasAttribute('disabled')).toBe(false)
   })
 
-  it('one click under StrictMode seeks once', () => {
+  it('one click under StrictMode seeks once', async () => {
     const seeks: number[] = []
     render(
       <StrictMode>
@@ -87,7 +90,7 @@ describe('Timestamp with a provider', () => {
         </FakePlayerProvider>
       </StrictMode>,
     )
-    fireEvent.click(screen.getByRole('button'))
+    await user().click(screen.getByRole('button'))
     expect(seeks).toEqual([9])
   })
 })

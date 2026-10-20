@@ -1,9 +1,12 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, render, screen, within } from '@testing-library/react'
+import { setupUser } from '../test/user'
 import { createMemoryRouter, RouterProvider } from 'react-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { components } from '../api'
 import { Search } from './Search'
+
+const user = setupUser
 
 type SearchResult = components['schemas']['SearchResult']
 type SearchPage = components['schemas']['SearchPage']
@@ -87,8 +90,9 @@ const live = () => document.querySelector('[aria-live="polite"]') as HTMLElement
 const last = () => requests[requests.length - 1] as URL
 
 async function submit(value: string) {
-  fireEvent.change(input(), { target: { value } })
-  fireEvent.submit(screen.getByRole('search'))
+  await user().clear(input())
+  await user().type(input(), value)
+  await user().keyboard('{Enter}')
   await settle()
 }
 
@@ -119,8 +123,7 @@ describe('idle state and the form', () => {
   it('does not search on each keystroke', async () => {
     stubFetch(() => page([]))
     await mount()
-    fireEvent.change(input(), { target: { value: 'c' } })
-    fireEvent.change(input(), { target: { value: 'ca' } })
+    await user().type(input(), 'ca')
     await act(async () => {
       await vi.advanceTimersByTimeAsync(10_000)
     })
@@ -144,8 +147,8 @@ describe('submitting', () => {
   it('submits with the button as well as with Enter', async () => {
     stubFetch(() => page([]))
     await mount()
-    fireEvent.change(input(), { target: { value: 'cats' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Search' }))
+    await user().type(input(), 'cats')
+    await user().click(screen.getByRole('button', { name: 'Search' }))
     await settle()
     expect(last().searchParams.get('q')).toBe('cats')
   })
@@ -561,7 +564,7 @@ describe('a result', () => {
   it('clicking a timestamp link navigates to the detail route with t intact', async () => {
     stubFetch(() => page([withStarts([3723.9])]))
     const router = await mount('/search?q=zebra')
-    fireEvent.click(screen.getByRole('link', { name: 'Open at 1:02:03' }))
+    await user().click(screen.getByRole('link', { name: 'Open at 1:02:03' }))
     await settle()
     expect(router.state.location.pathname).toBe('/videos/abc-_Z09xyz')
     expect(router.state.location.search).toBe('?t=3723')
@@ -617,13 +620,13 @@ describe('paging', () => {
   it('Next and Previous push history entries and move focus to the results heading', async () => {
     stubFetch((u) => page(hits(1, 20), true, Number(u.searchParams.get('offset'))))
     const router = await mount('/search?q=a')
-    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    await user().click(screen.getByRole('button', { name: 'Next' }))
     await settle()
     expect(router.state.location.search).toBe('?q=a&page=2')
     expect(router.state.historyAction).toBe('PUSH')
     expect(last().searchParams.get('offset')).toBe('20')
     expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Results' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Previous' }))
+    await user().click(screen.getByRole('button', { name: 'Previous' }))
     await settle()
     expect(router.state.location.search).toBe('?q=a')
     await router.navigate(-1)
@@ -637,7 +640,7 @@ describe('paging', () => {
       u.searchParams.get('offset') === '0' ? page(hits(1, 20), true) : second.promise,
     )
     await mount('/search?q=a')
-    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    await user().click(screen.getByRole('button', { name: 'Next' }))
     await settle()
     expect(screen.getByText('Title 1')).toBeTruthy()
     expect(screen.getByText('Searching…')).toBeTruthy()
@@ -699,7 +702,7 @@ describe('states', () => {
     expect(live().textContent).toContain('Search is unavailable right now. Try again shortly.')
     expect(document.body.textContent).not.toContain('SECRET')
     expect(document.body.textContent).not.toContain('/api/search')
-    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    await user().click(screen.getByRole('button', { name: 'Retry' }))
     await settle()
     expect(requests).toHaveLength(2)
     expect(screen.getByText('Title 1')).toBeTruthy()
@@ -767,7 +770,7 @@ describe('states', () => {
       return off === '0' ? page(hits(1, 20), true) : off === '20' ? p2.promise : p3.promise
     })
     const router = await mount('/search?q=a')
-    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    await user().click(screen.getByRole('button', { name: 'Next' }))
     await settle()
     // Controls are disabled while page 2 loads; a deep link (Forward, a click on
     // another link) can still move to page 3.

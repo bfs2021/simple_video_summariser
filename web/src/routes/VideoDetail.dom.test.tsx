@@ -1,10 +1,13 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, render, screen, within } from '@testing-library/react'
+import { setupUser } from '../test/user'
 import { createMemoryRouter, RouterProvider } from 'react-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { components } from '../api'
 import { FakePlayerProvider } from '../components/FakePlayerProvider'
 import { VideoDetail } from './VideoDetail'
+
+const user = setupUser
 
 type VideoDetailOut = components['schemas']['VideoDetail']
 type AnalysisOut = components['schemas']['AnalysisOut']
@@ -213,7 +216,7 @@ describe('page states', () => {
   it('Retry refetches and then shows the video', async () => {
     stubFetch((_u, n) => (n === 1 ? json({}, 503) : json(video())))
     await mount()
-    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    await user().click(screen.getByRole('button', { name: 'Retry' }))
     await settle()
     expect(requests).toHaveLength(2)
     expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('My Video')
@@ -484,7 +487,7 @@ describe('analysis content', () => {
     expect(items[0]?.textContent).toContain('About first')
     expect(items[1]?.textContent).toContain('Second')
     expect(within(items[1] as HTMLElement).queryByRole('button')).toBeNull()
-    fireEvent.click(within(items[0] as HTMLElement).getByRole('button', { name: 'Seek to 0:05' }))
+    await user().click(within(items[0] as HTMLElement).getByRole('button', { name: 'Seek to 0:05' }))
     expect(seeks).toEqual([5])
   })
 
@@ -494,7 +497,7 @@ describe('analysis content', () => {
     expect(item.textContent).toContain('Water is wet')
     expect(item.textContent).toContain('Ada')
     expect(item.textContent).toContain('Confidence: high')
-    fireEvent.click(within(item).getByRole('button', { name: 'Seek to 1:05' }))
+    await user().click(within(item).getByRole('button', { name: 'Seek to 1:05' }))
     expect(seeks).toEqual([65])
   })
 
@@ -586,7 +589,7 @@ describe('analysis content', () => {
 
   it('a click on a quote timestamp seeks with its start_sec', async () => {
     await mountWith(video())
-    fireEvent.click(within(section('Quotes')).getByRole('button', { name: 'Seek to 0:10' }))
+    await user().click(within(section('Quotes')).getByRole('button', { name: 'Seek to 0:10' }))
     expect(seeks).toEqual([10])
   })
 

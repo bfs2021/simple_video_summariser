@@ -50,6 +50,12 @@ boundaries, no network, deterministic, no repeat-run loops) apply unchanged to
 - **Running.** `npm test` runs once and exits (`vitest run`), from `web/`, in
   a login shell: `bash -lc 'cd ~/projects/simple_video_summary/web && npm test'`.
   Never bare `vitest`, no watch mode.
+- **Interaction.** Use `user-event` for anything a person does: clicking,
+  typing, tabbing, submitting and selecting. Use `fireEvent` only for events a
+  person cannot produce, such as an iframe `load` or transport `message` event.
+  Fake-timer tests use `setupUser()` from `src/test/user.ts`, which wires
+  `userEvent.setup` to Vitest's timer advancement and advances the trailing
+  zero-delay timer before awaiting an interaction.
 - **Time.** Use `vi.useFakeTimers()` and advance explicitly instead of
   waiting. Testing Library's `waitFor` only detects Jest's fake timers, so
   advance with `vi.advanceTimersByTimeAsync` first, start `waitFor`, then

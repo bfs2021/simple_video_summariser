@@ -3,7 +3,10 @@ import { StrictMode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Player } from './Player'
 import { PlayerProvider, usePlayer } from './PlayerContext'
+import { setupUser } from '../test/user'
 import { Timestamp } from './Timestamp'
+
+const click = (element: HTMLElement) => setupUser().click(element)
 
 const ORIGIN = 'https://www.youtube-nocookie.com'
 const ID = 'dQw4w9WgXcQ'
@@ -82,10 +85,10 @@ describe('Player with an invalid videoId', () => {
     expect(status()).toBe('error')
   })
 
-  it('seekTo in that state does nothing and opens no tab', () => {
+  it('seekTo in that state does nothing and opens no tab', async () => {
     const open = vi.spyOn(window, 'open').mockImplementation(() => null)
     setup(<Player videoId="short" />)
-    fireEvent.click(screen.getByRole('button', { name: /Seek to/ }))
+    await click(screen.getByRole('button', { name: /Seek to/ }))
     expect(open).not.toHaveBeenCalled()
     expect(posts).toEqual([])
   })
@@ -161,15 +164,15 @@ describe('Player handshake, ready and seek queue', () => {
     expect(handshakes()[0]?.targetOrigin).toBe(ORIGIN)
   })
 
-  it('queues seeks while loading and sends only the last one once ready', () => {
+  it('queues seeks while loading and sends only the last one once ready', async () => {
     const { container } = setup()
     const iframe = iframeOf(container)
     const embed = spyOnEmbed(iframe)
     fireEvent.load(iframe)
     const button = screen.getByRole('button', { name: /Seek to/ })
-    fireEvent.click(button)
-    fireEvent.click(button)
-    fireEvent.click(button)
+    await click(button)
+    await click(button)
+    await click(button)
     expect(commands()).toEqual([])
     fromEmbed(embed, json('onReady'))
     expect(status()).toBe('ready')
@@ -180,15 +183,15 @@ describe('Player handshake, ready and seek queue', () => {
     for (const c of commands()) expect(c.targetOrigin).toBe(ORIGIN)
   })
 
-  it('once ready each click sends one seekTo and one playVideo', () => {
+  it('once ready each click sends one seekTo and one playVideo', async () => {
     const { container } = setup()
     const iframe = iframeOf(container)
     const embed = spyOnEmbed(iframe)
     fireEvent.load(iframe)
     fromEmbed(embed, json('initialDelivery'))
     expect(status()).toBe('ready')
-    fireEvent.click(screen.getByRole('button', { name: /Seek to/ }))
-    fireEvent.click(screen.getByRole('button', { name: /Seek to/ }))
+    await click(screen.getByRole('button', { name: /Seek to/ }))
+    await click(screen.getByRole('button', { name: /Seek to/ }))
     expect(commands().map((c) => c.message['func'])).toEqual(['seekTo', 'playVideo', 'seekTo', 'playVideo'])
   })
 
@@ -227,7 +230,7 @@ describe('Player ignores hostile messages', () => {
     ['no event', (_e: Window) => ({ data: '{}', origin: ORIGIN, source: _e })],
     ['unknown event', (_e: Window) => ({ data: json('whatever'), origin: ORIGIN, source: _e })],
     ['forged error from wrong origin', (_e: Window) => ({ data: json('onError', { info: 150 }), origin: 'https://evil.example', source: _e })],
-  ])('%s changes nothing', (_name, build) => {
+  ])('%s changes nothing', async (_name, build) => {
     const log = vi.spyOn(console, 'error').mockImplementation(() => {})
     const { container } = setup()
     const iframe = iframeOf(container)
@@ -240,7 +243,7 @@ describe('Player ignores hostile messages', () => {
       }),
     ).not.toThrow()
     expect(status()).toBe('loading')
-    fireEvent.click(screen.getByRole('button', { name: /Seek to/ }))
+    await click(screen.getByRole('button', { name: /Seek to/ }))
     expect(commands()).toEqual([])
     expect(container.querySelector('iframe')).not.toBeNull()
     expect(log).not.toHaveBeenCalled()
@@ -264,14 +267,14 @@ describe('Player failure paths', () => {
     expect(link?.getAttribute('rel')).toBe('noopener noreferrer')
   })
 
-  it('a Timestamp click after an embed error opens the watch URL at the floored second in a new tab', () => {
+  it('a Timestamp click after an embed error opens the watch URL at the floored second in a new tab', async () => {
     const open = vi.spyOn(window, 'open').mockImplementation(() => null)
     const { container } = setup()
     const iframe = iframeOf(container)
     const embed = spyOnEmbed(iframe)
     fireEvent.load(iframe)
     fromEmbed(embed, json('onError', { info: 150 }))
-    fireEvent.click(screen.getByRole('button', { name: /Seek to/ }))
+    await click(screen.getByRole('button', { name: /Seek to/ }))
     expect(open).toHaveBeenCalledTimes(1)
     expect(open).toHaveBeenCalledWith(`https://www.youtube.com/watch?v=${ID}&t=30s`, '_blank', 'noopener')
     expect(commands()).toEqual([])
@@ -298,12 +301,12 @@ describe('Player failure paths', () => {
 })
 
 describe('Player videoId change', () => {
-  it('replaces the iframe, resets to loading and discards the queued seek', () => {
+  it('replaces the iframe, resets to loading and discards the queued seek', async () => {
     const view = setup(<Player videoId={ID} />)
     const first = iframeOf(view.container)
     const firstEmbed = spyOnEmbed(first)
     fireEvent.load(first)
-    fireEvent.click(screen.getByRole('button', { name: /Seek to/ }))
+    await click(screen.getByRole('button', { name: /Seek to/ }))
     fromEmbed(firstEmbed, json('onReady'))
     expect(status()).toBe('ready')
     posts = []
@@ -321,7 +324,7 @@ describe('Player videoId change', () => {
     expect(second.src).toContain('/embed/aaaaaaaaaaa')
     expect(status()).toBe('loading')
     const secondEmbed = spyOnEmbed(second)
-    fireEvent.click(screen.getByRole('button', { name: /Seek to/ }))
+    await click(screen.getByRole('button', { name: /Seek to/ }))
     view.rerender(
       <PlayerProvider>
         <Player videoId="bbbbbbbbbbb" />
@@ -401,12 +404,12 @@ describe('Player unmount', () => {
     expect(posts).toEqual([])
   })
 
-  it('drops a queued seek on unmount', () => {
+  it('drops a queued seek on unmount', async () => {
     const view = setup()
     const iframe = iframeOf(view.container)
     const embed = spyOnEmbed(iframe)
     fireEvent.load(iframe)
-    fireEvent.click(screen.getByRole('button', { name: /Seek to/ }))
+    await click(screen.getByRole('button', { name: /Seek to/ }))
     view.unmount()
     fromEmbed(embed, json('onReady'))
     expect(commands()).toEqual([])
@@ -414,7 +417,7 @@ describe('Player unmount', () => {
 })
 
 describe('Player under StrictMode', () => {
-  it('has one active message listener and sends one seekTo per click', () => {
+  it('has one active message listener and sends one seekTo per click', async () => {
     const add = vi.spyOn(window, 'addEventListener')
     const remove = vi.spyOn(window, 'removeEventListener')
     const { container } = setup(<Player videoId={ID} />, true)
@@ -427,7 +430,7 @@ describe('Player under StrictMode', () => {
     fireEvent.load(iframe)
     fromEmbed(embed, json('onReady'))
     expect(status()).toBe('ready')
-    fireEvent.click(screen.getByRole('button', { name: /Seek to/ }))
+    await click(screen.getByRole('button', { name: /Seek to/ }))
     expect(commands().filter((c) => c.message['func'] === 'seekTo')).toHaveLength(1)
     expect(commands().filter((c) => c.message['func'] === 'playVideo')).toHaveLength(1)
   })

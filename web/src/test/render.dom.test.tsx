@@ -1,18 +1,24 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
+import { setupUser } from './user'
 import { describe, expect, it, vi } from 'vitest'
 import { DelayedStatus, Greeting, MessageListener } from './fixtures/Greeting'
 
 describe('component rendering', () => {
   it('renders a component and finds it through a query', () => {
     render(<Greeting name="Ada" />)
-    expect(screen.getByRole('heading', { name: 'Hello, Ada' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Wave' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Hello, Ada' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Wave' })).toHaveAccessibleName('Wave')
   })
 
-  it('dispatches events through fireEvent inside act', () => {
+  it('tabs to and activates a button through a realistic keyboard interaction', async () => {
     const onClick = vi.fn()
-    const { container } = render(<button onClick={onClick}>go</button>)
-    fireEvent.click(container.querySelector('button') as HTMLButtonElement)
+    render(<button onClick={onClick}>go</button>)
+    const user = setupUser()
+
+    await user.tab()
+    expect(screen.getByRole('button', { name: 'go' })).toHaveFocus()
+    await user.keyboard('{Enter}')
+
     expect(onClick).toHaveBeenCalledOnce()
   })
 })

@@ -1,10 +1,13 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, fireEvent, render, screen, within } from '@testing-library/react'
+import { setupUser } from '../test/user'
 import { createMemoryRouter, RouterProvider } from 'react-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { components } from '../api'
 import { FakePlayerProvider } from '../components/FakePlayerProvider'
 import { Compare } from './Compare'
+
+const user = setupUser
 import { routes } from './index'
 
 type AnalysisOut = components['schemas']['AnalysisOut']
@@ -499,7 +502,7 @@ describe('page states', () => {
     await mount()
     expect(analysesRequests().map((u) => u.searchParams.get('offset'))).toEqual(['0', '50'])
     failing = false
-    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    await user().click(screen.getByRole('button', { name: 'Retry' }))
     await settle()
     expect(analysesRequests().map((u) => u.searchParams.get('offset'))).toEqual(['0', '50', '0', '50', '100'])
     expect(selA().options).toHaveLength(120)
@@ -580,7 +583,7 @@ describe('pickers', () => {
   it('swap exchanges the sides and the URL, with a push so Back walks', async () => {
     stubApi({ runs: MIXED })
     const router = await mount()
-    fireEvent.click(screen.getByRole('button', { name: 'Swap A and B' }))
+    await user().click(screen.getByRole('button', { name: 'Swap A and B' }))
     await settle()
     expect([selected(selA()), selected(selB())]).toEqual([2, 4])
     expect(router.state.location.search).toBe('?a=2&b=4')
@@ -601,11 +604,11 @@ describe('pickers', () => {
   it('changing a picker pushes the new selection and Back restores the old one', async () => {
     stubApi({ runs: MIXED })
     const router = await mount()
-    fireEvent.change(selA(), { target: { value: '3' } })
+    await user().selectOptions(selA(), '3')
     await settle()
     expect(router.state.location.search).toBe('?a=3&b=2')
     expect(router.state.historyAction).toBe('PUSH')
-    fireEvent.change(selB(), { target: { value: '1' } })
+    await user().selectOptions(selB(), '1')
     await settle()
     expect(router.state.location.search).toBe('?a=3&b=1')
     expect(router.state.historyAction).toBe('PUSH')
@@ -641,8 +644,8 @@ describe('pickers', () => {
     }
     const actions: string[] = []
     const unsubscribe = router.subscribe((state) => actions.push(`${state.historyAction} ${state.location.search}`))
-    fireEvent.change(selA(), { target: { value: '999' } })
-    fireEvent.change(selB(), { target: { value: '999' } })
+    await user().selectOptions(selA(), '999')
+    await user().selectOptions(selB(), '999')
     await settle()
     unsubscribe()
     expect(actions.filter((a) => a.startsWith('PUSH'))).toEqual([])
@@ -655,7 +658,7 @@ describe('pickers', () => {
     stubApi({ runs: MIXED })
     await mount()
     const before = analysesRequests().length
-    fireEvent.click(screen.getByRole('button', { name: 'Swap A and B' }))
+    await user().click(screen.getByRole('button', { name: 'Swap A and B' }))
     await settle()
     expect(analysesRequests()).toHaveLength(before)
   })
@@ -663,7 +666,7 @@ describe('pickers', () => {
   it('keeps unrelated query params when the selection changes', async () => {
     stubApi({ runs: MIXED })
     const router = await mount(`/videos/${ID}/compare?x=1`)
-    fireEvent.click(screen.getByRole('button', { name: 'Swap A and B' }))
+    await user().click(screen.getByRole('button', { name: 'Swap A and B' }))
     await settle()
     expect(new URLSearchParams(router.state.location.search).get('x')).toBe('1')
   })
@@ -1024,7 +1027,7 @@ describe('claims and quotes aligned by time window', () => {
     })
     await mount(`/videos/${ID}/compare?a=2&b=1`)
     const bCell = within(claimsTable().getAllByRole('row').at(-1) as HTMLElement).getAllByRole('cell')[1] as HTMLElement
-    fireEvent.click(within(bCell).getByRole('button', { name: 'Seek to 1:12:01' }))
+    await user().click(within(bCell).getByRole('button', { name: 'Seek to 1:12:01' }))
     expect(seeks).toEqual([4321.5])
   })
 

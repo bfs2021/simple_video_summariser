@@ -1,9 +1,11 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, fireEvent, render, screen } from '@testing-library/react'
+import { act, render, screen } from '@testing-library/react'
+import { setupUser } from '../test/user'
 import { createMemoryRouter, RouterProvider, type RouteObject } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { routes } from './index'
 
+const user = setupUser
 
 function mount(entry: string, table: RouteObject[] = routes) {
   const router = createMemoryRouter(table, { initialEntries: [entry] })
@@ -16,13 +18,13 @@ function mount(entry: string, table: RouteObject[] = routes) {
 }
 
 describe('shell and navigation', () => {
-  it('navigates with the nav links without a document request', () => {
+  it('navigates with the nav links without a document request', async () => {
     const router = mount('/')
     expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Library')
-    fireEvent.click(screen.getByRole('link', { name: 'Search' }))
+    await user().click(screen.getByRole('link', { name: 'Search' }))
     expect(router.state.location.pathname).toBe('/search')
     expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Search')
-    fireEvent.click(screen.getByRole('link', { name: 'Ops' }))
+    await user().click(screen.getByRole('link', { name: 'Ops' }))
     expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Ops')
   })
 
@@ -217,7 +219,7 @@ describe('search hit timestamp links through the shared route table', () => {
     expect(link.getAttribute('href')).toBe('/videos/-wNyEUrxzFU?t=3723')
     expect(screen.getAllByRole('link', { name: /^Open at/ })).toHaveLength(1)
 
-    fireEvent.click(link)
+    await user().click(link)
     await settle()
 
     expect(router.state.location.pathname).toBe('/videos/-wNyEUrxzFU')

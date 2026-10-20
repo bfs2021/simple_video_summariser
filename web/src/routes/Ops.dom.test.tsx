@@ -1,9 +1,12 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, render, screen, within } from '@testing-library/react'
+import { setupUser } from '../test/user'
 import { createMemoryRouter, RouterProvider } from 'react-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { components } from '../api'
 import { Ops } from './Ops'
+
+const user = setupUser
 
 type JobOut = components['schemas']['JobOut']
 type JobListOut = components['schemas']['JobListOut']
@@ -129,7 +132,7 @@ function rowFor(id: number): HTMLTableRowElement {
 }
 const bodyRows = () => within(jobsTable()).getAllByRole('row').slice(1)
 const click = async (el: HTMLElement) => {
-  fireEvent.click(el)
+  await user().click(el)
   await settle()
 }
 const select = (name: RegExp | string) => screen.getByRole('combobox', { name }) as HTMLSelectElement
@@ -200,22 +203,22 @@ describe('filters', () => {
   it('each change pushes a history entry, requests with the new filter and AND-combines', async () => {
     stubFetch(api())
     const { router } = await mount()
-    fireEvent.change(select('Kind'), { target: { value: 'transcribe' } })
+    await user().selectOptions(select('Kind'), 'transcribe')
     await settle()
     expect(router.state.location.search).toBe('?kind=transcribe')
     expect(router.state.historyAction).toBe('PUSH')
-    fireEvent.change(select('Error class'), { target: { value: 'BUG' } })
+    await user().selectOptions(select('Error class'), 'BUG')
     await settle()
-    fireEvent.change(select('State'), { target: { value: 'done' } })
+    await user().selectOptions(select('State'), 'done')
     await settle()
     expect(router.state.location.search).toBe('?state=done&kind=transcribe&error_class=BUG')
     expect(Object.fromEntries(lastJobGet().url.searchParams)).toEqual({
       state: 'done', kind: 'transcribe', error_class: 'BUG', limit: '50',
     })
-    fireEvent.change(select('Kind'), { target: { value: '' } })
+    await user().selectOptions(select('Kind'), '')
     await settle()
     expect(lastJobGet().url.searchParams.has('kind')).toBe(false)
-    fireEvent.change(select('State'), { target: { value: 'dead' } })
+    await user().selectOptions(select('State'), 'dead')
     await settle()
     expect(router.state.location.search).toBe('?error_class=BUG')
   })
@@ -228,7 +231,7 @@ describe('filters', () => {
   ])('changing only %s to %s requests a fresh list (every filter is in the key)', async (label, value, expected) => {
     stubFetch(api())
     await mount()
-    fireEvent.change(select(label), { target: { value } })
+    await user().selectOptions(select(label), value)
     await settle()
     expect(jobGets()).toHaveLength(2)
     expect(Object.fromEntries(lastJobGet().url.searchParams)).toEqual({ ...expected, limit: '50' })
@@ -237,7 +240,7 @@ describe('filters', () => {
   it('changing a filter resets to the first page', async () => {
     stubFetch(api())
     const { router } = await mount('/ops?before=500&kind=ingest')
-    fireEvent.change(select('Kind'), { target: { value: 'analyze' } })
+    await user().selectOptions(select('Kind'), 'analyze')
     await settle()
     expect(router.state.location.search).toBe('?kind=analyze')
     expect(lastJobGet().url.searchParams.has('before_id')).toBe(false)
@@ -246,7 +249,7 @@ describe('filters', () => {
   it('Back restores the previous filter', async () => {
     stubFetch(api())
     const { router } = await mount()
-    fireEvent.change(select('Kind'), { target: { value: 'analyze' } })
+    await user().selectOptions(select('Kind'), 'analyze')
     await settle()
     await act(async () => {
       await router.navigate(-1)
@@ -574,7 +577,7 @@ describe('empty states', () => {
     stubFetch(api({ jobs: (c) => (c.url.searchParams.has('kind') ? d.promise : list([])) }))
     await mount()
     expect(within(jobsRegion()).getByText('No dead jobs')).toBeTruthy()
-    fireEvent.change(select('Kind'), { target: { value: 'ingest' } })
+    await user().selectOptions(select('Kind'), 'ingest')
     await settle()
     expect(within(jobsRegion()).getByText('Loading jobs…')).toBeTruthy()
     expect(within(jobsRegion()).queryByText('No dead jobs')).toBeNull()
@@ -775,8 +778,8 @@ describe('retry', () => {
     await mount()
     await click(retryBtn(12) as HTMLElement)
     const confirm = within(rowFor(12)).getByRole('button', { name: 'Confirm retry' })
-    fireEvent.click(confirm)
-    fireEvent.click(confirm)
+    await user().click(confirm)
+    await user().click(confirm)
     await settle()
     expect(posts()).toHaveLength(1)
     expect((within(rowFor(12)).getByRole('button', { name: 'Confirm retry' }) as HTMLButtonElement).disabled).toBe(true)

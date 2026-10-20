@@ -1,5 +1,6 @@
 // The single setup file of the jsdom Vitest project (web/vite.config.ts, #127).
 // Do not duplicate any of this per test file.
+import '@testing-library/jest-dom/vitest'
 import { cleanup } from '@testing-library/react'
 import { afterEach, beforeEach, expect, vi } from 'vitest'
 
