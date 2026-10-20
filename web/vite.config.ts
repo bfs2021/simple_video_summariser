@@ -1,5 +1,6 @@
 import babel from '@rolldown/plugin-babel'
 import react, { reactCompilerPreset } from '@vitejs/plugin-react'
+import type { Plugin } from 'vite'
 import { defineConfig } from 'vitest/config'
 import { API_PREFIX, rewriteApiPath } from './src/devProxy.ts'
 import { TEST_TIME_ZONE } from './src/test/timeZone.ts'
@@ -7,9 +8,19 @@ import { TEST_TIME_ZONE } from './src/test/timeZone.ts'
 // Non-VITE_ on purpose: it must never reach the client bundle.
 const apiProxyTarget = process.env.API_PROXY_TARGET ?? 'http://localhost:8000'
 
+const fileIsolationGuard: Plugin = {
+  name: 'file-isolation-guard',
+  // Read the resolved project config after CLI overrides. A cross-file leak pair
+  // can miss --no-isolate when files land in different workers, so this direct
+  // runtime assertion must not be replaced with a scheduling-dependent pair.
+  configureVitest({ project }) {
+    project.provide('effectiveFileIsolation', project.config.isolate)
+  },
+}
+
 export default defineConfig({
   base: '/',
-  plugins: [react(), babel({ presets: [reactCompilerPreset()] })],
+  plugins: [react(), babel({ presets: [reactCompilerPreset()] }), fileIsolationGuard],
   build: { sourcemap: false },
   server: {
     proxy: {

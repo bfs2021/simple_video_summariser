@@ -49,7 +49,8 @@ boundaries, no network, deterministic, no repeat-run loops) apply unchanged to
   decides: `App.test.tsx` is a `.tsx` file that runs in Node.
 - **Running.** `npm test` runs once and exits (`vitest run`), from `web/`, in
   a login shell: `bash -lc 'cd ~/projects/simple_video_summary/web && npm test'`.
-  Never bare `vitest`, no watch mode.
+  Never bare `vitest`, no watch mode. Frontend tests may run shuffled; use
+  `npm test -- --sequence.shuffle --sequence.seed=<N>` and report the seed.
 - **Time.** Use `vi.useFakeTimers()` and advance explicitly instead of
   waiting. Testing Library's `waitFor` only detects Jest's fake timers, so
   advance with `vi.advanceTimersByTimeAsync` first, start `waitFor`, then
@@ -64,9 +65,13 @@ boundaries, no network, deterministic, no repeat-run loops) apply unchanged to
   naming the component that needs it.
 - **Time zone.** The Vitest config pins `TZ=America/Los_Angeles` for every
   project, so date code that only works in UTC fails. Do not set `TZ` per test.
-- **Cleanup.** `globals` is off, so the setup calls `cleanup()` itself and
-  resets the document, storage, stubs and timers after every test. Leave
-  `process.env` and module singletons as you found them.
+- **Isolation and cleanup.** A runtime guard asserts Vitest's effective file
+  isolation setting after CLI overrides; `npm test -- src/test/isolation.test.ts
+  --no-isolate` is its documented negative case and must fail without worker or
+  file-parallelism flags. `globals` is off, so the setup calls `cleanup()` itself
+  and resets the document, storage, stubs and timers after every test. The
+  cleanup guard verifies this in either shuffled test order. Leave `process.env`
+  and module singletons as you found them.
 
 ## Test at the scale the system actually runs at
 
