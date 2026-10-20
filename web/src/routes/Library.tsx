@@ -14,6 +14,8 @@ import {
   STATUSES,
   toSearchParams,
   type LibraryState,
+  type SortOrder,
+  type VideoSort,
   type VideoStatus,
 } from '../lib/library'
 
@@ -38,8 +40,11 @@ export function Library() {
   const q = useVideos(state, !reversed)
 
   const go = (patch: Partial<LibraryState>) => {
-    // Any filter change returns to page 1; a page change passes `page` itself.
     setParams(toSearchParams({ ...state, page: 1, ...patch }))
+  }
+
+  const sortBy = (sort: VideoSort) => {
+    go({ sort, order: state.sort === sort ? opposite(state.order) : defaultOrder(sort) })
   }
 
   const data = q.data
@@ -95,7 +100,11 @@ export function Library() {
           </select>
         </label>
         {hasFilters(state) && (
-          <button className="btn" type="button" onClick={() => setParams(new URLSearchParams())}>
+          <button
+            className="btn"
+            type="button"
+            onClick={() => setParams(toSearchParams({ ...state, channel: null, from: null, to: null, status: null, page: 1 }))}
+          >
             Clear all filters
           </button>
         )}
@@ -160,10 +169,10 @@ export function Library() {
               <table className="table">
                 <thead>
                   <tr>
-                    <th scope="col">Title</th>
-                    <th scope="col">Channel</th>
-                    <th scope="col">Published</th>
-                    <th scope="col">Status</th>
+                    <SortHeader label="Title" sort="title" state={state} onSort={sortBy} />
+                    <SortHeader label="Channel" sort="channel" state={state} onSort={sortBy} />
+                    <SortHeader label="Published" sort="published" state={state} onSort={sortBy} />
+                    <SortHeader label="Status" sort="status" state={state} onSort={sortBy} />
                   </tr>
                 </thead>
                 <tbody>
@@ -231,6 +240,38 @@ export function Library() {
     if (value === '') go({ [key]: null })
     else if (isValidDate(value)) go({ [key]: value })
   }
+}
+
+interface SortHeaderProps {
+  label: string
+  sort: VideoSort
+  state: Pick<LibraryState, 'sort' | 'order'>
+  onSort: (sort: VideoSort) => void
+}
+
+function SortHeader({ label, sort, state, onSort }: SortHeaderProps) {
+  const active = state.sort === sort
+  const action = active ? opposite(state.order) : defaultOrder(sort)
+  return (
+    <th scope="col" aria-sort={active ? direction(state.order) : undefined}>
+      <button type="button" onClick={() => onSort(sort)} aria-label={`Sort by ${label} ${direction(action)}`}>
+        {label}
+        {active ? ` ${direction(state.order)}` : ''}
+      </button>
+    </th>
+  )
+}
+
+function defaultOrder(sort: VideoSort): SortOrder {
+  return sort === 'published' ? 'desc' : 'asc'
+}
+
+function opposite(order: SortOrder): SortOrder {
+  return order === 'asc' ? 'desc' : 'asc'
+}
+
+function direction(order: SortOrder): 'ascending' | 'descending' {
+  return order === 'asc' ? 'ascending' : 'descending'
 }
 
 type StatusTone = 'success' | 'warning' | 'danger' | 'neutral'

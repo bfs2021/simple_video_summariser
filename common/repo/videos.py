@@ -22,6 +22,23 @@ from common.repo._hygiene import clean_text
 
 _UNAVAILABLE_REASONS = {"removed", "private", "geoblocked", "agegated", "short"}
 
+_SORT_ORDERS = {
+    ("title", "asc"): 'lower(title) COLLATE "C" ASC NULLS LAST, video_id ASC',
+    ("title", "desc"): 'lower(title) COLLATE "C" DESC NULLS LAST, video_id ASC',
+    ("channel", "asc"): 'lower(channel_title) COLLATE "C" ASC NULLS LAST, video_id ASC',
+    ("channel", "desc"): 'lower(channel_title) COLLATE "C" DESC NULLS LAST, video_id ASC',
+    ("published", "asc"): "published_at ASC NULLS LAST, discovered_at DESC, video_id ASC",
+    ("published", "desc"): "published_at DESC NULLS LAST, discovered_at DESC, video_id ASC",
+    ("status", "asc"): (
+        "CASE status WHEN 'idle' THEN 0 WHEN 'processing' THEN 1 WHEN 'done' THEN 2 "
+        "WHEN 'unavailable' THEN 3 WHEN 'failed' THEN 4 END ASC, video_id ASC"
+    ),
+    ("status", "desc"): (
+        "CASE status WHEN 'idle' THEN 0 WHEN 'processing' THEN 1 WHEN 'done' THEN 2 "
+        "WHEN 'unavailable' THEN 3 WHEN 'failed' THEN 4 END DESC, video_id ASC"
+    ),
+}
+
 
 def upsert_video(conn: psycopg.Connection[Any], meta: VideoMeta, origin: str) -> None:
     """Insert ``meta`` as a video, or update its mutable fields on a later call.
@@ -389,6 +406,8 @@ def list_videos(
     status: str | None = None,
     published_after: datetime | None = None,
     published_before: datetime | None = None,
+    sort: str = "published",
+    order: str = "desc",
     offset: int = 0,
     limit: int = 50,
 ) -> VideoPage:
@@ -396,9 +415,10 @@ def list_videos(
 
     Filters combine with AND; any date filter excludes videos with no
     ``published_at``. ``published_after`` is inclusive, ``published_before``
-    exclusive. Ordered by ``published_at DESC NULLS LAST, discovered_at DESC,
-    video_id``. One statement, however large ``limit`` is.
+    exclusive. Sort and order must be validated scalar values selected by the
+    API. One statement, however large ``limit`` is.
     """
+    order_by = _SORT_ORDERS[(sort, order)]
     rows = conn.execute(
         f"""
         WITH m AS (
@@ -412,7 +432,7 @@ def list_videos(
         FROM (SELECT count(*) AS total FROM m) t
         LEFT JOIN LATERAL (
             SELECT * FROM m
-            ORDER BY published_at DESC NULLS LAST, discovered_at DESC, video_id ASC
+            ORDER BY {order_by}
             OFFSET %(offset)s LIMIT %(limit)s
         ) p ON true
         """,

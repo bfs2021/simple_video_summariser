@@ -2693,7 +2693,7 @@
     },
     "/videos": {
       "get": {
-        "description": "The library, newest published first; ``total`` counts every match.",
+        "description": "The filtered library in the requested single-column order.",
         "operationId": "get_videos_videos_get",
         "parameters": [
           {
@@ -2767,6 +2767,36 @@
                 }
               ],
               "title": "Published Before"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "default": "published",
+              "enum": [
+                "title",
+                "published",
+                "status",
+                "channel"
+              ],
+              "title": "Sort",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "order",
+            "required": false,
+            "schema": {
+              "default": "desc",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "title": "Order",
+              "type": "string"
             }
           },
           {

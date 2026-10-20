@@ -255,7 +255,7 @@ export interface paths {
         };
         /**
          * Get Videos
-         * @description The library, newest published first; ``total`` counts every match.
+         * @description The filtered library in the requested single-column order.
          */
         get: operations["get_videos_videos_get"];
         put?: never;
@@ -1411,6 +1411,8 @@ export interface operations {
                 status?: ("done" | "processing" | "unavailable" | "failed" | "idle") | null;
                 published_after?: string | null;
                 published_before?: string | null;
+                sort?: "title" | "published" | "status" | "channel";
+                order?: "asc" | "desc";
                 offset?: number;
                 limit?: number;
             };
