@@ -188,24 +188,46 @@ describe('sorting', () => {
     expect(last().searchParams.get('offset')).toBe('0')
   })
 
-  it('toggles an active header and Back restores the prior sort', async () => {
+  it('restores a deep link, toggles, resets a new column to its default, and follows Back and Forward', async () => {
     stubFetch(serverWith(2))
     const router = await mount('/?sort=title&order=asc')
+    expect(last().search).toBe('?sort=title&order=asc&limit=50&offset=0')
+    expect(screen.getByRole('columnheader', { name: 'Title ascending' }).getAttribute('aria-sort')).toBe(
+      'ascending',
+    )
+
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Sort by Title descending' }))
+    })
+    await settle()
+    expect(search(router)).toBe('?sort=title&order=desc')
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Sort by Published descending' }))
+    })
+    await settle()
+    expect(search(router)).toBe('')
+    expect(last().search).toBe('?limit=50&offset=0')
+    expect(screen.getByRole('columnheader', { name: 'Published descending' }).getAttribute('aria-sort')).toBe(
+      'descending',
+    )
+
+    await act(async () => {
+      await router.navigate(-1)
     })
     await settle()
     expect(search(router)).toBe('?sort=title&order=desc')
     expect(screen.getByRole('columnheader', { name: 'Title descending' }).getAttribute('aria-sort')).toBe(
       'descending',
     )
+
     await act(async () => {
-      await router.navigate(-1)
+      await router.navigate(1)
     })
     await settle()
-    expect(search(router)).toBe('?sort=title&order=asc')
-    expect(screen.getByRole('columnheader', { name: 'Title ascending' }).getAttribute('aria-sort')).toBe(
-      'ascending',
+    expect(search(router)).toBe('')
+    expect(screen.getByRole('columnheader', { name: 'Published descending' }).getAttribute('aria-sort')).toBe(
+      'descending',
     )
   })
 
@@ -320,9 +342,11 @@ describe('rows', () => {
     expect(screen.getAllByRole('row')).toHaveLength(4)
   })
 
-  it('keeps the order the server returned', async () => {
+  it('keeps adversarial server order under a non-default sort', async () => {
     stubFetch(() => list(3, [vid(3), vid(1), vid(2)]))
-    await mount()
+    await mount('/?sort=title&order=asc')
+    expect(last().searchParams.get('sort')).toBe('title')
+    expect(last().searchParams.get('order')).toBe('asc')
     const titles = screen.getAllByRole('link', { name: /^Title/ }).map((a) => a.textContent)
     expect(titles).toEqual(['Title 3', 'Title 1', 'Title 2'])
   })
@@ -695,8 +719,10 @@ describe('polling', () => {
       // First two responses carry an active job, the third does not.
       return list(1, [vid(1, calls < 3 ? { status: 'processing', active_job: active } : {})])
     })
-    await mount()
+    await mount('/?sort=status&order=asc')
     expect(calls).toBe(1)
+    expect(requests.map((request) => request.searchParams.get('sort'))).toEqual(['status'])
+    expect(requests.map((request) => request.searchParams.get('order'))).toEqual(['asc'])
     await act(async () => {
       await vi.advanceTimersByTimeAsync(14_999)
     })
@@ -709,6 +735,12 @@ describe('polling', () => {
       await vi.advanceTimersByTimeAsync(15_000)
     })
     expect(calls).toBe(3)
+    expect(requests.map((request) => request.searchParams.get('sort'))).toEqual([
+      'status',
+      'status',
+      'status',
+    ])
+    expect(requests.map((request) => request.searchParams.get('order'))).toEqual(['asc', 'asc', 'asc'])
     expect(screen.getByText('Analysed')).toBeTruthy()
     await act(async () => {
       await vi.advanceTimersByTimeAsync(120_000)
