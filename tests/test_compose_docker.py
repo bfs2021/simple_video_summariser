@@ -31,16 +31,35 @@ def _run(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+@pytest.mark.parametrize("populated_default_env", [False, True])
 def test_up_refuses_to_start_without_postgres_password(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, populated_default_env: bool
 ) -> None:
+    env_file = tmp_path / "empty.env"
+    env_file.write_text("")
     monkeypatch.delenv("POSTGRES_PASSWORD", raising=False)
-    try:
-        result = _run("up", "-d", "db")
-        assert result.returncode != 0
-        assert "POSTGRES_PASSWORD" in result.stderr
-    finally:
-        _run("down", "-v")
+    if populated_default_env:
+        populated_env = tmp_path / "populated.env"
+        populated_env.write_text("POSTGRES_PASSWORD=developer-password\n")
+        monkeypatch.setenv("COMPOSE_ENV_FILES", str(populated_env))
+    else:
+        monkeypatch.delenv("COMPOSE_ENV_FILES", raising=False)
+    project = f"issue-224-{tmp_path.name.replace('_', '-')}"
+
+    result = _run(
+        "--env-file",
+        str(env_file),
+        "--project-name",
+        project,
+        "-f",
+        "compose.yml",
+        "up",
+        "-d",
+        "db",
+    )
+
+    assert result.returncode != 0
+    assert "POSTGRES_PASSWORD" in result.stderr
 
 
 def test_explicit_compose_yml_config_has_no_published_port(
@@ -161,11 +180,22 @@ def test_planner_has_one_replica_and_worker_healthcheck_keeps_its_dollars(
     assert services["planner"]["healthcheck"] == services["transcriber"]["healthcheck"]
 
 
+@pytest.mark.parametrize("populated_default_env", [False, True])
 def test_config_fails_naming_postgres_password_when_unset(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, populated_default_env: bool
 ) -> None:
+    env_file = tmp_path / "empty.env"
+    env_file.write_text("")
     monkeypatch.delenv("POSTGRES_PASSWORD", raising=False)
-    result = _run("-f", "compose.yml", "config")
+    if populated_default_env:
+        populated_env = tmp_path / "populated.env"
+        populated_env.write_text("POSTGRES_PASSWORD=developer-password\n")
+        monkeypatch.setenv("COMPOSE_ENV_FILES", str(populated_env))
+    else:
+        monkeypatch.delenv("COMPOSE_ENV_FILES", raising=False)
+
+    result = _run("--env-file", str(env_file), "-f", "compose.yml", "config")
+
     assert result.returncode != 0
     assert "POSTGRES_PASSWORD" in result.stderr
 
