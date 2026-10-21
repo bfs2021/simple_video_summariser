@@ -71,6 +71,31 @@ class InProcessQueue:
         self._pending.append(job)
         return job.id
 
+    def handoff(
+        self,
+        parent_job_id: int,
+        kind: str,
+        video_id: str,
+        *,
+        dedupe_key: str = "default",
+        payload: dict[str, Any] | None = None,
+        priority: int = 0,
+        run_after: datetime | None = None,
+    ) -> int | None:
+        parent = next(
+            (job for job in (*self._pending, *self._running) if job.id == parent_job_id), None
+        )
+        if parent is None or parent.video_id != video_id:
+            raise ValueError(f"parent job {parent_job_id} does not belong to video {video_id!r}")
+        return self.enqueue(
+            kind,
+            video_id,
+            dedupe_key=dedupe_key,
+            payload=payload,
+            priority=max(parent.priority, priority),
+            run_after=run_after,
+        )
+
     @contextmanager
     def claim(
         self, kinds: Sequence[str], *, worker: str, dedupe_key: str | None = None

@@ -72,7 +72,16 @@ class Rig:
         self.ctx, self.logs = make_ctx()
 
     def run(self, video_id: str, **job: Any) -> None:
-        self.handler(make_job(video_id, **job), self.ctx)
+        built = make_job(video_id, **job)
+        parent_id = self.queue.enqueue("ingest", video_id, priority=built.priority)
+        assert parent_id is not None
+        self.conn.execute("UPDATE jobs SET state = 'running' WHERE id = %s", (parent_id,))
+        self.conn.commit()
+        try:
+            self.handler(replace(built, id=parent_id), self.ctx)
+        finally:
+            self.conn.execute("DELETE FROM jobs WHERE id = %s", (parent_id,))
+            self.conn.commit()
 
     def scalar(self, sql: str, *params: object) -> Any:
         row = self.conn.execute(sql, params).fetchone()
@@ -711,16 +720,16 @@ def test_a_crash_between_the_transcript_commit_and_the_analyze_enqueue_is_recove
     conn: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     rig = manual_rig(conn)
-    real_enqueue = rig.queue.enqueue
+    real_handoff = rig.queue.handoff
     crashed: list[bool] = []
 
-    def crash_once(kind: str, video_id: str, **kwargs: Any) -> int | None:
+    def crash_once(parent_job_id: int, kind: str, video_id: str, **kwargs: Any) -> int | None:
         if kind == "analyze" and not crashed:
             crashed.append(True)
             raise RuntimeError("power cut")
-        return real_enqueue(kind, video_id, **kwargs)
+        return real_handoff(parent_job_id, kind, video_id, **kwargs)
 
-    monkeypatch.setattr(rig.queue, "enqueue", crash_once)
+    monkeypatch.setattr(rig.queue, "handoff", crash_once)
 
     with pytest.raises(RuntimeError, match="power cut"):
         rig.run(MANUAL_ID)

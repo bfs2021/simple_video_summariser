@@ -41,6 +41,19 @@ class FakeQueue:
     ) -> int | None:
         raise AssertionError("the reaper must not enqueue")
 
+    def handoff(
+        self,
+        parent_job_id: int,
+        kind: str,
+        video_id: str,
+        *,
+        dedupe_key: str = "default",
+        payload: dict[str, Any] | None = None,
+        priority: int = 0,
+        run_after: datetime | None = None,
+    ) -> int | None:
+        raise AssertionError("the reaper must not hand off")
+
     def claim(
         self, kinds: Sequence[str], *, worker: str, dedupe_key: str | None = None
     ) -> AbstractContextManager[Job | None]:

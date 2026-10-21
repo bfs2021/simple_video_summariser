@@ -304,6 +304,13 @@ and rate-limitable.
 Claim ordering is `priority DESC, run_after ASC`. This is what prevents a
 200-episode backfill from starving today's episodes (D9b).
 
+Pipeline handoff preserves the greater of the successor's supplied priority and
+the parent job's current persisted priority. Handoff and `POST /videos`
+reprioritization serialize on the video's row: resubmission raises pending jobs
+and running `ingest`/`transcribe` jobs, but never running `analyze`. Therefore a
+human bump reaches the next stage without durable per-video override state and
+without leaking into a later re-analysis sweep or unrelated pipeline run (#155).
+
 RSS-gap reconciliation (#93) queues at the Normal band with `origin = 'rss'`:
 a channel that uploads more than the ~15 feed entries between two polls loses
 videos the feed never showed, and those are forward-monitored content, not

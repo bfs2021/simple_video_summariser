@@ -53,6 +53,9 @@ class FakeQueue:
         self.calls.append((kind, video_id))
         return len(self.calls)
 
+    def handoff(self, parent_job_id: int, kind: str, video_id: str, **kwargs: Any) -> int | None:
+        return self.enqueue(kind, video_id, **kwargs)
+
 
 class UnitRig:
     """The handler with every database call recorded instead of made."""

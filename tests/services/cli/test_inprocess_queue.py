@@ -35,6 +35,24 @@ def test_enqueue_returns_distinct_ids_and_claim_hands_back_the_job_fields() -> N
     assert job.attempts == 1
 
 
+def test_handoff_uses_the_greater_of_the_running_parent_and_supplied_priority() -> None:
+    queue = InProcessQueue()
+    parent_id = queue.enqueue("ingest", VID, priority=12)
+    assert parent_id is not None
+
+    with queue.claim(["ingest"], worker="cli") as parent:
+        assert parent is not None
+        successor_id = queue.handoff(
+            parent.id, "transcribe", VID, priority=10, payload={"language": "en"}
+        )
+
+    successor = claim_one(queue, ("transcribe",))
+    assert successor is not None
+    assert successor.id == successor_id
+    assert successor.priority == 12
+    assert successor.payload == {"language": "en"}
+
+
 def test_jobs_run_in_fifo_order_whatever_their_priority() -> None:
     queue = InProcessQueue()
     queue.enqueue("ingest", VID, priority=0)

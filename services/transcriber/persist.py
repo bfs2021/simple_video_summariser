@@ -58,10 +58,16 @@ def save_transcript_with_chunks(
 
 
 def enqueue_analyze(
-    queue: JobQueue, settings: Settings, video_id: str, *, priority: int
+    queue: JobQueue,
+    settings: Settings,
+    parent_job_id: int,
+    video_id: str,
+    *,
+    priority: int,
 ) -> int | None:
-    """Enqueue the ``analyze`` job for ``video_id`` under the configured dedupe key."""
-    return queue.enqueue(
+    """Hand off to ``analyze`` under the configured dedupe key."""
+    return queue.handoff(
+        parent_job_id,
         "analyze",
         video_id,
         dedupe_key=analyze_dedupe_key(settings.PROMPT_VERSION, settings.SUMMARIZER),

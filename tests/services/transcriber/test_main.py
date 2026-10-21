@@ -165,6 +165,9 @@ class FakeQueue:
     def enqueue(self, kind: str, video_id: str, **kwargs: Any) -> int | None:
         raise NotImplementedError
 
+    def handoff(self, parent_job_id: int, kind: str, video_id: str, **kwargs: Any) -> int | None:
+        raise NotImplementedError
+
     def reap_stale(self, older_than_sec: int | None = None) -> int:
         raise NotImplementedError
 

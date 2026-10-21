@@ -172,7 +172,7 @@ def make_transcribe_handler(
                 "transcript has no speech: nothing to analyze, no analyze job enqueued"
             )
             return
-        if enqueue_analyze(queue, settings, job.video_id, priority=job.priority) is None:
+        if enqueue_analyze(queue, settings, job.id, job.video_id, priority=job.priority) is None:
             ctx.logger.info("analyze job already pending or running")
 
     def process(conn: psycopg.Connection[Any], job: Job, ctx: JobContext, audio: AudioRef) -> None:

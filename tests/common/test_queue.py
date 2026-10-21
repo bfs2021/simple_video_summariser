@@ -1760,8 +1760,80 @@ def test_force_pending_commits_on_a_default_connection(
 
 
 # ---------------------------------------------------------------------------
-# raise_priority (issue #103)
+# handoff and raise_priority (issues #155, #103)
 # ---------------------------------------------------------------------------
+
+
+def test_handoff_uses_persisted_parent_priority_without_lowering_it(
+    queue: PostgresQueue, conn: psycopg.Connection[Any]
+) -> None:
+    conn.execute("INSERT INTO videos (video_id) VALUES ('v1')")
+    parent_id = queue.enqueue("ingest", "v1", priority=20)
+    assert parent_id is not None
+
+    successor_id = queue.handoff(parent_id, "transcribe", "v1", priority=10)
+
+    assert successor_id is not None
+    assert _row(conn, successor_id)["priority"] == 20
+
+
+@pytest.mark.parametrize("handoff_first", [False, True])
+def test_raise_priority_and_handoff_are_serialized_on_the_video(
+    head_dsn: str, conn: psycopg.Connection[Any], handoff_first: bool
+) -> None:
+    conn.execute("INSERT INTO videos (video_id) VALUES ('v1')")
+    parent_id = PostgresQueue(conn, settings=_settings()).enqueue("ingest", "v1", priority=0)
+    assert parent_id is not None
+    _set(conn, parent_id, state="running")
+    result: dict[str, Any] = {}
+
+    with psycopg.connect(head_dsn) as holder:
+        with holder.transaction():
+            holder.execute("SELECT 1 FROM videos WHERE video_id = 'v1' FOR UPDATE")
+            if handoff_first:
+                successor_id = PostgresQueue(holder, settings=_settings()).handoff(
+                    parent_id, "transcribe", "v1"
+                )
+
+                def compete() -> None:
+                    with psycopg.connect(head_dsn, application_name="priority-race-155") as other:
+                        result["raised"] = PostgresQueue(
+                            other, settings=_settings()
+                        ).raise_priority("v1", 10)
+
+            else:
+                holder.execute("UPDATE jobs SET priority = 10 WHERE id = %s", (parent_id,))
+
+                def compete() -> None:
+                    with psycopg.connect(head_dsn, application_name="priority-race-155") as other:
+                        result["successor"] = PostgresQueue(
+                            other, settings=_settings()
+                        ).handoff(parent_id, "transcribe", "v1")
+
+            thread = threading.Thread(target=compete)
+            thread.start()
+            _wait_until_blocked(conn, "priority-race-155")
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+    successor = successor_id if handoff_first else result["successor"]
+    assert successor is not None
+    assert _row(conn, successor)["priority"] == 10
+
+
+def test_handoff_rejects_a_parent_from_another_video(
+    queue: PostgresQueue, conn: psycopg.Connection[Any]
+) -> None:
+    conn.execute("INSERT INTO videos (video_id) VALUES ('v1'), ('v2')")
+    parent_id = queue.enqueue("ingest", "v1")
+    assert parent_id is not None
+
+    with pytest.raises(ValueError, match="parent job"):
+        queue.handoff(parent_id, "transcribe", "v2")
+
+    assert conn.execute("SELECT count(*) FROM jobs WHERE video_id = 'v2'").fetchone() == (0,)
+
+
 
 
 def _wait_until_blocked(conn: psycopg.Connection[Any], app: str) -> None:
@@ -1843,11 +1915,20 @@ def test_raise_priority_changes_nothing_but_priority_and_inserts_nothing(
     assert _count(conn) == count
 
 
-@pytest.mark.parametrize("state", ["running", "done", "dead"])
-def test_raise_priority_never_touches_a_job_that_is_not_pending(
-    queue: PostgresQueue, conn: psycopg.Connection[Any], state: str
+@pytest.mark.parametrize(
+    ("kind", "state"),
+    [
+        ("analyze", "running"),
+        ("ingest", "done"),
+        ("ingest", "dead"),
+        ("transcribe", "done"),
+        ("transcribe", "dead"),
+    ],
+)
+def test_raise_priority_never_touches_finished_jobs_or_running_analyze(
+    queue: PostgresQueue, conn: psycopg.Connection[Any], kind: str, state: str
 ) -> None:
-    job_id = queue.enqueue("ingest", "v1", priority=-10)
+    job_id = queue.enqueue(kind, "v1", dedupe_key="v1:fake" if kind == "analyze" else "default", priority=-10)
     assert job_id is not None
     _set(conn, job_id, state=state)
     before = _row(conn, job_id)
@@ -1855,6 +1936,19 @@ def test_raise_priority_never_touches_a_job_that_is_not_pending(
     assert queue.raise_priority("v1", 10) == []
 
     assert _row(conn, job_id) == before
+
+
+@pytest.mark.parametrize("kind", ["ingest", "transcribe"])
+def test_raise_priority_raises_running_successor_producers(
+    queue: PostgresQueue, conn: psycopg.Connection[Any], kind: str
+) -> None:
+    job_id = queue.enqueue(kind, "v1", priority=-10)
+    assert job_id is not None
+    _set(conn, job_id, state="running")
+
+    assert queue.raise_priority("v1", 10) == [job_id]
+
+    assert _row(conn, job_id)["priority"] == 10
 
 
 def test_raise_priority_on_an_unknown_video_is_empty(
@@ -1892,8 +1986,8 @@ def test_a_job_whose_claim_is_in_flight_is_never_both_claimed_low_and_reported_r
         assert not thread.is_alive()
 
     row = _row(conn, job_id)
-    assert result["ids"] == []
-    assert (row["state"], row["priority"]) == ("running", -10)
+    assert result["ids"] == [job_id]
+    assert (row["state"], row["priority"]) == ("running", 10)
 
 
 def test_two_concurrent_raises_both_succeed_and_the_job_ends_at_the_target(
