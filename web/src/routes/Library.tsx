@@ -318,6 +318,7 @@ function SortHeader({ label, sort, state, onSort }: SortHeaderProps) {
   return (
     <th scope="col" aria-sort={index === 0 && pair !== null ? direction(pair.order) : undefined}>
       <button
+        className="btn"
         type="button"
         onClick={() => onSort(sort)}
         aria-label={pair === null ? `Append ${label} ${direction(action)}` : `Toggle ${label} to ${direction(action)}`}

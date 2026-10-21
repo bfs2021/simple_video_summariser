@@ -165,10 +165,14 @@ describe('sorting', () => {
       ['Published 1 descending', 'descending'],
       ['Status', null],
     ])
-    expect(screen.getByRole('button', { name: 'Append Title ascending' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Append Channel ascending' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Toggle Published to ascending' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Append Status ascending' })).toBeTruthy()
+    for (const name of [
+      'Append Title ascending',
+      'Append Channel ascending',
+      'Toggle Published to ascending',
+      'Append Status ascending',
+    ]) {
+      expect(screen.getByRole('button', { name }).classList.contains('btn')).toBe(true)
+    }
   })
 
   it.each([
