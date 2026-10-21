@@ -7,7 +7,9 @@
 # one real smoke test (`pytest -m whisper`) installs this file into a
 # throwaway venv first.
 #
-# Pinned to the exact version task #4 verified for Python 3.14
-# (architecture.md 16.2).
+# faster-whisper is pinned to the exact version task #4 verified for Python
+# 3.14 (architecture.md 16.2). #76 established the compatibility pin for its
+# PyAV dependency: faster-whisper 1.2.1 passes metadata_errors to av.open, and
+# PyAV 19 removed that argument.
 faster-whisper==1.2.1
 av==18.1.0

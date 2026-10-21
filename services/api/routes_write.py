@@ -279,8 +279,9 @@ def submit_video(
     is), then the latest ``ingest`` job is returned if there is one, whatever
     its state; a finished job is not resubmitted (retry is #44). Then every
     ``pending`` job of the video below ``PRIORITY_INTERACTIVE`` is raised to
-    it (#103), whatever its kind; running jobs are never touched. Otherwise
-    one job is enqueued at ``PRIORITY_INTERACTIVE``. A concurrent submission that loses the enqueue
+    it (#103), whatever its kind; running ``ingest`` and ``transcribe`` jobs
+    are also raised so their successors inherit it (#155). Otherwise one job
+    is enqueued at ``PRIORITY_INTERACTIVE``. A concurrent submission that loses the enqueue
     race returns the winner's job.
     """
     with conn.transaction():

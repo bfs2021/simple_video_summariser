@@ -324,7 +324,8 @@ def test_workers_stop_cleanly_within_the_grace_period(stack: Stack) -> None:
             ).stdout.strip()
             assert out == "0", name
     finally:
-        stack.compose(
+        restored = stack.compose(
             "up", "-d", "--no-build", "--wait", "--wait-timeout", WAIT_TIMEOUT,
             *WORKERS,
         )
+        assert restored.returncode == 0, restored.stderr

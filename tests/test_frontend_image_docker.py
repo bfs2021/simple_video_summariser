@@ -346,6 +346,15 @@ class Stack:
         assert started.returncode == 0, started.stderr
         return name
 
+    def start_address_holder(self) -> str:
+        name = f"ytdigest-address-holder-{uuid.uuid4().hex[:8]}"
+        started = _docker(
+            "run", "-d", "--name", name, "--network", self.network,
+            STUB_IMAGE, "sleep", "300",
+        )  # fmt: skip
+        assert started.returncode == 0, started.stderr
+        return name
+
     def ip_of(self, container: str) -> str:
         out = _docker(
             "inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
@@ -710,10 +719,25 @@ def test_nginx_follows_the_api_to_a_new_address(
 ) -> None:
     stack = make_stack()
     first = stack.start_api()
-    assert stack.wait_for_api(), stack.logs()
-    old_ip = stack.ip_of(first)
-    second = stack.start_api()
-    new_ip = stack.ip_of(second)
-    assert new_ip and new_ip != old_ip
-    assert _docker("rm", "-f", first).returncode == 0
-    assert stack.wait_for_api(deadline=30), stack.logs()
+    try:
+        assert stack.wait_for_api(), stack.logs()
+        old_ip = stack.ip_of(first)
+
+        stopped = _docker("stop", first)
+        assert stopped.returncode == 0, stopped.stderr
+
+        def unavailable() -> bool:
+            try:
+                return stack.get("/api/healthz").status in (502, 504)
+            except OSError:
+                return False
+
+        assert _wait(unavailable, deadline=30), stack.logs()
+        holder = stack.start_address_holder()
+        assert stack.ip_of(holder) == old_ip
+        second = stack.start_api()
+        new_ip = stack.ip_of(second)
+        assert new_ip and new_ip != old_ip
+        assert stack.wait_for_api(deadline=30), stack.logs()
+    finally:
+        _docker("rm", "-f", first)
