@@ -4,9 +4,9 @@
 renders: when a line is due is decided by the handlers (transcribe's 10% steps and
 heartbeat, one event per LLM call), so each event becomes exactly one line.
 
-Every line is plain text ending in one ``\\n``, with no ``\\r`` and no ANSI escape
-codes, whether or not the stream is a TTY. A stream that fails (closed pipe) is
-ignored: progress is a convenience and never fails the run.
+Non-TTY lines are plain text ending in one ``\\n``. On a TTY, the current status
+is redrawn in place until ``close`` finishes the line. A stream that fails
+(closed pipe) is ignored: progress is a convenience and never fails the run.
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ class ProgressPrinter:
         self._clock = clock
         self._stream: Callable[[], TextIO] = stream if stream is not None else _stderr
         self._stage_started: float | None = None
+        self._active = False
 
     def begin(self) -> None:
         """A stage started: elapsed time counts from here."""
@@ -45,10 +46,33 @@ class ProgressPrinter:
             return
         try:
             stream = self._stream()
-            stream.write(line + "\n")
+            if self._isatty(stream):
+                stream.write(("\r\x1b[2K" if self._active else "") + line)
+                self._active = True
+            else:
+                stream.write(line + "\n")
             stream.flush()
         except (OSError, ValueError):
-            pass  # a closed or broken stderr must not fail the run
+            pass
+
+    def close(self) -> None:
+        if not self._active:
+            return
+        try:
+            stream = self._stream()
+            stream.write("\n")
+            stream.flush()
+        except (OSError, ValueError):
+            pass
+        finally:
+            self._active = False
+
+    @staticmethod
+    def _isatty(stream: TextIO) -> bool:
+        try:
+            return stream.isatty() is True
+        except (AttributeError, OSError, ValueError):
+            return False
 
     def render(self, stage: str, done: float, total: float, fields: dict[str, Any]) -> str | None:
         name = " ".join(sanitize_text(stage).split())

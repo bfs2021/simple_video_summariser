@@ -463,21 +463,26 @@ def _run(video_id: str, deps: Deps | None, *, verbose: bool) -> int:
         printer = ProgressPrinter()
 
         def started(job: Job) -> None:
+            printer.close()
             printer.begin()
             _say(f"[{job.kind}] started")
 
         def finished(job: Job) -> None:
+            printer.close()
             _say(f"[{job.kind}] finished - {_progress_detail(conn, settings, video_id)}")
 
         try:
-            run_queue(
-                queue,
-                build_inprocess_handlers(deps, queue, conn),
-                video_id,
-                on_start=started,
-                on_finish=finished,
-                progress=printer,
-            )
+            try:
+                run_queue(
+                    queue,
+                    build_inprocess_handlers(deps, queue, conn),
+                    video_id,
+                    on_start=started,
+                    on_finish=finished,
+                    progress=printer,
+                )
+            finally:
+                printer.close()
         except PipelineError as err:
             if isinstance(err.cause, psycopg.errors.UndefinedTable):
                 return _schema_missing(["(a table the pipeline needs)"])

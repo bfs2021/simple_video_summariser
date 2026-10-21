@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import re
 import sys
 from datetime import UTC, datetime
@@ -13,6 +14,7 @@ import pytest
 
 from adapters.transcription.faster_whisper import FasterWhisperTranscriber
 from common.errors import (
+    Cancelled,
     Defer,
     LLMInvalidOutputError,
     PermanentSourceError,
@@ -211,6 +213,38 @@ def test_missing_whisper_fails_fast_before_any_audio_work_whatever_audio_dir_is(
     assert "PermissionError" not in err
     assert audio.calls == []
     assert rig.summarizer.calls == []
+
+
+@pytest.mark.parametrize(
+    ("failure", "exit_code", "message"),
+    [
+        (RuntimeError("boom"), 1, "[analyze] failed"),
+        (Cancelled(), 130, "[analyze] cancelled"),
+        (KeyboardInterrupt(), 130, "interrupted (Ctrl-C)"),
+    ],
+)
+def test_tty_progress_is_closed_before_failure_output(
+    failure: BaseException,
+    exit_code: int,
+    message: str,
+    head_dsn: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Terminal(io.StringIO):
+        def isatty(self) -> bool:
+            return True
+
+    err = Terminal()
+    monkeypatch.setattr(sys, "stderr", err)
+    summarizer = FakeSummarizer(name="ollama", fail_on={"chunk:0": failure})
+    rig = manual_rig(head_dsn, tmp_path, summarizer=summarizer)
+
+    assert main(["run", MANUAL_ID], deps=rig.deps) == exit_code
+
+    text = err.getvalue()
+    assert "[analyze] roster" in text
+    assert f"\n{message}" in text
 
 
 def test_ctrl_c_during_a_stage_exits_130_without_a_traceback(

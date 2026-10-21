@@ -25,8 +25,18 @@ class Clock:
         return self.now
 
 
+class Terminal(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
 def printer(clock: Clock | None = None) -> tuple[ProgressPrinter, io.StringIO]:
     out = io.StringIO()
+    return ProgressPrinter(clock=clock or Clock(), stream=lambda: out), out
+
+
+def terminal_printer(clock: Clock | None = None) -> tuple[ProgressPrinter, Terminal]:
+    out = Terminal()
     return ProgressPrinter(clock=clock or Clock(), stream=lambda: out), out
 
 
@@ -104,6 +114,71 @@ def test_an_unknown_stage_or_phase_prints_nothing() -> None:
     p("analyze", 1, 2)
 
     assert out.getvalue() == ""
+
+
+def test_a_tty_draws_then_replaces_and_clears_the_current_status() -> None:
+    p, out = terminal_printer()
+
+    p("transcribe", 10.0, 100.0)
+    p("analyze", 0, 1, phase="roster")
+
+    assert out.getvalue() == (
+        "[transcribe] 0:10 / 1:40 audio (10%) - elapsed 0:00"
+        "\r\x1b[2K[analyze] roster"
+    )
+
+
+def test_closing_a_tty_status_finishes_it_exactly_once() -> None:
+    p, out = terminal_printer()
+    p("analyze", 0, 1, phase="roster")
+
+    p.close()
+    p.close()
+
+    assert out.getvalue() == "[analyze] roster\n"
+
+
+class IsattyFailure(io.StringIO):
+    def __init__(self, error: Exception) -> None:
+        super().__init__()
+        self.error = error
+
+    def isatty(self) -> bool:
+        raise self.error
+
+
+@pytest.mark.parametrize("error", [AttributeError(), OSError(5, "io"), ValueError("closed file")])
+def test_an_isatty_failure_falls_back_to_plain_append_output(error: Exception) -> None:
+    out = IsattyFailure(error)
+    p = ProgressPrinter(stream=lambda: out)
+
+    p("analyze", 0, 1, phase="roster")
+    p("analyze", 1, 1, phase="reduce")
+    p.close()
+
+    assert out.getvalue() == "[analyze] roster\n[analyze] reduce\n"
+
+
+def test_a_stream_without_isatty_falls_back_to_plain_append_output() -> None:
+    class NoIsatty:
+        def __init__(self) -> None:
+            self.text = ""
+
+        def write(self, text: str) -> int:
+            self.text += text
+            return len(text)
+
+        def flush(self) -> None:
+            pass
+
+    out = NoIsatty()
+    p = ProgressPrinter(stream=lambda: out)  # type: ignore[arg-type, return-value]
+
+    p("analyze", 0, 1, phase="roster")
+    p("analyze", 1, 1, phase="reduce")
+    p.close()
+
+    assert out.text == "[analyze] roster\n[analyze] reduce\n"
 
 
 def test_every_line_is_one_plain_newline_terminated_line() -> None:

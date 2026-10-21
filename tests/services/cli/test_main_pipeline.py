@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import io
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -249,6 +251,27 @@ def test_a_full_run_prints_transcribe_and_analyze_progress_on_stderr_only(
     assert "[transcribe]" not in out and "[analyze]" not in out and "audio (" not in out
     assert "progress" not in err  # not also a JSON log record
     assert "\r" not in err and "\x1b" not in err
+
+
+def test_tty_progress_is_closed_before_finish_and_the_next_stage(
+    head_dsn: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Terminal(io.StringIO):
+        def isatty(self) -> bool:
+            return True
+
+    err = Terminal()
+    monkeypatch.setattr(sys, "stderr", err)
+    rig = no_captions_rig(head_dsn, tmp_path, transcriber=ProgressingTranscriber())
+
+    assert main(["run", NO_CAPTIONS_ID], deps=rig.deps) == 0
+
+    text = err.getvalue()
+    assert "[transcribe] 2:00 / 2:00 audio (100%)" in text
+    assert "\n[transcribe] finished" in text
+    assert "\n[analyze] started" in text
+    assert "[analyze] reduce" in text
+    assert "\n[analyze] finished" in text
 
 
 def test_a_video_with_subtitles_prints_no_transcription_progress(
