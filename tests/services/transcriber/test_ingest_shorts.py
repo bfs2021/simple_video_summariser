@@ -194,7 +194,16 @@ class Rig:
         self.ctx, self.logs = make_ctx()
 
     def run(self, video_id: str, origin: str) -> None:
-        self.handler(make_job(video_id, payload={"origin": origin}), self.ctx)
+        built = make_job(video_id, payload={"origin": origin})
+        parent_id = self.queue.enqueue("ingest", video_id, priority=built.priority)
+        assert parent_id is not None
+        self.conn.execute("UPDATE jobs SET state = 'running' WHERE id = %s", (parent_id,))
+        self.conn.commit()
+        try:
+            self.handler(replace(built, id=parent_id), self.ctx)
+        finally:
+            self.conn.execute("DELETE FROM jobs WHERE id = %s", (parent_id,))
+            self.conn.commit()
 
     def rows(self, sql: str) -> list[tuple[Any, ...]]:
         rows = self.conn.execute(sql).fetchall()
