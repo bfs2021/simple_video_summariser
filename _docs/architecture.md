@@ -445,7 +445,17 @@ CREATE INDEX transcripts_fts_idx ON transcripts USING GIN (fts);
 -- needs a new migration that also re-runs ALTER COLUMN fts SET EXPRESSION.
 -- transcript_ts_config(lang TEXT) RETURNS regconfig
 -- transcript_search_tsquery(q TEXT) RETURNS tsquery  -- OR over all those configs
+```
 
+`transcript_ts_config` uses a built-in PostgreSQL text-search configuration
+where one is mapped and `simple` otherwise. The `simple` configuration
+lowercases text but does not segment an unspaced run: the complete run is one
+lexeme. An exact whole-run or whole-token query can therefore match, but a query
+for text inside that run does not. Whitespace and punctuation can create token
+boundaries. This is a documented v1 limitation for unsupported languages; v1
+adds no segmenter or alternate index (#167).
+
+```sql
 -- source preference (D2): manual > whisper > auto
 CREATE FUNCTION transcript_rank(src TEXT) RETURNS INT IMMUTABLE LANGUAGE sql AS
 $$ SELECT CASE src WHEN 'youtube_manual' THEN 0
@@ -828,7 +838,7 @@ separated per D13.
 | `GET` | `/videos/{id}/analyses` | all runs (Compare view, D7) |
 | `GET` | `/videos/{id}/transcript` | paginated segments |
 | `GET` | `/videos/{id}/render` | **server-side HTML render** (D12c) |
-| `GET` | `/search?q=` | FTS over `search_docs` (title, latest analysis, preferred transcript); `matched_in` and transcript `ts_headline` excerpts |
+| `GET` | `/search?q=` | FTS over `search_docs` (title, latest analysis, preferred transcript); `matched_in` and transcript `ts_headline` excerpts. Transcript search uses a mapped built-in PostgreSQL configuration or `simple`; with `simple`, exact whole runs/tokens can match, but text inside an unspaced run cannot unless whitespace or punctuation creates a token boundary (#167). |
 | `GET` | `/ops/jobs` | filter by state/kind — powers Ops view |
 | `POST` | `/ops/jobs/{id}/retry` | resurrect a dead job |
 | `GET` | `/healthz` | liveness + queue depth by kind/state |
