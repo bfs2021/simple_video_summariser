@@ -255,7 +255,7 @@ export interface paths {
         };
         /**
          * Get Videos
-         * @description The filtered library in the requested single-column order.
+         * @description The filtered library in the requested multi-column order.
          */
         get: operations["get_videos_videos_get"];
         put?: never;
@@ -1411,8 +1411,10 @@ export interface operations {
                 status?: ("done" | "processing" | "unavailable" | "failed" | "idle") | null;
                 published_after?: string | null;
                 published_before?: string | null;
-                sort?: "title" | "published" | "status" | "channel";
-                order?: "asc" | "desc";
+                /** @description Repeated in precedence order; unique keys. Omitted alone defaults to published. */
+                sort?: ("title" | "published" | "status" | "channel")[] | null;
+                /** @description Paired by position with sort. Omitted alone defaults to desc for one key only. */
+                order?: ("asc" | "desc")[] | null;
                 offset?: number;
                 limit?: number;
             };

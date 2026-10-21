@@ -203,6 +203,30 @@ def test_text_and_published_sorts_are_directional_and_null_last(
     assert [v.video_id for v in page.items] == expected
 
 
+def test_multi_sort_respects_requested_precedence_and_published_implicit_tie(
+    conn: psycopg.Connection[Any],
+) -> None:
+    a = "UC" + "a" * 22
+    b = "UC" + "b" * 22
+    published = datetime(2026, 1, 1, tzinfo=UTC)
+    seed.channel(conn, a, "Alpha")
+    seed.channel(conn, b, "Beta")
+    seed.video(conn, "multi000001", channel_id=a, title="Zulu", published_at=published,
+               discovered_at=seed.at(1))
+    seed.video(conn, "multi000002", channel_id=a, title="Alpha", published_at=published,
+               discovered_at=seed.at(2))
+    seed.video(conn, "multi000003", channel_id=b, title="Middle", published_at=published,
+               discovered_at=seed.at(3))
+
+    two = list_videos(conn, sorts=(("channel", "asc"), ("title", "asc")))
+    three = list_videos(
+        conn, sorts=(("published", "desc"), ("channel", "desc"), ("title", "asc"))
+    )
+
+    assert [v.video_id for v in two.items] == ["multi000002", "multi000001", "multi000003"]
+    assert [v.video_id for v in three.items] == ["multi000003", "multi000002", "multi000001"]
+
+
 def test_case_only_text_ties_use_video_id_ascending(conn: psycopg.Connection[Any]) -> None:
     lower = "UC" + "l" * 22
     upper = "UC" + "u" * 22

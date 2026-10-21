@@ -181,25 +181,51 @@ def test_bad_paging_params_are_422_before_the_database(
     _assert_422_without_echo(api.get(f"/videos/{VID}{suffix}", params=params))
 
 
-@pytest.mark.parametrize("query", ["sort=title&sort=channel", "order=asc&order=desc"])
-def test_repeated_sort_params_are_422_before_the_database(api: TestClient, query: str) -> None:
+@pytest.mark.parametrize(
+    "query",
+    [
+        "sort=title&sort=title&order=asc&order=desc",
+        "sort=title&sort=status",
+        "order=asc&order=desc",
+        "sort=title&sort=status&order=asc",
+        "sort=title&order=asc&order=desc",
+        "sort=title&sort=status&sort=channel&sort=published&sort=title&order=asc&order=asc&order=asc&order=asc&order=asc",
+        "sort=title&order=asc&order=desc&order=asc&order=desc&order=asc",
+    ],
+)
+def test_invalid_multi_sort_is_422_before_the_database(api: TestClient, query: str) -> None:
     _assert_422_without_echo(api.get(f"/videos?{query}"))
 
 
 @pytest.mark.parametrize(
-    ("raw", "sort", "order"),
+    ("raw", "expected"),
     [
-        ({}, "published", "desc"),
-        ({"sort": "title"}, "title", "desc"),
-        ({"order": "asc"}, "published", "asc"),
-        ({"sort": "status", "order": "asc"}, "status", "asc"),
+        ({}, (("published", "desc"),)),
+        ({"sort": "title"}, (("title", "desc"),)),
+        ({"order": "asc"}, (("published", "asc"),)),
+        ({"sort": "status", "order": "asc"}, (("status", "asc"),)),
+        (
+            {"sort": ["channel", "published"], "order": ["asc", "desc"]},
+            (("channel", "asc"), ("published", "desc")),
+        ),
+        (
+            {"sort": ["channel", "published", "status"], "order": ["asc", "desc", "asc"]},
+            (("channel", "asc"), ("published", "desc"), ("status", "asc")),
+        ),
+        (
+            {
+                "sort": ["channel", "published", "status", "title"],
+                "order": ["asc", "desc", "asc", "desc"],
+            },
+            (("channel", "asc"), ("published", "desc"), ("status", "asc"), ("title", "desc")),
+        ),
     ],
 )
-def test_library_sort_defaults_are_independent(
-    raw: dict[str, str], sort: str, order: str
+def test_library_sort_sequence_uses_scalar_compatibility(
+    raw: dict[str, object], expected: tuple[tuple[str, str], ...]
 ) -> None:
     query = routes_read.VideoListQuery.model_validate(raw)
-    assert (query.sort, query.order) == (sort, order)
+    assert query.sort_sequence == expected
 
 
 def test_a_naive_datetime_is_read_as_utc() -> None:
@@ -326,17 +352,17 @@ def test_openapi_lists_the_four_paths_with_params_and_response_schemas(app: Fast
         schema = operation["responses"]["200"]["content"]["application/json"]["schema"]
         assert "$ref" in schema, path
     video_params = {p["name"]: p["schema"] for p in paths["/videos"]["get"]["parameters"]}
-    assert video_params["sort"] == {
-        "type": "string",
-        "enum": ["title", "published", "status", "channel"],
-        "default": "published",
-        "title": "Sort",
+    sort_array = video_params["sort"]["anyOf"][0]
+    order_array = video_params["order"]["anyOf"][0]
+    assert sort_array == {
+        "type": "array",
+        "items": {"type": "string", "enum": ["title", "published", "status", "channel"]},
+        "maxItems": 4,
     }
-    assert video_params["order"] == {
-        "type": "string",
-        "enum": ["asc", "desc"],
-        "default": "desc",
-        "title": "Order",
+    assert order_array == {
+        "type": "array",
+        "items": {"type": "string", "enum": ["asc", "desc"]},
+        "maxItems": 4,
     }
 
 

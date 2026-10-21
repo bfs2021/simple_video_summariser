@@ -112,15 +112,35 @@ const UC = 'UC' + 'a'.repeat(22)
 const parse = (qs: string) => parseLibraryParams(new URLSearchParams(qs))
 
 describe('parseLibraryParams', () => {
-  it('accepts a full valid set', () => {
-    const r = parse(`channel=${UC}&from=2026-01-02&to=2026-03-04&status=failed&sort=title&order=asc&page=3`)
+  it('accepts two-, three-, and four-key sort sequences', () => {
+    expect(parse('sort=title&order=asc&sort=status&order=desc').state.sorts).toEqual([
+      { sort: 'title', order: 'asc' },
+      { sort: 'status', order: 'desc' },
+    ])
+    expect(
+      parse('sort=channel&order=asc&sort=published&order=desc&sort=status&order=asc').state.sorts,
+    ).toEqual([
+      { sort: 'channel', order: 'asc' },
+      { sort: 'published', order: 'desc' },
+      { sort: 'status', order: 'asc' },
+    ])
+    expect(
+      parse('sort=channel&order=asc&sort=published&order=desc&sort=status&order=asc&sort=title&order=desc')
+        .state.sorts,
+    ).toHaveLength(4)
+  })
+
+  it('accepts a full valid set with ordered multi-sort pairs', () => {
+    const r = parse(`channel=${UC}&from=2026-01-02&to=2026-03-04&status=failed&sort=title&order=asc&sort=status&order=desc&page=3`)
     expect(r.state).toEqual({
       channel: UC,
       from: '2026-01-02',
       to: '2026-03-04',
       status: 'failed',
-      sort: 'title',
-      order: 'asc',
+      sorts: [
+        { sort: 'title', order: 'asc' },
+        { sort: 'status', order: 'desc' },
+      ],
       page: 3,
     })
     expect(r.invalid).toEqual([])
@@ -131,8 +151,7 @@ describe('parseLibraryParams', () => {
       from: null,
       to: null,
       status: null,
-      sort: 'published',
-      order: 'desc',
+      sorts: [{ sort: 'published', order: 'desc' }],
       page: 1,
     })
   })
@@ -140,21 +159,29 @@ describe('parseLibraryParams', () => {
     expect(parse(`status=${s}`).state.status).toBe(s)
   })
   it.each([
-    ['sort=title', 'title', 'desc'],
-    ['order=asc', 'published', 'asc'],
-    ['sort=status&order=asc', 'status', 'asc'],
-  ])('applies independent sort defaults for %s', (query, sort, order) => {
-    expect(parse(query).state).toMatchObject({ sort, order })
+    ['sort=title', [{ sort: 'title', order: 'desc' }]],
+    ['order=asc', [{ sort: 'published', order: 'asc' }]],
+    ['sort=status&order=asc', [{ sort: 'status', order: 'asc' }]],
+  ])('applies scalar compatibility for %s', (query, sorts) => {
+    expect(parse(query).state.sorts).toEqual(sorts)
   })
-  it.each(['sort=', 'sort=TITLE', 'sort=nope', 'sort=title&sort=channel', 'order=', 'order=ASC', 'order=nope', 'order=asc&order=desc'])(
-    'drops invalid scalar sorting in %s',
-    (query) => {
-      const r = parse(query)
-      const key = query.startsWith('sort') ? 'sort' : 'order'
-      expect(r.state).toMatchObject({ sort: 'published', order: 'desc' })
-      expect(r.invalid).toEqual([key])
-    },
-  )
+  it.each([
+    'sort=',
+    'sort=TITLE',
+    'sort=nope',
+    'order=',
+    'order=ASC',
+    'order=nope',
+    'sort=title&sort=channel',
+    'order=asc&order=desc',
+    'sort=title&sort=title&order=asc&order=desc',
+    'sort=title&sort=status&order=asc',
+    'sort=title&sort=status&sort=channel&sort=published&sort=title&order=asc&order=asc&order=asc&order=asc&order=asc',
+  ])('drops the whole invalid sort sequence in %s', (query) => {
+    const r = parse(query)
+    expect(r.state.sorts).toEqual([{ sort: 'published', order: 'desc' }])
+    expect(r.invalid).toEqual(['sort', 'order'])
+  })
 
   it.each([
     'UC' + 'a'.repeat(21), 'UC' + 'a'.repeat(23), 'XX' + 'a'.repeat(22), 'uc' + 'a'.repeat(22),
@@ -209,8 +236,7 @@ describe('parseLibraryParams', () => {
       from: null,
       to: null,
       status: null,
-      sort: 'published',
-      order: 'desc',
+      sorts: [{ sort: 'published', order: 'desc' }],
       page: 1,
     })
     expect(r.invalid).toEqual([])
@@ -223,8 +249,7 @@ describe('buildVideosQuery', () => {
     from: null,
     to: null,
     status: null,
-    sort: 'published',
-    order: 'desc',
+    sorts: [{ sort: 'published', order: 'desc' }],
     page: 1,
   }
   const q = (s: Partial<LibraryState>) => buildVideosQuery({ ...base, ...s })
@@ -233,10 +258,11 @@ describe('buildVideosQuery', () => {
     expect(q({}).toString()).toBe('limit=50&offset=0')
     expect(PAGE_SIZE).toBe(50)
   })
-  it('omits the default sort but sends both values for every non-default state', () => {
+  it('omits the default sort and preserves repeated pair order', () => {
     expect(q({}).toString()).toBe('limit=50&offset=0')
-    expect(q({ sort: 'title' }).toString()).toBe('sort=title&order=desc&limit=50&offset=0')
-    expect(q({ order: 'asc' }).toString()).toBe('sort=published&order=asc&limit=50&offset=0')
+    expect(
+      q({ sorts: [{ sort: 'channel', order: 'asc' }, { sort: 'published', order: 'desc' }] }).toString(),
+    ).toBe('sort=channel&sort=published&order=asc&order=desc&limit=50&offset=0')
   })
   it('computes offset from the page', () => {
     expect(q({ page: 2 }).get('offset')).toBe('50')
@@ -281,8 +307,7 @@ describe('toSearchParams', () => {
         from: null,
         to: null,
         status: null,
-        sort: 'published',
-        order: 'desc',
+        sorts: [{ sort: 'published', order: 'desc' }],
         page: 1,
       }).toString(),
     ).toBe('')
@@ -292,10 +317,12 @@ describe('toSearchParams', () => {
         from: '2026-01-01',
         to: '2026-02-02',
         status: 'done',
-        sort: 'channel',
-        order: 'asc',
+        sorts: [
+          { sort: 'channel', order: 'asc' },
+          { sort: 'status', order: 'desc' },
+        ],
         page: 4,
       }).toString(),
-    ).toBe(`channel=${UC}&from=2026-01-01&to=2026-02-02&status=done&sort=channel&order=asc&page=4`)
+    ).toBe(`channel=${UC}&from=2026-01-01&to=2026-02-02&status=done&sort=channel&order=asc&sort=status&order=desc&page=4`)
   })
 })

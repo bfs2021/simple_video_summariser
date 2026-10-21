@@ -2693,7 +2693,7 @@
     },
     "/videos": {
       "get": {
-        "description": "The filtered library in the requested single-column order.",
+        "description": "The filtered library in the requested multi-column order.",
         "operationId": "get_videos_videos_get",
         "parameters": [
           {
@@ -2770,33 +2770,57 @@
             }
           },
           {
+            "description": "Repeated in precedence order; unique keys. Omitted alone defaults to published.",
             "in": "query",
             "name": "sort",
             "required": false,
             "schema": {
-              "default": "published",
-              "enum": [
-                "title",
-                "published",
-                "status",
-                "channel"
+              "anyOf": [
+                {
+                  "items": {
+                    "enum": [
+                      "title",
+                      "published",
+                      "status",
+                      "channel"
+                    ],
+                    "type": "string"
+                  },
+                  "maxItems": 4,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
               ],
-              "title": "Sort",
-              "type": "string"
+              "description": "Repeated in precedence order; unique keys. Omitted alone defaults to published.",
+              "title": "Sort"
             }
           },
           {
+            "description": "Paired by position with sort. Omitted alone defaults to desc for one key only.",
             "in": "query",
             "name": "order",
             "required": false,
             "schema": {
-              "default": "desc",
-              "enum": [
-                "asc",
-                "desc"
+              "anyOf": [
+                {
+                  "items": {
+                    "enum": [
+                      "asc",
+                      "desc"
+                    ],
+                    "type": "string"
+                  },
+                  "maxItems": 4,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
               ],
-              "title": "Order",
-              "type": "string"
+              "description": "Paired by position with sort. Omitted alone defaults to desc for one key only.",
+              "title": "Order"
             }
           },
           {

@@ -162,13 +162,13 @@ describe('sorting', () => {
     expect(headers.map((header) => [header.textContent, header.getAttribute('aria-sort')])).toEqual([
       ['Title', null],
       ['Channel', null],
-      ['Published descending', 'descending'],
+      ['Published 1 descending', 'descending'],
       ['Status', null],
     ])
-    expect(screen.getByRole('button', { name: 'Sort by Title ascending' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Sort by Channel ascending' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Sort by Published ascending' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Sort by Status ascending' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Append Title ascending' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Append Channel ascending' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Toggle Published to ascending' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Append Status ascending' })).toBeTruthy()
   })
 
   it.each([
@@ -179,12 +179,12 @@ describe('sorting', () => {
     stubFetch(serverWith(120))
     const router = await mount('/?status=idle&page=2')
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: `Sort by ${label} ascending` }))
+      fireEvent.click(screen.getByRole('button', { name: `Append ${label} ascending` }))
     })
     await settle()
-    expect(search(router)).toBe(`?status=idle&sort=${sort}&order=${order}`)
-    expect(last().searchParams.get('sort')).toBe(sort)
-    expect(last().searchParams.get('order')).toBe(order)
+    expect(search(router)).toBe(`?status=idle&sort=published&order=desc&sort=${sort}&order=${order}`)
+    expect(last().searchParams.getAll('sort')).toEqual(['published', sort])
+    expect(last().searchParams.getAll('order')).toEqual(['desc', order])
     expect(last().searchParams.get('offset')).toBe('0')
   })
 
@@ -192,23 +192,23 @@ describe('sorting', () => {
     stubFetch(serverWith(2))
     const router = await mount('/?sort=title&order=asc')
     expect(last().search).toBe('?sort=title&order=asc&limit=50&offset=0')
-    expect(screen.getByRole('columnheader', { name: 'Title ascending' }).getAttribute('aria-sort')).toBe(
+    expect(screen.getByRole('columnheader', { name: 'Title 1 ascending' }).getAttribute('aria-sort')).toBe(
       'ascending',
     )
 
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Sort by Title descending' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Toggle Title to descending' }))
     })
     await settle()
     expect(search(router)).toBe('?sort=title&order=desc')
 
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Sort by Published descending' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Reset sort to Published descending' }))
     })
     await settle()
     expect(search(router)).toBe('')
     expect(last().search).toBe('?limit=50&offset=0')
-    expect(screen.getByRole('columnheader', { name: 'Published descending' }).getAttribute('aria-sort')).toBe(
+    expect(screen.getByRole('columnheader', { name: 'Published 1 descending' }).getAttribute('aria-sort')).toBe(
       'descending',
     )
 
@@ -217,7 +217,7 @@ describe('sorting', () => {
     })
     await settle()
     expect(search(router)).toBe('?sort=title&order=desc')
-    expect(screen.getByRole('columnheader', { name: 'Title descending' }).getAttribute('aria-sort')).toBe(
+    expect(screen.getByRole('columnheader', { name: 'Title 1 descending' }).getAttribute('aria-sort')).toBe(
       'descending',
     )
 
@@ -226,9 +226,56 @@ describe('sorting', () => {
     })
     await settle()
     expect(search(router)).toBe('')
-    expect(screen.getByRole('columnheader', { name: 'Published descending' }).getAttribute('aria-sort')).toBe(
+    expect(screen.getByRole('columnheader', { name: 'Published 1 descending' }).getAttribute('aria-sort')).toBe(
       'descending',
     )
+  })
+
+  it('appends, toggles, moves, removes, and resets visible sort precedence', async () => {
+    stubFetch(serverWith(120))
+    const router = await mount('/?sort=channel&order=asc&sort=published&order=desc&page=2')
+
+    const sortOrder = screen.getByRole('group', { name: 'Sort order' })
+    expect(sortOrder.textContent).toContain('1 Channel ascending')
+    expect(sortOrder.textContent).toContain('2 Published descending')
+    expect(screen.getByRole('columnheader', { name: 'Channel 1 ascending' }).getAttribute('aria-sort')).toBe('ascending')
+    expect(screen.getByRole('columnheader', { name: 'Published 2 descending' }).getAttribute('aria-sort')).toBeNull()
+    expect((screen.getByRole('button', { name: 'Move Channel earlier' }) as HTMLButtonElement).disabled).toBe(true)
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Append Status ascending' }))
+    })
+    await settle()
+    expect(search(router)).toBe('?sort=channel&order=asc&sort=published&order=desc&sort=status&order=asc')
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Append Title ascending' }))
+    })
+    await settle()
+    expect(search(router)).toBe(
+      '?sort=channel&order=asc&sort=published&order=desc&sort=status&order=asc&sort=title&order=asc',
+    )
+    expect(screen.queryByRole('button', { name: /^Append / })).toBeNull()
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Move Status earlier' }))
+    })
+    await settle()
+    expect(search(router)).toBe(
+      '?sort=channel&order=asc&sort=status&order=asc&sort=published&order=desc&sort=title&order=asc',
+    )
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Remove Channel from sort order' }))
+    })
+    await settle()
+    expect(search(router)).toBe('?sort=status&order=asc&sort=published&order=desc&sort=title&order=asc')
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Reset sort to Published descending' }))
+    })
+    await settle()
+    expect(search(router)).toBe('')
   })
 
   it('clear all filters preserves sorting and sorting alone does not show it', async () => {
@@ -257,7 +304,7 @@ describe('rows', () => {
     expect(screen.getAllByRole('columnheader').map((h) => h.textContent)).toEqual([
       'Title',
       'Channel',
-      'Published descending',
+      'Published 1 descending',
       'Status',
     ])
   })
