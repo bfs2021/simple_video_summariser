@@ -310,16 +310,21 @@ def test_failed_migrate_blocks_every_dependent(stack: Stack) -> None:
 
 
 def test_workers_stop_cleanly_within_the_grace_period(stack: Stack) -> None:
-    # Last on purpose: leaves the workers stopped.
     ids = {name: stack.container_id(name) for name in WORKERS}
-    result = stack.compose("stop", *WORKERS)
-    assert result.returncode == 0, result.stderr
-    for name, container in ids.items():
-        out = subprocess.run(
-            ["docker", "inspect", "-f", "{{.State.ExitCode}}", container],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=True,
-        ).stdout.strip()
-        assert out == "0", name
+    try:
+        result = stack.compose("stop", *WORKERS)
+        assert result.returncode == 0, result.stderr
+        for name, container in ids.items():
+            out = subprocess.run(
+                ["docker", "inspect", "-f", "{{.State.ExitCode}}", container],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=True,
+            ).stdout.strip()
+            assert out == "0", name
+    finally:
+        stack.compose(
+            "up", "-d", "--no-build", "--wait", "--wait-timeout", WAIT_TIMEOUT,
+            *WORKERS,
+        )

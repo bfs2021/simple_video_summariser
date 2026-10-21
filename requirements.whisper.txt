@@ -10,3 +10,4 @@
 # Pinned to the exact version task #4 verified for Python 3.14
 # (architecture.md 16.2).
 faster-whisper==1.2.1
+av==18.1.0
