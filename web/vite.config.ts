@@ -12,6 +12,9 @@ export default defineConfig({
   plugins: [react(), babel({ presets: [reactCompilerPreset()] })],
   build: { sourcemap: false },
   server: {
+    // Dev server only: lets it answer through the Cloudflare Tunnel
+    // (compose.tunnel.yml). The production nginx build never sees this.
+    allowedHosts: ['.devopsdojo.click'],
     proxy: {
       [API_PREFIX]: { target: apiProxyTarget, rewrite: rewriteApiPath },
     },

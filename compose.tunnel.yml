@@ -1,0 +1,29 @@
+# Opt-in public access through a Cloudflare Tunnel. Not part of the seven-service
+# stack in compose.yml and never auto-merged; add it explicitly:
+#
+#   docker compose -f compose.yml -f compose.tunnel.yml up -d          # server
+#   docker compose -f compose.yml -f compose.override.yml \
+#       -f compose.tunnel.yml up -d                                    # dev
+#
+# `cloudflared` dials out to Cloudflare, so nothing listens on the host and no
+# inbound port opens. It joins `edge` only and reaches `web` by name. Setup
+# (tunnel, DNS record, Access policy): _docs/deploy-host.md, "Public access".
+#
+# TUNNEL_URL is where the tunnel forwards: nginx in production (the default).
+# The dev overlay swaps `web` for the Vite server, so there it is
+# http://web:5173 and Vite must accept the public Host header.
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:2026.10.3
+    command: ["tunnel", "--no-autoupdate", "run", "${TUNNEL_ID:?required}"]
+    environment:
+      # The credentials JSON written by `cloudflared tunnel create`, on one
+      # line. Secret: lives in .env only.
+      TUNNEL_CRED_CONTENTS: ${TUNNEL_CRED_CONTENTS:?required}
+      TUNNEL_URL: ${TUNNEL_URL:-http://web:80}
+    depends_on: {web: {condition: service_started}}
+    networks: [edge]
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+    restart: unless-stopped
