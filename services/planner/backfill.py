@@ -153,14 +153,14 @@ def run_channel_backfill(
     # them all (concurrent writers' videos count as known); otherwise more remain.
     done = request.dry_run or result.new_videos <= allowance
     with conn.transaction():
-        requests.record_progress(
+        updated = requests.record_progress(
             conn,
             request.id,
             enqueued_this_run=result.enqueued,
             result=_result_json(result),
             done=done,
         )
-        if done and not request.dry_run:
+        if updated and done and not request.dry_run:
             clear_feed_gap(conn, request.channel_id, source="backfill")
     _log_run(
         request,

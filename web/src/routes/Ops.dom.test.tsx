@@ -90,6 +90,7 @@ function api(opts: { health?: Handler; channels?: Handler; jobs?: Handler; retry
 }
 
 const jobGets = () => calls.filter((c) => c.url.pathname === '/api/ops/jobs')
+const channelGets = () => calls.filter((c) => c.url.pathname === '/api/ops/channels')
 const healthGets = () => calls.filter((c) => c.url.pathname === '/api/healthz')
 const posts = () => calls.filter((c) => c.method === 'POST')
 const lastJobGet = () => jobGets()[jobGets().length - 1] as Call
@@ -173,6 +174,38 @@ describe('channels needing attention', () => {
     expect(within(region).getByText('Run a channel backfill to recover older uploads')).toBeTruthy()
     expect(within(region).getByText('POST /api/channels/UCabc/backfill')).toBeTruthy()
     expect(within(region).getByText('2026-10-01 00:00 UTC')).toBeTruthy()
+  })
+
+  it('shows loading, empty, malformed, generic error and database unavailable states with Retry', async () => {
+    const pending = deferred()
+    stubFetch(api({ channels: () => pending.promise }))
+    const first = await mount()
+    expect(screen.getByRole('status').textContent).toBe('Loading channels…')
+    pending.resolve(json(channels()))
+    await settle()
+    expect(screen.getByText('No channels need attention')).toBeTruthy()
+    first.view.unmount()
+
+    const replies = [json({ items: 'bad' }), json({}, 500), json({}, 503), json(channels())]
+    stubFetch(api({ channels: () => replies.shift() as Response }))
+    await mount()
+    expect(screen.getByRole('alert').textContent).toContain('Could not load channels')
+    await click(screen.getByRole('button', { name: 'Retry' }))
+    expect(screen.getByRole('alert').textContent).toContain('Could not load channels')
+    await click(screen.getByRole('button', { name: 'Retry' }))
+    expect(screen.getByRole('alert').textContent).toContain('The database is unavailable. Try again shortly.')
+    await click(screen.getByRole('button', { name: 'Retry' }))
+    expect(screen.getByText('No channels need attention')).toBeTruthy()
+  })
+
+  it('renders hostile channel text as text and coexists with job pagination', async () => {
+    const hostile = '<img src=x onerror=alert(1)>'
+    stubFetch(api({ channels: () => channels([{ channel_id: 'UCx', title: hostile, poll_failing_since: null, poll_failures: 0, last_poll_err: null, feed_gap_detected_at: '2026-10-01T00:00:00Z', feed_gap_reason: 'suspected' }]), jobs: () => list([job(2)], 2) }))
+    await mount()
+    expect(screen.getByText(hostile)).toBeTruthy()
+    expect(document.querySelector('img')).toBeNull()
+    const pagination = screen.getByRole('navigation', { name: 'Pagination' })
+    expect(within(pagination).getByRole('button', { name: 'Older' }).hasAttribute('disabled')).toBe(false)
   })
 
   it.each([
@@ -382,11 +415,12 @@ describe('queue depth', () => {
     expect(healthGets()).toHaveLength(3)
   })
 
-  it('Refresh refetches both the depth and the job list at once', async () => {
+  it('Refresh refetches channels, depth and the job list at once', async () => {
     stubFetch(api())
     await mount()
     await click(screen.getByRole('button', { name: 'Refresh' }))
     expect(healthGets()).toHaveLength(2)
+    expect(channelGets()).toHaveLength(2)
     expect(jobGets()).toHaveLength(2)
   })
 })

@@ -516,6 +516,10 @@ def test_a_request_cancelled_during_the_listing_stays_cancelled(
 ) -> None:
     from services.api.backfill import cancel_backfill
 
+    db.execute(
+        "UPDATE channels SET feed_gap_detected_at = now(), feed_gap_reason = 'suspected' WHERE channel_id = %s",
+        (CHANNEL,),
+    )
     rid = _request(db)
     catalog = FakeCatalog(db, _entries(3))
 
@@ -530,6 +534,9 @@ def test_a_request_cancelled_during_the_listing_stays_cancelled(
     row = _row(db, rid)
     assert (row.state, row.error_class) == ("failed", CANCELLED)
     assert row.enqueued == 0 and row.result is None
+    assert db.execute(
+        "SELECT feed_gap_reason FROM channels WHERE channel_id = %s", (CHANNEL,)
+    ).fetchone() == ("suspected",)
 
 
 def test_one_info_line_per_run_without_titles(
