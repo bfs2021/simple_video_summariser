@@ -12,7 +12,7 @@
 
 # YouTube metadata, subtitles and audio. Pinned exactly; a scheduled update
 # check keeps it fresh (architecture.md 16.11).
-yt-dlp==2026.8.19
+yt-dlp==2026.10.21
 
 # Typed, validated settings from environment variables (architecture.md 10,
 # common/config.py). Pydantic itself comes in transitively.

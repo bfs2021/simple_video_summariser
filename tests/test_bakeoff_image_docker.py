@@ -128,7 +128,7 @@ def test_default_user_is_non_root_app_10001() -> None:
 def test_python_3_14_and_the_pinned_yt_dlp() -> None:
     assert _ok("python --version").startswith("Python 3.14.")
     assert _ok("which python") == "/opt/venv/bin/python"
-    assert _ok("python -m yt_dlp --version") == "2026.08.19"
+    assert _ok("python -m yt_dlp --version") == "2026.10.21"
 
 
 @pytest.mark.parametrize("tool", ["ffmpeg", "ffprobe"])
@@ -138,7 +138,7 @@ def test_ffmpeg_tools_run(tool: str) -> None:
 
 def test_harness_interpreter_has_only_yt_dlp() -> None:
     frozen = _ok("pip freeze").splitlines()
-    assert frozen == ["yt-dlp==2026.8.19"]
+    assert frozen == ["yt-dlp==2026.10.21"]
     result = _sh("/opt/venv/bin/python -c 'import faster_whisper'")
     assert result.returncode != 0
     assert "ModuleNotFoundError" in result.stderr
