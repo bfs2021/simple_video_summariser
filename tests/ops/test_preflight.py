@@ -1,81 +1,90 @@
-"""Tests for ``ops/host/preflight.sh`` (task #78).
-
-The script is run with stubbed ``docker``/``systemctl``/``timedatectl`` on
-``PATH`` so no real server or daemon is needed (the issue requires exactly
-this: "The script is exercised with stubbed commands, not a real server").
-Real coreutils stay on ``PATH``; the checks that read the live host (``disk``,
-``cpu``, ``memory``) are driven to a known PASS/FAIL by their threshold
-variables instead of by faking ``df``/``nproc``/``/proc/meminfo``.
-"""
-
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parents[2] / "ops" / "host" / "preflight.sh"
+ROOT = Path(__file__).resolve().parents[2]
+SCRIPT = ROOT / "ops" / "host" / "preflight.sh"
+DROP_IN = ROOT / "ops" / "host" / "ollama.override.conf"
+ENV_EXAMPLE = ROOT / ".env.example"
 
-# A .env that passes env-file, cpu and ollama cleanly; individual tests edit it.
 GOOD_ENV = (
     "COMPOSE_FILE=compose.yml\n"
     "POSTGRES_PASSWORD=good_pw-123\n"
-    "TRANSCRIBER_CPUS=0.5\n"
+    "TRANSCRIBER_CPUS=3.0\n"
     "OLLAMA_MODEL=qwen3.5:4b\n"
+    "SUMMARIZER=ollama\n"
 )
 
-# Stub command behaviour, all passing by default; a test overrides one field.
 PASS_STUBS = {
     "STUB_DOCKER_SERVER_VERSION": "29.1.2",
     "STUB_COMPOSE_VERSION": "2.40.3",
     "STUB_SYSTEMCTL": "enabled",
-    "STUB_NTP": "yes",
-    "STUB_DOCKER_ROOT": "",  # set per-run to the checkout dir (a real path)
+    "STUB_DOCKER_ROOT": "/var/lib/docker",
     "STUB_COMPOSE_CONFIG": "services:\n  api:\n    image: x\n",
     "STUB_COMPOSE_CONFIG_RC": "0",
-    "STUB_OLLAMA_RUN_OUT": "200\nqwen3.5:4b\n",
+    "STUB_DF_FREE_KB": str(40 * 1024 * 1024),
+    "STUB_NPROC": "3",
+    "STUB_NTP": "yes",
+    "STUB_SS": "LISTEN 0 4096 172.17.0.1:11434 0.0.0.0:*",
+    "STUB_DOCKER_GROUP": "docker:x:999:deploy",
+    "STUB_CONTAINER_OUT": (
+        "OLLAMA\t200\tqwen3.5:4b\n"
+        "EGRESS\twww.youtube.com\tOK\n"
+        "EGRESS\thuggingface.co\tOK\n"
+        "EGRESS\tpypi.org\tOK\n"
+    ),
 }
 
 _DOCKER_STUB = r"""#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$STUB_DOCKER_LOG"
 case "$1 ${2:-}" in
   "version "*)
-    [ -n "${STUB_DOCKER_SERVER_VERSION:-}" ] || { echo "Cannot connect to the Docker daemon" >&2; exit 1; }
-    echo "$STUB_DOCKER_SERVER_VERSION"; exit 0 ;;
+    [ -n "${STUB_DOCKER_SERVER_VERSION:-}" ] || exit 1
+    echo "$STUB_DOCKER_SERVER_VERSION" ;;
   "compose version"*)
-    [ -n "${STUB_COMPOSE_VERSION:-}" ] || { echo "no compose plugin" >&2; exit 1; }
-    echo "$STUB_COMPOSE_VERSION"; exit 0 ;;
+    [ -n "${STUB_COMPOSE_VERSION:-}" ] || exit 1
+    echo "$STUB_COMPOSE_VERSION" ;;
   "compose config"*)
-    printf '%b' "${STUB_COMPOSE_CONFIG:-}"; exit "${STUB_COMPOSE_CONFIG_RC:-0}" ;;
-  "info "*)
-    echo "${STUB_DOCKER_ROOT:-/}"; exit 0 ;;
-  "network create"*) echo "net"; exit 0 ;;
-  "network rm"*)     exit 0 ;;
-  "rm "*)            exit 0 ;;
-  "run "*)           printf '%b' "${STUB_OLLAMA_RUN_OUT:-}"; exit 0 ;;
-  *) echo "stub docker: unhandled: $*" >&2; exit 99 ;;
+    printf '%b' "${STUB_COMPOSE_CONFIG:-}"
+    exit "${STUB_COMPOSE_CONFIG_RC:-0}" ;;
+  "info "*) echo "${STUB_DOCKER_ROOT:-}" ;;
+  "network create"*) [ "${STUB_NETWORK_CREATE_RC:-0}" = 0 ] ;;
+  "network rm"*) exit 0 ;;
+  "rm "*) exit 0 ;;
+  "run "*)
+    if [ -n "${STUB_DOCKER_RUN_SIGNAL:-}" ]; then
+      kill -s "$STUB_DOCKER_RUN_SIGNAL" "$PREFLIGHT_SCRIPT_PID"
+    fi
+    printf '%b' "${STUB_CONTAINER_OUT:-}"
+    exit "${STUB_CONTAINER_RC:-0}" ;;
+  *) exit 99 ;;
 esac
 """
 
-_SYSTEMCTL_STUB = """#!/usr/bin/env bash
-# systemctl is-enabled docker
-echo "${STUB_SYSTEMCTL:-disabled}"
-"""
-
-_TIMEDATECTL_STUB = """#!/usr/bin/env bash
-# timedatectl show -p NTPSynchronized --value
-echo "${STUB_NTP:-no}"
-"""
+_STUBS = {
+    "docker": _DOCKER_STUB,
+    "systemctl": "#!/usr/bin/env bash\necho \"${STUB_SYSTEMCTL:-disabled}\"\n",
+    "timedatectl": "#!/usr/bin/env bash\necho \"${STUB_NTP:-no}\"\n",
+    "df": "#!/usr/bin/env bash\nprintf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n'\nprintf 'stub 1 1 %s 1%% /\\n' \"${STUB_DF_FREE_KB:-0}\"\n",
+    "nproc": "#!/usr/bin/env bash\necho \"${STUB_NPROC:-0}\"\n",
+    "ss": "#!/usr/bin/env bash\nprintf '%s\\n' \"${STUB_SS:-}\"\n",
+    "getent": "#!/usr/bin/env bash\nprintf '%s\\n' \"${STUB_DOCKER_GROUP:-}\"\n",
+}
 
 
 @dataclass
 class Result:
     code: int
-    lines: dict[str, tuple[str, str]] = field(default_factory=dict)  # check -> (status, detail)
+    lines: dict[str, tuple[str, str]] = field(default_factory=dict)
     raw: str = ""
+    docker_calls: list[str] = field(default_factory=list)
 
     def status(self, check: str) -> str:
         return self.lines[check][0]
@@ -96,21 +105,18 @@ class RunFn(Protocol):
 
 @pytest.fixture
 def run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RunFn:
-    """Return a callable: run(env_text=..., stubs=..., thresholds=..., args=...)."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    for name, body in (
-        ("docker", _DOCKER_STUB),
-        ("systemctl", _SYSTEMCTL_STUB),
-        ("timedatectl", _TIMEDATECTL_STUB),
-    ):
-        p = bindir / name
-        p.write_text(body)
-        p.chmod(0o755)
+    for name, body in _STUBS.items():
+        path = bindir / name
+        path.write_text(body)
+        path.chmod(0o755)
     monkeypatch.setenv("PATH", str(bindir), prepend=os.pathsep)
 
     checkout = tmp_path / "checkout"
     checkout.mkdir()
+    meminfo = tmp_path / "meminfo"
+    docker_log = tmp_path / "docker.log"
 
     def _run(
         *,
@@ -121,20 +127,28 @@ def run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RunFn:
         write_env: bool = True,
         args: list[str] | None = None,
     ) -> Result:
-        merged = {**PASS_STUBS, "STUB_DOCKER_ROOT": str(checkout)}
-        merged.update(stubs or {})
-        for k, v in merged.items():
-            monkeypatch.setenv(k, v)
-        # thresholds that make the live-host checks deterministic
-        base_thresholds = {"MIN_FREE_GB": "0", "MIN_MEM_GB": "0"}
-        base_thresholds.update(thresholds or {})
-        for k, v in base_thresholds.items():
-            monkeypatch.setenv(k, v)
-
+        merged = {**PASS_STUBS, **(stubs or {})}
+        for key, value in merged.items():
+            monkeypatch.setenv(key, value)
+        limits = {
+            "MIN_FREE_GB": "40",
+            "MIN_MEM_GB": "12",
+            "MIN_DOCKER_VERSION": "25.0",
+            "MIN_COMPOSE_VERSION": "2.24.0",
+            **(thresholds or {}),
+        }
+        meminfo.write_text("MemTotal:       12582912 kB\n")
+        monkeypatch.setenv("PREFLIGHT_MEMINFO", str(meminfo))
+        for key, value in limits.items():
+            monkeypatch.setenv(key, value)
+        monkeypatch.setenv("STUB_DOCKER_LOG", str(docker_log))
+        docker_log.write_text("")
+        env_file = checkout / ".env"
         if write_env:
-            env_file = checkout / ".env"
             env_file.write_text(env_text)
             env_file.chmod(env_mode)
+        elif env_file.exists():
+            env_file.unlink()
 
         proc = subprocess.run(
             ["bash", str(SCRIPT), *(args or [])],
@@ -144,233 +158,275 @@ def run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RunFn:
             check=False,
         )
         lines: dict[str, tuple[str, str]] = {}
-        for ln in proc.stdout.splitlines():
-            parts = ln.split(None, 1)
+        for line in proc.stdout.splitlines():
+            parts = line.split(None, 1)
             if parts and parts[0] in {"PASS", "WARN", "FAIL"}:
-                status = parts[0]
-                rest = parts[1] if len(parts) > 1 else ""
-                check, _, detail = rest.partition(":")
-                lines[check.strip()] = (status, detail.strip())
-        return Result(code=proc.returncode, lines=lines, raw=proc.stdout + proc.stderr)
+                check, _, detail = (parts[1] if len(parts) > 1 else "").partition(":")
+                lines[check.strip()] = (parts[0], detail.strip())
+        return Result(
+            code=proc.returncode,
+            lines=lines,
+            raw=proc.stdout + proc.stderr,
+            docker_calls=docker_log.read_text().splitlines(),
+        )
 
     return _run
 
 
-# --- usage / exit codes ------------------------------------------------------
-
-
-def test_help_lists_checks_and_thresholds(run: RunFn) -> None:
-    r = run(args=["--help"])
-    assert r.code == 0
-    assert "docker-engine" in r.raw and "ollama-from-container" in r.raw
-    assert "MIN_FREE_GB" in r.raw and "DOCKER_COMPOSE_MIN" in r.raw
+def test_help_lists_all_checks_and_external_inputs(run: RunFn) -> None:
+    result = run(args=["--help"])
+    assert result.code == 0
+    for check in (
+        "docker-engine",
+        "docker-compose",
+        "docker-boot",
+        "disk",
+        "cpu",
+        "memory",
+        "time-sync",
+        "env-file",
+        "compose-config",
+        "ollama-from-container",
+        "ollama-bind",
+        "egress",
+        "docker-group",
+    ):
+        assert check in result.raw
+    for variable in (
+        "MIN_FREE_GB",
+        "MIN_MEM_GB",
+        "MIN_DOCKER_VERSION",
+        "MIN_COMPOSE_VERSION",
+        "PREFLIGHT_MEMINFO",
+    ):
+        assert variable in result.raw
 
 
 def test_unknown_flag_is_usage_error(run: RunFn) -> None:
-    r = run(args=["--nope"])
-    assert r.code == 2
+    assert run(args=["--nope"]).code == 2
 
 
-def test_all_pass_exits_zero(run: RunFn) -> None:
-    r = run()
-    assert r.code == 0
-    assert all(s[0] != "FAIL" for s in r.lines.values()), r.raw
+def test_all_pass_exits_zero_and_reports_thirteen_checks(run: RunFn) -> None:
+    result = run()
+    assert result.code == 0
+    assert len(result.lines) == 13
+    assert all(status != "FAIL" for status, _ in result.lines.values())
 
 
 def test_any_fail_exits_one(run: RunFn) -> None:
-    r = run(stubs={"STUB_SYSTEMCTL": "disabled"})
-    assert r.code == 1
-    assert r.status("docker-boot") == "FAIL"
+    result = run(stubs={"STUB_SYSTEMCTL": "disabled"})
+    assert result.code == 1
+    assert result.status("docker-boot") == "FAIL"
 
 
-def test_all_checks_run_even_after_a_fail(run: RunFn) -> None:
-    r = run(stubs={"STUB_DOCKER_SERVER_VERSION": ""})  # first check FAILs
-    # the last check still ran
-    assert "ollama-from-container" in r.lines
-    assert len(r.lines) == 10
+def test_all_checks_run_after_first_failure(run: RunFn) -> None:
+    result = run(stubs={"STUB_DOCKER_SERVER_VERSION": ""})
+    assert result.code == 1
+    assert len(result.lines) == 13
+    assert result.status("docker-group") == "PASS"
 
 
-# --- docker-engine -----------------------------------------------------------
+@pytest.mark.parametrize(
+    ("stubs", "expected"),
+    [({}, "PASS"), ({"STUB_DOCKER_SERVER_VERSION": "24.0.9"}, "FAIL"), ({"STUB_DOCKER_SERVER_VERSION": ""}, "FAIL")],
+)
+def test_docker_engine(run: RunFn, stubs: dict[str, str], expected: str) -> None:
+    assert run(stubs=stubs).status("docker-engine") == expected
 
 
-def test_docker_engine_pass(run: RunFn) -> None:
-    assert run().status("docker-engine") == "PASS"
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    [("2.24.0", "PASS"), ("2.100.1", "PASS"), ("2.23.9", "FAIL"), ("v2.24.0", "PASS")],
+)
+def test_docker_compose_versions(run: RunFn, version: str, expected: str) -> None:
+    assert run(stubs={"STUB_COMPOSE_VERSION": version}).status("docker-compose") == expected
 
 
-def test_docker_engine_below_floor_fails(run: RunFn) -> None:
-    assert run(stubs={"STUB_DOCKER_SERVER_VERSION": "24.0.9"}).status("docker-engine") == "FAIL"
-
-
-def test_docker_engine_daemon_unreachable_fails(run: RunFn) -> None:
-    assert run(stubs={"STUB_DOCKER_SERVER_VERSION": ""}).status("docker-engine") == "FAIL"
-
-
-# --- docker-compose (numeric, not string, comparison) ------------------------
-
-
-def test_docker_compose_pass(run: RunFn) -> None:
-    assert run().status("docker-compose") == "PASS"
-
-
-def test_docker_compose_high_minor_passes_numerically(run: RunFn) -> None:
-    # 2.100.1 must beat 2.24.0 even though it sorts lower as a string
-    assert run(stubs={"STUB_COMPOSE_VERSION": "2.100.1"}).status("docker-compose") == "PASS"
-
-
-def test_docker_compose_just_below_floor_fails(run: RunFn) -> None:
-    assert run(stubs={"STUB_COMPOSE_VERSION": "2.23.9"}).status("docker-compose") == "FAIL"
-
-
-def test_docker_compose_accepts_v_prefix(run: RunFn) -> None:
-    assert run(stubs={"STUB_COMPOSE_VERSION": "v2.24.0"}).status("docker-compose") == "PASS"
-
-
-# --- docker-boot -------------------------------------------------------------
-
-
-def test_docker_boot_enabled_passes(run: RunFn) -> None:
-    assert run().status("docker-boot") == "PASS"
-
-
-def test_docker_boot_disabled_fails(run: RunFn) -> None:
-    assert run(stubs={"STUB_SYSTEMCTL": "disabled"}).status("docker-boot") == "FAIL"
-
-
-# --- disk (exactly-at-limit vs one past) -------------------------------------
-
-
-def test_disk_pass_when_floor_is_zero(run: RunFn) -> None:
-    assert run(thresholds={"MIN_FREE_GB": "0"}).status("disk") == "PASS"
-
-
-def test_disk_fails_when_floor_exceeds_free(run: RunFn) -> None:
-    assert run(thresholds={"MIN_FREE_GB": "99999999"}).status("disk") == "FAIL"
-
-
-# --- cpu (equal passes; fractional handled) ----------------------------------
-
-
-def test_cpu_pass_when_quota_below_cores(run: RunFn) -> None:
-    assert run(env_text=GOOD_ENV).status("cpu") == "PASS"
-
-
-def test_cpu_fractional_quota_handled(run: RunFn) -> None:
-    env = GOOD_ENV.replace("TRANSCRIBER_CPUS=0.5", "TRANSCRIBER_CPUS=2.5")
-    # on any CI/dev host with >=3 cores this passes; the point is no crash on 2.5
-    assert run(env_text=env).status("cpu") in {"PASS", "FAIL"}
-
-
-def test_cpu_fails_when_quota_exceeds_cores(run: RunFn) -> None:
-    env = GOOD_ENV.replace("TRANSCRIBER_CPUS=0.5", "TRANSCRIBER_CPUS=99999")
-    assert run(env_text=env).status("cpu") == "FAIL"
-
-
-# --- memory (WARN, never FAIL) -----------------------------------------------
-
-
-def test_memory_pass_when_floor_is_zero(run: RunFn) -> None:
-    assert run(thresholds={"MIN_MEM_GB": "0"}).status("memory") == "PASS"
-
-
-def test_memory_below_floor_warns_not_fails(run: RunFn) -> None:
-    r = run(thresholds={"MIN_MEM_GB": "99999999"})
-    assert r.status("memory") == "WARN"
-    assert r.code == 0  # a WARN alone must not fail the run
-
-
-# --- time-sync (WARN) --------------------------------------------------------
-
-
-def test_time_sync_pass(run: RunFn) -> None:
-    assert run().status("time-sync") == "PASS"
-
-
-def test_time_sync_warns_when_not_synced(run: RunFn) -> None:
-    r = run(stubs={"STUB_NTP": "no"})
-    assert r.status("time-sync") == "WARN"
-    assert r.code == 0
-
-
-# --- env-file ----------------------------------------------------------------
-
-
-def test_env_file_pass(run: RunFn) -> None:
-    assert run().status("env-file") == "PASS"
-
-
-def test_env_file_missing_fails(run: RunFn) -> None:
-    assert run(write_env=False).status("env-file") == "FAIL"
-
-
-def test_env_file_group_readable_fails(run: RunFn) -> None:
-    assert run(env_mode=0o640).status("env-file") == "FAIL"
-
-
-def test_env_file_wrong_compose_file_fails(run: RunFn) -> None:
-    env = GOOD_ENV.replace("COMPOSE_FILE=compose.yml\n", "")
-    assert run(env_text=env).status("env-file") == "FAIL"
-
-
-def test_env_file_bad_password_fails(run: RunFn) -> None:
-    env = GOOD_ENV.replace("POSTGRES_PASSWORD=good_pw-123", "POSTGRES_PASSWORD=has space!")
-    assert run(env_text=env).status("env-file") == "FAIL"
-
-
-# --- compose-config ----------------------------------------------------------
-
-
-def test_compose_config_pass(run: RunFn) -> None:
-    assert run().status("compose-config") == "PASS"
-
-
-def test_compose_config_fails_on_bind_mount(run: RunFn) -> None:
-    cfg = "services:\n  api:\n    volumes:\n      - type: bind\n        source: ./common\n"
-    assert run(stubs={"STUB_COMPOSE_CONFIG": cfg}).status("compose-config") == "FAIL"
-
-
-def test_compose_config_fails_on_tiny_whisper_model(run: RunFn) -> None:
-    cfg = "services:\n  transcriber:\n    environment:\n      WHISPER_MODEL: tiny\n"
-    assert run(stubs={"STUB_COMPOSE_CONFIG": cfg}).status("compose-config") == "FAIL"
-
-
-def test_compose_config_fails_when_command_errors(run: RunFn) -> None:
-    assert run(stubs={"STUB_COMPOSE_CONFIG_RC": "1"}).status("compose-config") == "FAIL"
-
-
-# --- ollama-from-container ---------------------------------------------------
-
-
-def test_ollama_pass_when_reachable_with_model(run: RunFn) -> None:
-    assert run().status("ollama-from-container") == "PASS"
-
-
-def test_ollama_warn_when_model_missing(run: RunFn) -> None:
-    r = run(stubs={"STUB_OLLAMA_RUN_OUT": "200\nllama3:8b\n"})
-    assert r.status("ollama-from-container") == "WARN"
-    assert r.code == 0
-
-
-def test_ollama_fails_when_unreachable(run: RunFn) -> None:
-    r = run(stubs={"STUB_OLLAMA_RUN_OUT": "ERR\nconnection refused\n"})
-    assert r.status("ollama-from-container") == "FAIL"
-
-
-# --- secret redaction (an explicit #78 criterion) ----------------------------
-
-
-def test_never_prints_a_secret_value(run: RunFn) -> None:
-    env = (
-        "COMPOSE_FILE=compose.yml\n"
-        "POSTGRES_PASSWORD=pw-SECRET\n"  # valid charset, so env-file passes
-        "ANTHROPIC_API_KEY=sk-test-SECRET\n"
-        "TRANSCRIBER_CPUS=0.5\n"
-        "OLLAMA_MODEL=qwen3.5:4b\n"
+def test_version_floor_override_names(run: RunFn) -> None:
+    result = run(
+        stubs={"STUB_DOCKER_SERVER_VERSION": "25.0", "STUB_COMPOSE_VERSION": "2.24.0"},
+        thresholds={"MIN_DOCKER_VERSION": "26.0", "MIN_COMPOSE_VERSION": "2.25.0"},
     )
-    assert "SECRET" not in run(env_text=env).raw
+    assert result.status("docker-engine") == "FAIL"
+    assert result.status("docker-compose") == "FAIL"
 
 
-def test_invalid_password_fail_does_not_echo_the_value(run: RunFn) -> None:
-    env = GOOD_ENV.replace("POSTGRES_PASSWORD=good_pw-123", "POSTGRES_PASSWORD=bad!VALUE")
-    r = run(env_text=env)
-    assert r.status("env-file") == "FAIL"
-    assert "bad!VALUE" not in r.raw and "VALUE" not in r.raw
+@pytest.mark.parametrize(("enabled", "expected"), [("enabled", "PASS"), ("disabled", "FAIL")])
+def test_docker_boot(run: RunFn, enabled: str, expected: str) -> None:
+    assert run(stubs={"STUB_SYSTEMCTL": enabled}).status("docker-boot") == expected
+
+
+@pytest.mark.parametrize(("free_gb", "expected"), [(40, "PASS"), (39, "FAIL")])
+def test_disk_exact_boundary(run: RunFn, free_gb: int, expected: str) -> None:
+    free_kb = free_gb * 1024 * 1024
+    assert run(stubs={"STUB_DF_FREE_KB": str(free_kb)}).status("disk") == expected
+
+
+@pytest.mark.parametrize(
+    ("cores", "cpus", "expected"),
+    [("3", "3.0", "PASS"), ("2", "2.5", "FAIL"), ("3", "2.5", "PASS")],
+)
+def test_cpu_boundaries(run: RunFn, cores: str, cpus: str, expected: str) -> None:
+    env_text = GOOD_ENV.replace("TRANSCRIBER_CPUS=3.0", f"TRANSCRIBER_CPUS={cpus}")
+    assert run(env_text=env_text, stubs={"STUB_NPROC": cores}).status("cpu") == expected
+
+
+def test_memory_passes_at_exact_boundary(run: RunFn) -> None:
+    assert run().status("memory") == "PASS"
+
+
+def test_memory_below_floor_warns(run: RunFn, tmp_path: Path) -> None:
+    meminfo = tmp_path / "low-meminfo"
+    meminfo.write_text("MemTotal:       11534336 kB\n")
+    result = run(thresholds={"PREFLIGHT_MEMINFO": str(meminfo)})
+    assert result.status("memory") == "WARN"
+    assert result.code == 0
+
+
+@pytest.mark.parametrize(("synced", "expected"), [("yes", "PASS"), ("no", "WARN")])
+def test_time_sync(run: RunFn, synced: str, expected: str) -> None:
+    assert run(stubs={"STUB_NTP": synced}).status("time-sync") == expected
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    [({}, "PASS"), ({"write_env": False}, "FAIL"), ({"env_mode": 0o640}, "FAIL")],
+)
+def test_env_file_presence_and_mode(run: RunFn, kwargs: dict[str, Any], expected: str) -> None:
+    assert run(**kwargs).status("env-file") == expected
+
+
+@pytest.mark.parametrize(
+    "env_text",
+    [
+        GOOD_ENV.replace("COMPOSE_FILE=compose.yml\n", ""),
+        GOOD_ENV.replace("POSTGRES_PASSWORD=good_pw-123", "POSTGRES_PASSWORD="),
+        GOOD_ENV.replace("POSTGRES_PASSWORD=good_pw-123", "POSTGRES_PASSWORD=has space!"),
+    ],
+)
+def test_env_file_rejects_invalid_settings(run: RunFn, env_text: str) -> None:
+    assert run(env_text=env_text).status("env-file") == "FAIL"
+
+
+@pytest.mark.parametrize(
+    ("config", "return_code", "expected"),
+    [
+        ("services:\n  api:\n    image: x\n", "0", "PASS"),
+        ("services:\n  api:\n    volumes:\n      - type: bind\n", "0", "FAIL"),
+        ("services:\n  transcriber:\n    environment:\n      WHISPER_MODEL: tiny\n", "0", "FAIL"),
+        ("", "1", "FAIL"),
+    ],
+)
+def test_compose_config(run: RunFn, config: str, return_code: str, expected: str) -> None:
+    result = run(stubs={"STUB_COMPOSE_CONFIG": config, "STUB_COMPOSE_CONFIG_RC": return_code})
+    assert result.status("compose-config") == expected
+
+
+@pytest.mark.parametrize(
+    ("container_output", "expected"),
+    [
+        (PASS_STUBS["STUB_CONTAINER_OUT"], "PASS"),
+        (PASS_STUBS["STUB_CONTAINER_OUT"].replace("qwen3.5:4b", "llama3:8b"), "WARN"),
+        (PASS_STUBS["STUB_CONTAINER_OUT"].replace("OLLAMA\t200", "OLLAMA\tERR"), "FAIL"),
+    ],
+)
+def test_ollama_from_container(run: RunFn, container_output: str, expected: str) -> None:
+    assert run(stubs={"STUB_CONTAINER_OUT": container_output}).status("ollama-from-container") == expected
+
+
+@pytest.mark.parametrize(
+    ("listening", "expected"),
+    [
+        ("LISTEN 0 4096 172.17.0.1:11434 0.0.0.0:*", "PASS"),
+        ("LISTEN 0 4096 0.0.0.0:11434 0.0.0.0:*", "WARN"),
+        ("LISTEN 0 4096 [::]:11434 [::]:*", "WARN"),
+        ("", "FAIL"),
+    ],
+)
+def test_ollama_bind(run: RunFn, listening: str, expected: str) -> None:
+    assert run(stubs={"STUB_SS": listening}).status("ollama-bind") == expected
+
+
+def test_egress_passes_for_required_hosts(run: RunFn) -> None:
+    result = run()
+    assert result.status("egress") == "PASS"
+    assert "www.youtube.com" in result.lines["egress"][1]
+    assert "huggingface.co" in result.lines["egress"][1]
+    assert "pypi.org" in result.lines["egress"][1]
+
+
+@pytest.mark.parametrize("host", ["www.youtube.com", "huggingface.co", "pypi.org"])
+def test_egress_failure_names_host(run: RunFn, host: str) -> None:
+    output = PASS_STUBS["STUB_CONTAINER_OUT"].replace(f"EGRESS\t{host}\tOK", f"EGRESS\t{host}\tFAIL")
+    result = run(stubs={"STUB_CONTAINER_OUT": output})
+    assert result.status("egress") == "FAIL"
+    assert host in result.lines["egress"][1]
+
+
+def test_anthropic_egress_is_conditional(run: RunFn) -> None:
+    anthropic_env = GOOD_ENV.replace("SUMMARIZER=ollama", "SUMMARIZER=anthropic")
+    missing = run(env_text=anthropic_env)
+    assert missing.status("egress") == "FAIL"
+    assert "api.anthropic.com" in missing.lines["egress"][1]
+
+    output = PASS_STUBS["STUB_CONTAINER_OUT"] + "EGRESS\tapi.anthropic.com\tOK\n"
+    present = run(env_text=anthropic_env, stubs={"STUB_CONTAINER_OUT": output})
+    assert present.status("egress") == "PASS"
+
+
+def test_container_checks_use_one_network_and_one_container(run: RunFn) -> None:
+    result = run()
+    assert sum(call.startswith("network create ") for call in result.docker_calls) == 1
+    assert sum(call.startswith("run ") for call in result.docker_calls) == 1
+
+
+def test_docker_group_always_passes_and_lists_members(run: RunFn) -> None:
+    result = run(stubs={"STUB_DOCKER_GROUP": "docker:x:999:alice,bob"})
+    assert result.status("docker-group") == "PASS"
+    assert "alice,bob" in result.lines["docker-group"][1]
+
+
+def test_docker_group_missing_still_passes(run: RunFn) -> None:
+    assert run(stubs={"STUB_DOCKER_GROUP": ""}).status("docker-group") == "PASS"
+
+
+@pytest.mark.parametrize(
+    "stubs",
+    [{}, {"STUB_CONTAINER_OUT": "OLLAMA\tERR\t\n"}, {"STUB_NETWORK_CREATE_RC": "1"}],
+)
+def test_cleanup_records_container_and_network_removal(run: RunFn, stubs: dict[str, str]) -> None:
+    calls = run(stubs=stubs).docker_calls
+    assert any(call.startswith("rm -f ytdigest-preflight-") for call in calls)
+    assert any(call.startswith("network rm ytdigest-preflight-net-") for call in calls)
+
+
+@pytest.mark.parametrize(("name", "number"), [("INT", signal.SIGINT), ("TERM", signal.SIGTERM)])
+def test_cleanup_runs_when_interrupted(run: RunFn, name: str, number: signal.Signals) -> None:
+    result = run(stubs={"STUB_DOCKER_RUN_SIGNAL": name})
+    assert result.code == 128 + number
+    assert any(call.startswith("rm -f ytdigest-preflight-") for call in result.docker_calls)
+    assert any(call.startswith("network rm ytdigest-preflight-net-") for call in result.docker_calls)
+
+
+def test_never_prints_secret_values(run: RunFn) -> None:
+    env_text = GOOD_ENV.replace("good_pw-123", "pw-SECRET") + "ANTHROPIC_API_KEY=sk-test-SECRET\n"
+    assert "SECRET" not in run(env_text=env_text).raw
+
+
+def test_script_static_contract() -> None:
+    text = SCRIPT.read_text()
+    assert os.access(SCRIPT, os.X_OK)
+    assert text.startswith("#!/usr/bin/env bash\n")
+    assert "set -u" in text
+
+
+def test_ollama_drop_in_static_contract() -> None:
+    text = DROP_IN.read_text()
+    assert "[Service]" in text
+    assert 'Environment="OLLAMA_HOST=' in text
+    assert ":11434\"" in text
+
+
+def test_env_example_does_not_set_compose_file() -> None:
+    assignments = [line for line in ENV_EXAMPLE.read_text().splitlines() if not line.lstrip().startswith("#")]
+    assert not any(line.startswith("COMPOSE_FILE=") for line in assignments)

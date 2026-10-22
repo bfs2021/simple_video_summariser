@@ -113,13 +113,14 @@ docker info --format '{{.DockerRootDir}}'       # confirm the new path
 
 **Sizing** (adds up to the preflight's 40 GB default):
 
-| Item | Approx size |
-|---|---|
-| Images: backend, whisper (+~2 GB over backend), web, bake-off (#76) | ~6–8 GB |
-| `whisper-models` volume (~3 GB per large model; ~3 GB for the #3 bake-off set) | ~3–6 GB |
-| `audio` volume (`AUDIO_MAX_GB`, default 20) | ≤ 20 GB |
-| `pgdata` volume | grows with history |
-| build cache | a few GB |
+| Item | Reserved size |
+|---|---:|
+| Images: backend, whisper (+~2 GB over backend), web, bake-off (#76) | 8 GB |
+| `whisper-models` volume (~3 GB per large model; ~3 GB for the #3 bake-off set) | 3 GB |
+| `audio` volume (`AUDIO_MAX_GB`, default 20) | 20 GB |
+| `pgdata` volume | 4 GB |
+| build cache | 5 GB |
+| **Total** | **40 GB** |
 
 Reclaim space with `docker builder prune` and `docker image prune`.
 **`docker compose down -v` deletes `pgdata`** — never run it on the server.
@@ -231,13 +232,23 @@ drop-in sets `After=docker.service`). Pull the model:
 OLLAMA_HOST=172.17.0.1:11434 ollama pull "${OLLAMA_MODEL:-qwen3.5:4b}"
 ```
 
-**Alternative: bind to `0.0.0.0` with a firewall rule** that allows 11434 only
-from Docker's bridge address pools and denies it everywhere else. This keeps
-Ollama on `127.0.0.1` for host clients but needs the firewall rule to be
-correct and maintained. If you use it, set `OLLAMA_HOST=0.0.0.0:11434` and add
-the rule; note that an active `ufw` default-deny also blocks
-container-to-host traffic unless the Docker bridge ranges are allowed. The
-bridge-gateway default above avoids both.
+**Alternative: bind to `0.0.0.0` with firewall rules** that allow 11434 only
+from Docker's default bridge address pool and deny it everywhere else. This
+also keeps Ollama available to host-local clients but requires maintained
+firewall policy. Set `OLLAMA_HOST=0.0.0.0:11434`, then apply these rules.
+**(sudo)**
+
+```bash
+sudo ufw allow in on docker0 from 172.17.0.0/16 to any port 11434 proto tcp
+sudo ufw deny in to any port 11434 proto tcp
+sudo ufw status numbered
+```
+
+If Docker uses additional bridge pools, add one equally scoped allow rule per
+pool before the deny rule. An active `ufw` default-deny also blocks
+container-to-host traffic unless those Docker bridge ranges are allowed. Never
+use a broad `ufw allow 11434/tcp`; the bridge-gateway default above avoids this
+firewall maintenance.
 
 ---
 
