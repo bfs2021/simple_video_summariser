@@ -42,6 +42,7 @@ from common.repo.analyses import (
 )
 from common.repo.jobs import UNSET, duration_histograms, get_job, list_jobs, queue_depth
 from common.repo.media import total_bytes
+from common.repo.planner_runs import list_task_runs
 from common.repo.transcripts import latest_whisper_rtf
 from services.api import schemas
 from services.api.deps import UNAVAILABLE_BODY, get_conn, rate_limit
@@ -106,6 +107,7 @@ def _read_snapshot(conn: psycopg.Connection[Any]) -> metrics.MetricsSnapshot:
             speaker_coercions=total_speaker_coercions(conn),
             audio_bytes=total_bytes(conn),
             reanalysis_backlog=reanalysis_backlog_count(conn, get_settings().PROMPT_VERSION),
+            planner_task_runs=list_task_runs(conn),
         )
     finally:
         conn.rollback()

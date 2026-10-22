@@ -20,7 +20,7 @@ import psycopg
 
 _COLUMNS = (
     "task_name, interval_sec, last_started_at, last_finished_at, last_outcome, "
-    "last_error, last_count, last_ok_at, last_skipped_locked_at"
+    "last_error, last_count, last_ok_at, last_skipped_locked_at, cumulative_count"
 )
 
 
@@ -37,6 +37,7 @@ class PlannerTaskRun:
     last_count: int | None
     last_ok_at: datetime | None
     last_skipped_locked_at: datetime | None
+    cumulative_count: int = 0
 
 
 def list_task_runs(conn: psycopg.Connection[Any]) -> list[PlannerTaskRun]:
@@ -72,13 +73,17 @@ def record_finished(
     count: int | None,
 ) -> None:
     """Set the finish columns. ``last_ok_at`` moves only on ``ok``."""
+    if count is not None and count < 0:
+        raise ValueError("planner task count must be non-negative")
     conn.execute(
         """
         INSERT INTO planner_task_runs
             (task_name, interval_sec, last_finished_at, last_outcome,
-             last_error, last_count, last_ok_at)
+             last_error, last_count, last_ok_at, cumulative_count)
         VALUES (%(name)s, %(interval)s, %(at)s, %(outcome)s, %(error)s, %(count)s,
-                CASE WHEN %(outcome)s = 'ok' THEN %(at)s END)
+                CASE WHEN %(outcome)s = 'ok' THEN %(at)s END,
+                CASE WHEN %(outcome)s = 'ok' AND %(count)s::integer IS NOT NULL
+                     THEN %(count)s::integer ELSE 0 END)
         ON CONFLICT (task_name) DO UPDATE
            SET interval_sec = EXCLUDED.interval_sec,
                last_finished_at = EXCLUDED.last_finished_at,
@@ -86,8 +91,11 @@ def record_finished(
                last_error = EXCLUDED.last_error,
                last_count = EXCLUDED.last_count,
                last_ok_at = CASE WHEN EXCLUDED.last_outcome = 'ok'
-                                 THEN EXCLUDED.last_finished_at
-                                 ELSE planner_task_runs.last_ok_at END
+                                  THEN EXCLUDED.last_finished_at
+                                  ELSE planner_task_runs.last_ok_at END,
+               cumulative_count = planner_task_runs.cumulative_count
+                    + CASE WHEN EXCLUDED.last_outcome = 'ok' AND EXCLUDED.last_count IS NOT NULL
+                           THEN EXCLUDED.last_count ELSE 0 END
         """,
         {
             "name": name,

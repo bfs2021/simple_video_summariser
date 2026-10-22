@@ -633,7 +633,8 @@ CREATE TABLE planner_task_runs (
     last_error             TEXT,                       -- "<Class>: <message>", <= 500 chars, no traceback
     last_count             INTEGER,                    -- value fn() returned; NULL on failure or None
     last_ok_at             TIMESTAMPTZ,                -- finish time of the last ok run
-    last_skipped_locked_at TIMESTAMPTZ                 -- another planner held the lock; touches no other column
+    last_skipped_locked_at TIMESTAMPTZ,                -- another planner held the lock; touches no other column
+    cumulative_count       BIGINT NOT NULL DEFAULT 0   -- sum of non-NULL counts from ok runs (#138)
 );
 
 -- ============ analyze batches (#89) ============

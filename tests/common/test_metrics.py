@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import replace
+from datetime import UTC, datetime
+from typing import Literal
 
 import pytest
 from hypothesis import given
@@ -21,6 +23,7 @@ from common.metrics import (
     render,
     sanitize_label_value,
 )
+from common.repo.planner_runs import PlannerTaskRun
 
 N = len(DURATION_BUCKETS)
 ZERO_HIST = DurationHistogram((0,) * N, 0, 0.0)
@@ -34,6 +37,7 @@ EMPTY = MetricsSnapshot(
     speaker_coercions=0,
     audio_bytes=0,
     reanalysis_backlog=0,
+    planner_task_runs=[],
 )
 
 FAMILIES = [
@@ -45,6 +49,9 @@ FAMILIES = [
     "speaker_coercions_total",
     "audio_bytes_used",
     "reanalysis_backlog_videos",
+    "reaped_jobs_total",
+    "planner_task_last_run_timestamp_seconds",
+    "planner_task_last_success",
 ]
 
 _LABEL = r'[a-z]+="(?:[^"\\\n]|\\["\\n])*"'
@@ -100,6 +107,9 @@ def test_metric_types_follow_the_spec() -> None:
         "speaker_coercions_total": "counter",
         "audio_bytes_used": "gauge",
         "reanalysis_backlog_videos": "gauge",
+        "reaped_jobs_total": "counter",
+        "planner_task_last_run_timestamp_seconds": "gauge",
+        "planner_task_last_success": "gauge",
     }
 
 
@@ -146,6 +156,96 @@ def test_no_analyses_means_no_token_samples_and_zero_cost_and_coercions() -> Non
     assert samples(EMPTY, "speaker_coercions_total") == ["speaker_coercions_total 0"]
     assert samples(EMPTY, "audio_bytes_used") == ["audio_bytes_used 0"]
     assert samples(EMPTY, "reanalysis_backlog_videos") == ["reanalysis_backlog_videos 0"]
+
+
+def _planner_run(
+    task: str,
+    *,
+    finished: datetime | None,
+    outcome: Literal["ok", "failed"] | None,
+    cumulative: int = 0,
+    error: str | None = None,
+    last_ok_at: datetime | None = None,
+) -> PlannerTaskRun:
+    return PlannerTaskRun(
+        task, 60.0, None, finished, outcome, error, None, last_ok_at, None, cumulative
+    )
+
+
+def test_empty_or_incomplete_planner_rows_emit_families_without_samples() -> None:
+    snapshot = replace(
+        EMPTY,
+        planner_task_runs=[_planner_run("reap", finished=None, outcome=None)],
+    )
+
+    assert samples(snapshot, "reaped_jobs_total") == []
+    assert samples(snapshot, "planner_task_last_run_timestamp_seconds") == []
+    assert samples(snapshot, "planner_task_last_success") == []
+
+
+def test_current_planner_task_labels_are_the_exact_fixed_registry_names() -> None:
+    assert metrics.PLANNER_TASKS == (
+        "reap",
+        "auto_caption_fallback",
+        "audio_retention",
+        "stale_analyze",
+        "reanalysis_sweep",
+        "poll_channels",
+        "reconcile_channels",
+        "channel_backfill",
+        "dead_letter_alerts",
+    )
+
+
+def test_completed_known_tasks_emit_fixed_labels_in_lexical_order() -> None:
+    finished = datetime(2026, 10, 22, 12, 30, tzinfo=UTC)
+    snapshot = replace(
+        EMPTY,
+        planner_task_runs=[
+            _planner_run("retired_secret", finished=finished, outcome="ok", error="password"),
+            _planner_run(
+                "reap",
+                finished=finished,
+                outcome="failed",
+                cumulative=7,
+                last_ok_at=finished,
+            ),
+            _planner_run("audio_retention", finished=finished, outcome="ok", cumulative=99),
+        ],
+    )
+
+    assert samples(snapshot, "reaped_jobs_total") == ["reaped_jobs_total 7"]
+    assert samples(snapshot, "planner_task_last_run_timestamp_seconds") == [
+        'planner_task_last_run_timestamp_seconds{task="audio_retention"} 1792672200.0',
+        'planner_task_last_run_timestamp_seconds{task="reap"} 1792672200.0',
+    ]
+    assert samples(snapshot, "planner_task_last_success") == [
+        'planner_task_last_success{task="audio_retention"} 1',
+        'planner_task_last_success{task="reap"} 0',
+    ]
+    body = render(snapshot)
+    assert "retired_secret" not in body
+    assert "password" not in body
+    assert render(snapshot) == body
+
+
+def test_successful_zero_reaper_run_emits_zero_counter() -> None:
+    finished = datetime(2026, 10, 22, 12, 30, tzinfo=UTC)
+    snapshot = replace(
+        EMPTY,
+        planner_task_runs=[
+            _planner_run("reap", finished=finished, outcome="ok", last_ok_at=finished)
+        ],
+    )
+
+    assert samples(snapshot, "reaped_jobs_total") == ["reaped_jobs_total 0"]
+
+
+def test_planner_metric_help_text_is_exact() -> None:
+    out = lines(EMPTY)
+    assert "# HELP reaped_jobs_total Stale running jobs returned to pending or moved to dead by completed reaper runs." in out
+    assert "# HELP planner_task_last_run_timestamp_seconds Unix timestamp when the planner task most recently completed, by task." in out
+    assert "# HELP planner_task_last_success Whether the planner task's most recently completed run succeeded (1) or failed (0)." in out
 
 
 # -- number formatting -----------------------------------------------------------------
