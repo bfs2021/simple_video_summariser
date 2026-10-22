@@ -50,7 +50,11 @@ def _ids(*numbers: int) -> list[str]:
     return [_e(n).video_id for n in numbers]
 
 
-def _channel(channel_id: str = "UCa", monitor_from: datetime = CUTOFF) -> Channel:
+def _channel(
+    channel_id: str = "UCa",
+    monitor_from: datetime = CUTOFF,
+    gap_reason: str | None = None,
+) -> Channel:
     return Channel(
         channel_id=channel_id,
         title=None,
@@ -61,6 +65,8 @@ def _channel(channel_id: str = "UCa", monitor_from: datetime = CUTOFF) -> Channe
         added_at=CUTOFF,
         poll_failing_since=None,
         poll_failures=0,
+        feed_gap_detected_at=CUTOFF if gap_reason is not None else None,
+        feed_gap_reason=gap_reason,
     )
 
 
@@ -129,6 +135,7 @@ class FakeRepo:
         self.inserted: list[tuple[CatalogEntry, str, str]] = []
         self.fail_insert: set[str] = set()
         self.insert_losing_race: set[str] = set()
+        self.gap_changes: list[tuple[str, str | None, str]] = []
 
     def list_active_channels(self, conn: Any) -> list[Channel]:
         return list(self.channels)
@@ -136,6 +143,20 @@ class FakeRepo:
     def known_videos(self, conn: Any, video_ids: list[str]) -> dict[str, KnownVideo]:
         self.lookups.append(list(video_ids))
         return {v: self.known[v] for v in video_ids if v in self.known}
+
+    def set_feed_gap_reason(self, conn: Any, channel_id: str, reason: str, *, source: str) -> object | None:
+        channel = next(c for c in self.channels if c.channel_id == channel_id)
+        if channel.feed_gap_reason is None:
+            return None
+        self.gap_changes.append((channel_id, reason, source))
+        return object()
+
+    def clear_feed_gap(self, conn: Any, channel_id: str, *, source: str) -> object | None:
+        channel = next(c for c in self.channels if c.channel_id == channel_id)
+        if channel.feed_gap_reason is None:
+            return None
+        self.gap_changes.append((channel_id, None, source))
+        return object()
 
     def insert_catalog_video(
         self, conn: Any, entry: CatalogEntry, *, channel_id: str, origin: str
@@ -166,6 +187,8 @@ def make_repo(monkeypatch: pytest.MonkeyPatch) -> Callable[..., FakeRepo]:
         monkeypatch.setattr(reconcile, "list_active_channels", repo.list_active_channels)
         monkeypatch.setattr(reconcile, "known_videos", repo.known_videos)
         monkeypatch.setattr(reconcile, "insert_catalog_video", repo.insert_catalog_video)
+        monkeypatch.setattr(reconcile, "set_feed_gap_reason", repo.set_feed_gap_reason, raising=False)
+        monkeypatch.setattr(reconcile, "clear_feed_gap", repo.clear_feed_gap, raising=False)
         return repo
 
     return install
@@ -182,6 +205,7 @@ def _run(
     conn: FakeConn | None = None,
     clock: Clock | None = None,
     start_after: str | None = None,
+    list_limit: int = RECONCILE_LIST_LIMIT,
 ) -> tuple[ReconcileResult, FakeQueue, FakeConn]:
     queue = queue or FakeQueue()
     conn = conn or FakeConn()
@@ -191,6 +215,7 @@ def _run(
         queue,  # type: ignore[arg-type]
         clock=clock or Clock(),
         start_after=start_after,
+        list_limit=list_limit,
     )
     return result, queue, conn
 
@@ -395,6 +420,66 @@ def test_a_video_listed_twice_is_inserted_once(make_repo: Callable[..., FakeRepo
     assert [i[0].video_id for i in repo.inserted] == _ids(1)
 
 
+def test_marked_channel_with_no_anchor_becomes_no_anchor(
+    make_repo: Callable[..., FakeRepo],
+) -> None:
+    repo = make_repo([_channel(gap_reason="suspected")])
+
+    _run(FakeCatalog({"UCa": [_e(1), _e(2)]}), list_limit=3)
+
+    assert repo.gap_changes == [("UCa", "no_anchor", "reconcile")]
+
+
+def test_unmarked_channel_with_no_anchor_stays_unmarked(
+    make_repo: Callable[..., FakeRepo],
+) -> None:
+    repo = make_repo([_channel()])
+
+    _run(FakeCatalog({"UCa": [_e(1), _e(2)]}), list_limit=3)
+
+    assert repo.gap_changes == []
+
+
+def test_full_unique_listing_with_lowest_anchor_last_marks_window_exhausted(
+    make_repo: Callable[..., FakeRepo],
+) -> None:
+    entries = [_e(1), _e(2), _e(3)]
+    repo = make_repo([_channel(gap_reason="suspected")], {entries[-1].video_id: _anchor()})
+
+    _run(FakeCatalog({"UCa": entries}), list_limit=3)
+
+    assert [item[0].video_id for item in repo.inserted] == _ids(1, 2)
+    assert repo.gap_changes == [("UCa", "listing_window_exhausted", "reconcile")]
+
+
+@pytest.mark.parametrize(
+    ("entries", "anchor_index", "limit"),
+    [
+        ([_e(1), _e(2), _e(3)], 1, 3),
+        ([_e(1), _e(2)], 1, 3),
+    ],
+)
+def test_safe_anchor_boundaries_clear_after_candidate_writes(
+    make_repo: Callable[..., FakeRepo], entries: list[CatalogEntry], anchor_index: int, limit: int
+) -> None:
+    repo = make_repo([_channel(gap_reason="suspected")], {entries[anchor_index].video_id: _anchor()})
+
+    _run(FakeCatalog({"UCa": entries}), list_limit=limit)
+
+    assert repo.gap_changes == [("UCa", None, "reconcile")]
+
+
+def test_candidate_write_failure_does_not_change_gap_state(
+    make_repo: Callable[..., FakeRepo],
+) -> None:
+    repo = make_repo([_channel(gap_reason="suspected")], {_e(3).video_id: _anchor()})
+    repo.fail_insert = {_e(2).video_id}
+
+    _run(FakeCatalog({"UCa": [_e(1), _e(2), _e(3)]}), list_limit=3)
+
+    assert repo.gap_changes == []
+
+
 # -- writes ---------------------------------------------------------------------
 
 
@@ -409,16 +494,16 @@ def test_a_candidate_is_inserted_as_rss_and_queued_as_a_plain_normal_ingest(
     assert queue.calls == [("ingest", _e(1).video_id, {"priority": 0})]
 
 
-def test_each_video_is_written_in_its_own_transaction(
+def test_candidate_writes_and_gap_state_share_one_channel_transaction(
     make_repo: Callable[..., FakeRepo],
 ) -> None:
-    make_repo(known={_e(3).video_id: _anchor()})
+    make_repo([_channel(gap_reason="suspected")], known={_e(3).video_id: _anchor()})
 
     _, _, conn = _run(FakeCatalog({"UCa": [_e(1), _e(2), _e(3)]}))
 
     begins = [i for i, event in enumerate(conn.events) if event == "begin"]
-    assert len(begins) == 2
-    assert all(conn.events[i + 1] == "commit" for i in begins)
+    assert len(begins) == 1
+    assert conn.events[begins[0] + 1] == "commit"
 
 
 def test_nothing_is_left_open_across_a_catalog_call(make_repo: Callable[..., FakeRepo]) -> None:
@@ -528,7 +613,7 @@ def test_other_errors_warn_roll_back_and_the_next_channel_still_runs(
     assert warning.error_class == type(exc).__name__  # type: ignore[attr-defined]
 
 
-def test_a_write_error_rolls_back_that_video_keeps_earlier_ones_and_fails_the_channel(
+def test_a_write_error_rolls_back_the_channel_and_the_next_channel_still_runs(
     make_repo: Callable[..., FakeRepo],
 ) -> None:
     repo = make_repo(
@@ -544,7 +629,7 @@ def test_a_write_error_rolls_back_that_video_keeps_earlier_ones_and_fails_the_ch
     assert [c[1] for c in queue.calls] == [_e(1).video_id, _e(11).video_id]
     assert result.channels_failed == 1
     assert "rollback" in conn.events
-    assert result.videos_recovered == 2 and result.jobs_enqueued == 2
+    assert result.videos_recovered == 1 and result.jobs_enqueued == 1
 
 
 def test_a_rate_limit_stops_the_pass_before_listing_the_remaining_channels(

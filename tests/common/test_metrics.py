@@ -30,6 +30,7 @@ ZERO_HIST = DurationHistogram((0,) * N, 0, 0.0)
 
 EMPTY = MetricsSnapshot(
     queue_depth={},
+    feed_gap_channels={},
     job_durations={},
     whisper_rtf=None,
     token_usage={},
@@ -42,6 +43,7 @@ EMPTY = MetricsSnapshot(
 
 FAMILIES = [
     "queue_depth",
+    "feed_gap_channels",
     "job_duration_seconds",
     "whisper_rtf",
     "llm_tokens_total",
@@ -100,6 +102,7 @@ def test_metric_types_follow_the_spec() -> None:
     types = dict(ln.split()[2:4] for ln in lines(EMPTY) if ln.startswith("# TYPE "))
     assert types == {
         "queue_depth": "gauge",
+        "feed_gap_channels": "gauge",
         "job_duration_seconds": "histogram",
         "whisper_rtf": "gauge",
         "llm_tokens_total": "counter",
@@ -532,7 +535,7 @@ def test_only_the_documented_label_keys_exist() -> None:
         job_durations={"ingest": hist(1.0)},
     )
     keys = {m.group(1) for ln in lines(snap) if not ln.startswith("#") for m in LABEL.finditer(ln)}
-    assert keys == {"kind", "state", "model", "direction", "le"}
+    assert keys == {"kind", "state", "model", "direction", "le", "reason"}
 
 
 def test_help_text_is_a_single_line() -> None:

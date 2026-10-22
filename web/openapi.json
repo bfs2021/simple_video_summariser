@@ -1270,6 +1270,107 @@
         "title": "LastFailureOut",
         "type": "object"
       },
+      "OpsChannelListOut": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/OpsChannelOut"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "OpsChannelListOut",
+        "type": "object"
+      },
+      "OpsChannelOut": {
+        "properties": {
+          "channel_id": {
+            "title": "Channel Id",
+            "type": "string"
+          },
+          "feed_gap_detected_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Feed Gap Detected At"
+          },
+          "feed_gap_reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "suspected",
+                  "no_anchor",
+                  "listing_window_exhausted"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Feed Gap Reason"
+          },
+          "last_poll_err": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Poll Err"
+          },
+          "poll_failing_since": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Poll Failing Since"
+          },
+          "poll_failures": {
+            "title": "Poll Failures",
+            "type": "integer"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "required": [
+          "channel_id",
+          "title",
+          "poll_failing_since",
+          "poll_failures",
+          "last_poll_err",
+          "feed_gap_detected_at",
+          "feed_gap_reason"
+        ],
+        "title": "OpsChannelOut",
+        "type": "object"
+      },
       "QuoteOut": {
         "properties": {
           "source_chunk_seq": {
@@ -1519,6 +1620,9 @@
         ],
         "title": "SpanOut",
         "type": "object"
+      },
+      "StrictQueryBool": {
+        "type": "boolean"
       },
       "SubmitRef": {
         "properties": {
@@ -2413,6 +2517,54 @@
           }
         },
         "summary": "Healthz"
+      }
+    },
+    "/ops/channels": {
+      "get": {
+        "operationId": "get_ops_channels_ops_channels_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "failing",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/StrictQueryBool",
+              "default": false
+            }
+          },
+          {
+            "in": "query",
+            "name": "attention",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/StrictQueryBool",
+              "default": false
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpsChannelListOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Ops Channels"
       }
     },
     "/ops/jobs": {

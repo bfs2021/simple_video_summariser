@@ -318,6 +318,16 @@ history. Only uploads positioned above a known post-`monitor_from` video (the
 anchor) in the channel's newest-50 listing are recovered; anything below it may
 be pre-cutoff history and stays for an explicit backfill (D9b, #41).
 
+The channel gap columns are current state, not event history (#156). Polling's
+existing possible-gap condition sets `suspected` without moving an existing
+start time. Reconciliation changes only an existing marker: no valid anchor is
+`no_anchor`; a lowest anchor at the final unique entry of a full bounded listing
+is `listing_window_exhausted`; any other valid anchor clears the marker after
+all candidate writes commit atomically. Catalog, database, rate-limit and budget
+failures preserve it. A complete real synchronous backfill and a planner request
+that reaches `done` clear it; dry, failed, cancelled, partial or interrupted runs
+do not.
+
 Backfills beyond `POST /channels/{id}/backfill`'s 500 uploads (#115) are not a
 job kind: `jobs.video_id` is `NOT NULL`, so a per-channel job does not fit, and a
 multi-minute listing would hold a transcriber slot. The API records a row in
@@ -406,8 +416,12 @@ CREATE TABLE channels (
     added_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     poll_failing_since TIMESTAMPTZ,                    -- start of the current failed-poll run; NULL = last poll ok (#90)
     poll_failures INTEGER     NOT NULL DEFAULT 0,      -- failed RSS polls in a row; 0 iff poll_failing_since IS NULL (#90)
+    feed_gap_detected_at TIMESTAMPTZ,                  -- start of the current unresolved feed gap (#156)
+    feed_gap_reason TEXT,                              -- suspected | no_anchor | listing_window_exhausted
     CHECK (poll_failures >= 0),
-    CHECK ((poll_failures = 0) = (poll_failing_since IS NULL))
+    CHECK ((poll_failures = 0) = (poll_failing_since IS NULL)),
+    CHECK (feed_gap_reason IS NULL OR feed_gap_reason IN ('suspected', 'no_anchor', 'listing_window_exhausted')),
+    CHECK ((feed_gap_detected_at IS NULL) = (feed_gap_reason IS NULL))
 );
 
 CREATE TABLE videos (
@@ -847,6 +861,7 @@ separated per D13.
 | `GET` | `/videos/{id}/transcript` | paginated segments |
 | `GET` | `/videos/{id}/render` | **server-side HTML render** (D12c) |
 | `GET` | `/search?q=` | FTS over `search_docs` (title, latest analysis, preferred transcript); `matched_in` and transcript `ts_headline` excerpts. Transcript search uses a mapped built-in PostgreSQL configuration or `simple`; with `simple`, exact whole runs/tokens can match, but text inside an unspaced run cannot unless whitespace or punctuation creates a token boundary (#167). |
+| `GET` | `/ops/channels` | current poll health plus nullable feed-gap state; strict `failing` or `attention` filter (mutually exclusive), failures first, then oldest gaps, then healthy channels |
 | `GET` | `/ops/jobs` | filter by state/kind — powers Ops view |
 | `POST` | `/ops/jobs/{id}/retry` | resurrect a dead job |
 | `GET` | `/healthz` | liveness + queue depth by kind/state |
@@ -1714,7 +1729,10 @@ gauges, no tracing stack.
   `queue_depth{kind,state}`, `job_duration_seconds{kind}`,
   `whisper_rtf`, `llm_tokens_total{model,direction}`, `llm_cost_usd_total`,
   `speaker_coercions_total` (§8.1 — the D4b quality canary),
-  `audio_bytes_used`.
+  `audio_bytes_used`, and zero-filled
+  `feed_gap_channels{reason="suspected|no_anchor|listing_window_exhausted"}`.
+  Feed-gap metrics are one aggregate query in the scrape snapshot and never
+  carry channel, title, error, URL or other unbounded labels.
 - **The two that matter most:** `queue_depth{kind="transcribe",state="pending"}`
   trending up over a week is D3's revisit trigger; `speaker_coercions_total`
   rising is D4b's.

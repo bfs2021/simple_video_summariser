@@ -53,7 +53,11 @@ import psycopg
 from common.errors import PermanentSourceError, RateLimitedError
 from common.models import CatalogEntry, CatalogSource, Channel
 from common.queue import PRIORITY_NORMAL, JobQueue
-from common.repo.channels import list_active_channels
+from common.repo.channels import (
+    clear_feed_gap,
+    list_active_channels,
+    set_feed_gap_reason,
+)
 from common.repo.videos import insert_catalog_video, known_videos
 
 _logger = logging.getLogger(__name__)
@@ -111,6 +115,7 @@ def reconcile_channels(
     *,
     clock: Callable[[], float],
     start_after: str | None = None,
+    list_limit: int = RECONCILE_LIST_LIMIT,
 ) -> ReconcileResult:
     """Reconcile every active channel's newest uploads once."""
     started = clock()
@@ -128,7 +133,7 @@ def reconcile_channels(
             counts.deferred = len(channels) - index
             break
         try:
-            _reconcile_channel(conn, catalog, queue, channel, counts)
+            _reconcile_channel(conn, catalog, queue, channel, counts, list_limit)
         except psycopg.OperationalError:
             raise
         except PermanentSourceError as exc:
@@ -189,8 +194,9 @@ def _reconcile_channel(
     queue: JobQueue,
     channel: Channel,
     counts: _Counts,
+    list_limit: int,
 ) -> None:
-    listing = catalog.list_uploads(channel.channel_id, limit=RECONCILE_LIST_LIMIT)
+    listing = catalog.list_uploads(channel.channel_id, limit=list_limit)
     counts.listed += len(listing.entries)
     entries: list[CatalogEntry] = []
     seen: set[str] = set()
@@ -217,14 +223,17 @@ def _reconcile_channel(
             "planner.reconcile.no_anchor",
             extra={"channel_id": channel.channel_id, "listed": len(entries)},
         )
+        with conn.transaction():
+            set_feed_gap_reason(conn, channel.channel_id, "no_anchor", source="reconcile")
         return
 
     recovered_here = 0
+    enqueued_here = 0
     try:
-        for entry in entries[:anchor]:
-            if entry.video_id in known:
-                continue
-            with conn.transaction():
+        with conn.transaction():
+            for entry in entries[:anchor]:
+                if entry.video_id in known:
+                    continue
                 inserted = insert_catalog_video(
                     conn, entry, channel_id=channel.channel_id, origin=_ORIGIN
                 )
@@ -233,11 +242,21 @@ def _reconcile_channel(
                     if inserted
                     else None
                 )
-            if inserted:
-                recovered_here += 1
-                counts.recovered += 1
-                if job_id is not None:
-                    counts.enqueued += 1
+                if inserted:
+                    recovered_here += 1
+                    if job_id is not None:
+                        enqueued_here += 1
+            if len(entries) == list_limit and anchor == len(entries) - 1:
+                set_feed_gap_reason(
+                    conn,
+                    channel.channel_id,
+                    "listing_window_exhausted",
+                    source="reconcile",
+                )
+            else:
+                clear_feed_gap(conn, channel.channel_id, source="reconcile")
+        counts.recovered += recovered_here
+        counts.enqueued += enqueued_here
     finally:
         if recovered_here:
             _logger.info(

@@ -158,6 +158,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/ops/channels": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Ops Channels */
+        get: operations["get_ops_channels_ops_channels_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/ops/jobs": {
         parameters: {
             query?: never;
@@ -813,6 +830,28 @@ export interface components {
             /** Kind */
             kind: string;
         };
+        /** OpsChannelListOut */
+        OpsChannelListOut: {
+            /** Items */
+            items: components["schemas"]["OpsChannelOut"][];
+        };
+        /** OpsChannelOut */
+        OpsChannelOut: {
+            /** Channel Id */
+            channel_id: string;
+            /** Feed Gap Detected At */
+            feed_gap_detected_at: string | null;
+            /** Feed Gap Reason */
+            feed_gap_reason: ("suspected" | "no_anchor" | "listing_window_exhausted") | null;
+            /** Last Poll Err */
+            last_poll_err: string | null;
+            /** Poll Failing Since */
+            poll_failing_since: string | null;
+            /** Poll Failures */
+            poll_failures: number;
+            /** Title */
+            title: string | null;
+        };
         /** QuoteOut */
         QuoteOut: {
             /** Source Chunk Seq */
@@ -878,6 +917,7 @@ export interface components {
             /** Text */
             text: string;
         };
+        StrictQueryBool: boolean;
         /** SubmitRef */
         SubmitRef: {
             /** Url */
@@ -1273,6 +1313,38 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HealthOut"];
+                };
+            };
+        };
+    };
+    get_ops_channels_ops_channels_get: {
+        parameters: {
+            query?: {
+                failing?: components["schemas"]["StrictQueryBool"];
+                attention?: components["schemas"]["StrictQueryBool"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OpsChannelListOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

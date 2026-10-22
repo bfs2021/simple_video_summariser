@@ -77,8 +77,11 @@ def _counts(db: psycopg.Connection[Any]) -> tuple[int, int, int]:
     return (int(row[0]), int(row[1]), int(row[2]))
 
 
-def _register(db: psycopg.Connection[Any]) -> None:
-    db.execute("INSERT INTO channels (channel_id) VALUES (%s)", (CHANNEL,))
+def _register(db: psycopg.Connection[Any], *, marked: bool = False) -> None:
+    db.execute(
+        "INSERT INTO channels (channel_id, feed_gap_detected_at, feed_gap_reason) VALUES (%s, CASE WHEN %s THEN now() END, CASE WHEN %s THEN 'suspected' END)",
+        (CHANNEL, marked, marked),
+    )
 
 
 def test_an_unregistered_channel_is_404_and_the_catalog_is_not_called(
@@ -94,7 +97,7 @@ def test_an_unregistered_channel_is_404_and_the_catalog_is_not_called(
 def test_a_dry_run_is_200_and_writes_nothing(
     api: TestClient, db: psycopg.Connection[Any]
 ) -> None:
-    _register(db)
+    _register(db, marked=True)
     before = _counts(db)
 
     response = api.post(f"/channels/{CHANNEL}/backfill", json={"limit": 5})
@@ -104,12 +107,15 @@ def test_a_dry_run_is_200_and_writes_nothing(
     assert (body["dry_run"], body["new_videos"], body["enqueued"]) == (True, 3, 0)
     assert body["backfill_id"] is None
     assert _counts(db) == before
+    assert db.execute(
+        "SELECT feed_gap_reason FROM channels WHERE channel_id = %s", (CHANNEL,)
+    ).fetchone() == ("suspected",)
 
 
 def test_a_real_run_is_202_then_200_on_repeat(
     api: TestClient, db: psycopg.Connection[Any], logs: LogSink
 ) -> None:
-    _register(db)
+    _register(db, marked=True)
 
     first = api.post(f"/channels/{CHANNEL}/backfill", json={"limit": 5, "dry_run": False})
     second = api.post(f"/channels/{CHANNEL}/backfill", json={"limit": 5, "dry_run": False})
@@ -118,6 +124,10 @@ def test_a_real_run_is_202_then_200_on_repeat(
     assert first.json()["enqueued"] == 3
     assert second.status_code == 200
     assert (second.json()["already_known"], second.json()["enqueued"]) == (3, 0)
+    assert db.execute(
+        "SELECT feed_gap_detected_at, feed_gap_reason FROM channels WHERE channel_id = %s",
+        (CHANNEL,),
+    ).fetchone() == (None, None)
     jobs = db.execute("SELECT priority, payload FROM jobs ORDER BY id").fetchall()
     assert jobs == [
         (PRIORITY_BACKFILL, {"origin": "backfill", "backfill_id": first.json()["backfill_id"]})

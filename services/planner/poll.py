@@ -30,7 +30,11 @@ import psycopg
 from common.errors import MAX_ERROR_BYTES, UnavailableReason
 from common.models import Channel, FeedSource
 from common.queue import PRIORITY_NORMAL, JobQueue
-from common.repo.channels import list_active_channels, record_poll
+from common.repo.channels import (
+    list_active_channels,
+    mark_feed_gap_suspected,
+    record_poll,
+)
 from common.repo.videos import insert_discovered_video
 from common.shorts import should_skip_short
 
@@ -187,6 +191,8 @@ def _process_entries(
         if channel.last_polled is not None and channel.last_polled > floor:
             floor = channel.last_polled
         if oldest > floor:
+            with conn.transaction():
+                mark_feed_gap_suspected(conn, channel.channel_id, source="poll")
             _logger.warning(
                 "possible feed gap",
                 extra={"channel_id": channel.channel_id, "oldest_published_at": oldest},

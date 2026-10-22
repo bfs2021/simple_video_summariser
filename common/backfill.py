@@ -56,7 +56,7 @@ from common.models import (
 )
 from common.queue import PRIORITY_BACKFILL, JobQueue
 from common.repo.analyses import median_cost_per_char
-from common.repo.channels import channel_exists
+from common.repo.channels import channel_exists, clear_feed_gap
 from common.repo.transcripts import median_chars_per_audio_sec, median_whisper_rtf
 from common.repo.videos import insert_backfill_video, known_video_ids
 
@@ -249,6 +249,10 @@ def backfill(
                     )
                     if job is not None:
                         enqueued += 1
+
+    if not dry_run and max_enqueue is None:
+        with conn.transaction():
+            clear_feed_gap(conn, channel_id, source="backfill")
 
     return BackfillResult(
         channel_id=channel_id,

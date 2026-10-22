@@ -7,9 +7,13 @@ from datetime import datetime
 from typing import Any
 
 import psycopg
+import structlog
 
 from common.models import Channel, ChannelListItem, ChannelPage
 from common.repo._hygiene import clean_text
+
+_log = structlog.get_logger(__name__)
+FEED_GAP_REASONS = ("suspected", "no_anchor", "listing_window_exhausted")
 
 
 def add_channel(conn: psycopg.Connection[Any], channel_id: str, title: str | None) -> None:
@@ -58,20 +62,20 @@ def register_channel(conn: psycopg.Connection[Any], channel_id: str) -> Register
             SET active = true, monitor_from = now()
             WHERE c.active = false
         RETURNING c.channel_id, c.title, c.active, c.monitor_from, c.last_polled,
-                  c.last_poll_err, c.added_at, c.poll_failing_since, c.poll_failures,
-                  (c.xmax = 0) AS created
+                   c.last_poll_err, c.added_at, c.poll_failing_since, c.poll_failures,
+                   c.feed_gap_detected_at, c.feed_gap_reason, (c.xmax = 0) AS created
         """,
         {"id": channel_id},
     ).fetchone()
     if row is not None:
-        return RegisteredChannel(channel=_channel(row[:9]), created=bool(row[9]))
+        return RegisteredChannel(channel=_channel(row[:11]), created=bool(row[11]))
     # Already active: the upsert changed nothing and returned nothing. Read it
     # in a new statement, whose snapshot also sees a row a concurrent
     # registration has just committed.
     existing = conn.execute(
         """
         SELECT channel_id, title, active, monitor_from, last_polled, last_poll_err, added_at,
-               poll_failing_since, poll_failures
+               poll_failing_since, poll_failures, feed_gap_detected_at, feed_gap_reason
         FROM channels WHERE channel_id = %(id)s
         """,
         {"id": channel_id},
@@ -93,7 +97,8 @@ def list_active_channels(conn: psycopg.Connection[Any]) -> list[Channel]:
     rows = conn.execute(
         """
         SELECT channel_id, title, active, monitor_from, last_polled,
-               last_poll_err, added_at, poll_failing_since, poll_failures
+               last_poll_err, added_at, poll_failing_since, poll_failures,
+               feed_gap_detected_at, feed_gap_reason
         FROM channels
         WHERE active = true
         ORDER BY channel_id
@@ -198,6 +203,8 @@ def _channel(row: tuple[Any, ...]) -> Channel:
         added_at,
         poll_failing_since,
         poll_failures,
+        feed_gap_detected_at,
+        feed_gap_reason,
     ) = row
     return Channel(
         channel_id=channel_id,
@@ -209,7 +216,147 @@ def _channel(row: tuple[Any, ...]) -> Channel:
         added_at=added_at,
         poll_failing_since=poll_failing_since,
         poll_failures=poll_failures,
+        feed_gap_detected_at=feed_gap_detected_at,
+        feed_gap_reason=feed_gap_reason,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class FeedGapState:
+    detected_at: datetime
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class OpsChannel:
+    channel_id: str
+    title: str | None
+    poll_failing_since: datetime | None
+    poll_failures: int
+    last_poll_err: str | None
+    feed_gap_detected_at: datetime | None
+    feed_gap_reason: str | None
+
+
+def _log_gap_transition(
+    channel_id: str, previous_reason: str | None, reason: str | None, source: str
+) -> None:
+    if previous_reason != reason:
+        _log.info(
+            "channel.feed_gap_state_changed",
+            channel_id=channel_id,
+            previous_reason=previous_reason,
+            reason=reason,
+            source=source,
+        )
+
+
+def mark_feed_gap_suspected(
+    conn: psycopg.Connection[Any], channel_id: str, *, source: str
+) -> FeedGapState | None:
+    row = conn.execute(
+        """
+        WITH previous AS (
+            SELECT channel_id, feed_gap_reason FROM channels WHERE channel_id = %s FOR UPDATE
+        )
+        UPDATE channels c
+        SET feed_gap_detected_at = coalesce(c.feed_gap_detected_at, now()),
+            feed_gap_reason = 'suspected'
+        FROM previous p
+        WHERE c.channel_id = p.channel_id
+        RETURNING c.feed_gap_detected_at, c.feed_gap_reason, p.feed_gap_reason
+        """,
+        (channel_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    previous = row[2]
+    _log_gap_transition(channel_id, previous, "suspected", source)
+    return FeedGapState(row[0], row[1])
+
+
+def set_feed_gap_reason(
+    conn: psycopg.Connection[Any], channel_id: str, reason: str, *, source: str
+) -> FeedGapState | None:
+    if reason not in FEED_GAP_REASONS:
+        raise ValueError("invalid feed gap reason")
+    row = conn.execute(
+        """
+        WITH previous AS (
+            SELECT channel_id, feed_gap_reason FROM channels
+            WHERE channel_id = %(id)s AND feed_gap_reason IS NOT NULL FOR UPDATE
+        )
+        UPDATE channels c
+        SET feed_gap_reason = %(reason)s
+        FROM previous p
+        WHERE c.channel_id = p.channel_id
+        RETURNING c.feed_gap_detected_at, c.feed_gap_reason, p.feed_gap_reason
+        """,
+        {"id": channel_id, "reason": reason},
+    ).fetchone()
+    if row is None:
+        return None
+    previous = row[2]
+    _log_gap_transition(channel_id, previous, reason, source)
+    return FeedGapState(row[0], row[1])
+
+
+def clear_feed_gap(
+    conn: psycopg.Connection[Any], channel_id: str, *, source: str
+) -> FeedGapState | None:
+    row = conn.execute(
+        """
+        WITH previous AS (
+            SELECT channel_id, feed_gap_detected_at, feed_gap_reason FROM channels
+            WHERE channel_id = %s AND feed_gap_reason IS NOT NULL FOR UPDATE
+        )
+        UPDATE channels c
+        SET feed_gap_detected_at = NULL, feed_gap_reason = NULL
+        FROM previous p
+        WHERE c.channel_id = p.channel_id
+        RETURNING p.feed_gap_detected_at, p.feed_gap_reason
+        """,
+        (channel_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    _log_gap_transition(channel_id, row[1], None, source)
+    return FeedGapState(row[0], row[1])
+
+
+def list_ops_channels(
+    conn: psycopg.Connection[Any], *, failing: bool, attention: bool
+) -> list[OpsChannel]:
+    where = "poll_failing_since IS NOT NULL" if failing else (
+        "poll_failing_since IS NOT NULL OR feed_gap_reason IS NOT NULL" if attention else "true"
+    )
+    rows = conn.execute(
+        f"""
+        SELECT channel_id, title, poll_failing_since, poll_failures, last_poll_err,
+               feed_gap_detected_at, feed_gap_reason
+        FROM channels
+        WHERE {where}
+        ORDER BY CASE WHEN poll_failing_since IS NOT NULL THEN 0
+                      WHEN feed_gap_reason IS NOT NULL THEN 1 ELSE 2 END,
+                 CASE WHEN poll_failing_since IS NOT NULL THEN poll_failing_since END ASC,
+                 CASE WHEN poll_failing_since IS NULL THEN feed_gap_detected_at END ASC,
+                 title ASC NULLS LAST, channel_id ASC
+        """
+    ).fetchall()
+    return [OpsChannel(*row) for row in rows]
+
+
+def feed_gap_counts(conn: psycopg.Connection[Any]) -> dict[str, int]:
+    row = conn.execute(
+        """
+        SELECT count(*) FILTER (WHERE feed_gap_reason = 'suspected'),
+               count(*) FILTER (WHERE feed_gap_reason = 'no_anchor'),
+               count(*) FILTER (WHERE feed_gap_reason = 'listing_window_exhausted')
+        FROM channels
+        """
+    ).fetchone()
+    assert row is not None
+    return dict(zip(FEED_GAP_REASONS, (int(value) for value in row), strict=True))
 
 
 def get_channel_title(conn: psycopg.Connection[Any], channel_id: str) -> str | None:

@@ -123,6 +123,7 @@ class FakeRepo:
         self.unavailable: dict[str, str | None] = {}
         self.polls: list[tuple[str, str | None]] = []
         self.health: dict[str, PollHealth] = {}
+        self.gaps: list[tuple[str, str]] = []
 
     def list_active_channels(self, conn: Any) -> list[Channel]:
         return list(self.channels)
@@ -136,6 +137,10 @@ class FakeRepo:
         self.inserted.append((entry, origin))
         self.unavailable[entry.video_id] = unavailable
         return True
+
+    def mark_feed_gap_suspected(self, conn: Any, channel_id: str, *, source: str) -> object:
+        self.gaps.append((channel_id, source))
+        return object()
 
     def record_poll(
         self, conn: Any, channel_id: str, error: str | None = None
@@ -159,6 +164,7 @@ def make_repo(monkeypatch: pytest.MonkeyPatch) -> Any:
         monkeypatch.setattr(poll, "list_active_channels", repo.list_active_channels)
         monkeypatch.setattr(poll, "insert_discovered_video", repo.insert_discovered_video)
         monkeypatch.setattr(poll, "record_poll", repo.record_poll)
+        monkeypatch.setattr(poll, "mark_feed_gap_suspected", repo.mark_feed_gap_suspected)
         return repo
 
     return install

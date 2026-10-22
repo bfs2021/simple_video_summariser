@@ -8,6 +8,7 @@ import { Ops } from './Ops'
 type JobOut = components['schemas']['JobOut']
 type JobListOut = components['schemas']['JobListOut']
 type HealthOut = components['schemas']['HealthOut']
+type OpsChannelListOut = components['schemas']['OpsChannelListOut']
 
 function job(id: number, over: Partial<JobOut> = {}): JobOut {
   return {
@@ -36,6 +37,10 @@ function list(items: JobOut[], next: number | null = null): JobListOut {
 
 function health(queue: HealthOut['queue'] = {}): HealthOut {
   return { status: 'ok', queue }
+}
+
+function channels(items: OpsChannelListOut['items'] = []): OpsChannelListOut {
+  return { items }
 }
 
 interface Call {
@@ -72,9 +77,10 @@ function stubFetch(h: Handler) {
 }
 
 /** Routes by path: healthz, ops/jobs (GET) and retry (POST). */
-function api(opts: { health?: Handler; jobs?: Handler; retry?: Handler } = {}): Handler {
+function api(opts: { health?: Handler; channels?: Handler; jobs?: Handler; retry?: Handler } = {}): Handler {
   return (c) => {
     if (c.url.pathname === '/api/healthz') return (opts.health ?? (() => health()))(c)
+    if (c.url.pathname === '/api/ops/channels') return (opts.channels ?? (() => channels()))(c)
     if (c.url.pathname === '/api/ops/jobs') return (opts.jobs ?? (() => list([])))(c)
     if (/^\/api\/ops\/jobs\/\d+\/retry$/.test(c.url.pathname)) {
       return (opts.retry ?? (() => json({ detail: 'job not found' }, 404)))(c)
@@ -138,6 +144,45 @@ const liveText = () => livePolite().map((e) => e.textContent).join('|')
 
 beforeEach(() => {
   vi.useFakeTimers()
+})
+
+describe('channels needing attention', () => {
+  it('requests attention and renders both conditions with exact gap guidance', async () => {
+    stubFetch(
+      api({
+        channels: () =>
+          channels([
+            {
+              channel_id: 'UCabc',
+              title: 'Channel title',
+              poll_failing_since: '2026-10-02T00:00:00Z',
+              poll_failures: 3,
+              last_poll_err: 'failed',
+              feed_gap_detected_at: '2026-10-01T00:00:00Z',
+              feed_gap_reason: 'no_anchor',
+            },
+          ]),
+      }),
+    )
+    await mount()
+    const request = calls.find((c) => c.url.pathname === '/api/ops/channels') as Call
+    expect(request.url.searchParams.get('attention')).toBe('true')
+    const region = screen.getByRole('region', { name: 'Channels needing attention' })
+    expect(within(region).getByText('RSS polling failure (3)')).toBeTruthy()
+    expect(within(region).getByText('Feed gap could not be recovered: no safe anchor')).toBeTruthy()
+    expect(within(region).getByText('Run a channel backfill to recover older uploads')).toBeTruthy()
+    expect(within(region).getByText('POST /api/channels/UCabc/backfill')).toBeTruthy()
+    expect(within(region).getByText('2026-10-01 00:00 UTC')).toBeTruthy()
+  })
+
+  it.each([
+    ['suspected', 'Possible feed gap awaiting reconciliation'],
+    ['listing_window_exhausted', 'Feed gap may continue beyond the reconciliation window'],
+  ] as const)('renders %s copy', async (reason, copy) => {
+    stubFetch(api({ channels: () => channels([{ channel_id: 'UCx', title: null, poll_failing_since: null, poll_failures: 0, last_poll_err: null, feed_gap_detected_at: '2026-10-01T00:00:00Z', feed_gap_reason: reason }]) }))
+    await mount()
+    expect(screen.getByText(copy)).toBeTruthy()
+  })
 })
 
 describe('route and requests', () => {
