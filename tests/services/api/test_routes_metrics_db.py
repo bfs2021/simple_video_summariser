@@ -82,6 +82,13 @@ def test_an_empty_database_gives_zero_filled_metrics(api: TestClient) -> None:
     assert response.status_code == 200
     body = response.text
     assert len(re.findall(r"^queue_depth\{", body, re.MULTILINE)) == 12
+    assert [
+        line for line in body.splitlines() if line.startswith("feed_gap_channels{")
+    ] == [
+        'feed_gap_channels{reason="suspected"} 0',
+        'feed_gap_channels{reason="no_anchor"} 0',
+        'feed_gap_channels{reason="listing_window_exhausted"} 0',
+    ]
     assert _sample(body, "llm_cost_usd_total") == "0"
     assert _sample(body, "speaker_coercions_total") == "0"
     assert _sample(body, "audio_bytes_used") == "0"
@@ -95,6 +102,16 @@ def test_an_empty_database_gives_zero_filled_metrics(api: TestClient) -> None:
 def test_every_metric_is_derived_from_the_seeded_rows(
     api: TestClient, db: psycopg.Connection[Any]
 ) -> None:
+    for channel_id, reason in (
+        ("UCgap1", "suspected"),
+        ("UCgap2", "suspected"),
+        ("UCgap3", "no_anchor"),
+        ("UCgap4", "listing_window_exhausted"),
+    ):
+        db.execute(
+            "INSERT INTO channels (channel_id, feed_gap_detected_at, feed_gap_reason) VALUES (%s, %s, %s)",
+            (channel_id, T0, reason),
+        )
     for vid in ("v1", "v2", "v3", "v4"):
         db.execute("INSERT INTO videos (video_id, title) VALUES (%s, %s)", (vid, f"{MARK}-title"))
     # jobs: several kinds and states, one unknown kind, durations on bucket edges
@@ -148,6 +165,9 @@ def test_every_metric_is_derived_from_the_seeded_rows(
     assert _sample(body, 'queue_depth{kind="transcribe",state="running"}') == "1"
     assert _sample(body, 'queue_depth{kind="other",state="pending"}') == "1"
     assert _sample(body, 'queue_depth{kind="analyze",state="done"}') == "3"
+    assert _sample(body, 'feed_gap_channels{reason="suspected"}') == "2"
+    assert _sample(body, 'feed_gap_channels{reason="no_anchor"}') == "1"
+    assert _sample(body, 'feed_gap_channels{reason="listing_window_exhausted"}') == "1"
     assert _sample(body, 'job_duration_seconds_bucket{kind="analyze",le="5"}') == "1"
     assert _sample(body, 'job_duration_seconds_bucket{kind="analyze",le="15"}') == "1"
     assert _sample(body, 'job_duration_seconds_bucket{kind="analyze",le="60"}') == "2"  # 60.0 yes, 60.001 no
@@ -173,7 +193,7 @@ def test_every_metric_is_derived_from_the_seeded_rows(
     for marker in (MARK, API_KEY, "v1", "v2", "v3", "v4", "password", "@"):
         assert marker not in body.replace("# ", ""), marker
     label_keys = set(re.findall(r"[{,]([a-z]+)=", body))
-    assert label_keys == {"kind", "state", "model", "direction", "le"}
+    assert label_keys == {"kind", "state", "model", "direction", "le", "reason"}
 
 
 def test_registered_reaper_run_is_persisted_and_scraped(

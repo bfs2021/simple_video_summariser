@@ -123,6 +123,8 @@ class Channel:
     added_at: datetime
     poll_failing_since: datetime | None  # start of the current failed-poll run (#90)
     poll_failures: int  # failed polls in a row (#90)
+    feed_gap_detected_at: datetime | None = None
+    feed_gap_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

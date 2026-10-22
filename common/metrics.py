@@ -75,6 +75,7 @@ class MetricsSnapshot:
     """Everything one scrape needs, as read from one database snapshot."""
 
     queue_depth: Mapping[tuple[str, str], int]
+    feed_gap_channels: Mapping[str, int]
     job_durations: Mapping[str, DurationHistogram]
     whisper_rtf: float | None
     #: model name -> (input tokens, output tokens)
@@ -232,6 +233,15 @@ def render(snapshot: MetricsSnapshot) -> str:
         "gauge",
         "Jobs per kind and state. Kinds and states outside the known sets are summed into other.",
         _queue_depth_samples(snapshot.queue_depth),
+    )
+    lines += _family(
+        "feed_gap_channels",
+        "gauge",
+        "Channels with a current unresolved feed gap, by bounded reason.",
+        [
+            _sample("feed_gap_channels", (("reason", reason),), snapshot.feed_gap_channels.get(reason, 0))
+            for reason in ("suspected", "no_anchor", "listing_window_exhausted")
+        ],
     )
     lines += _family(
         "job_duration_seconds",

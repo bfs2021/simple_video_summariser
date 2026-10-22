@@ -28,7 +28,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError
 
 from common import metrics
 from common.config import get_settings
@@ -40,6 +40,7 @@ from common.repo.analyses import (
     total_cost_usd,
     total_speaker_coercions,
 )
+from common.repo.channels import feed_gap_counts, list_ops_channels
 from common.repo.jobs import UNSET, duration_histograms, get_job, list_jobs, queue_depth
 from common.repo.media import total_bytes
 from common.repo.planner_runs import list_task_runs
@@ -100,6 +101,7 @@ def _read_snapshot(conn: psycopg.Connection[Any]) -> metrics.MetricsSnapshot:
     try:
         return metrics.MetricsSnapshot(
             queue_depth=queue_depth(conn),
+            feed_gap_channels=feed_gap_counts(conn),
             job_durations=duration_histograms(conn),
             whisper_rtf=latest_whisper_rtf(conn),
             token_usage=token_usage_by_model(conn),
@@ -128,6 +130,61 @@ def get_metrics(
         _log.exception("metrics database query failed")
         return metrics_unavailable()
     return PlainTextResponse(metrics.render(snapshot), media_type=metrics.CONTENT_TYPE)
+
+
+def _strict_query_bool(value: Any) -> bool:
+    if value is True or value == "true":
+        return True
+    if value is False or value == "false":
+        return False
+    raise ValueError("must be true or false")
+
+
+type StrictQueryBool = Annotated[bool, BeforeValidator(_strict_query_bool)]
+
+
+class ChannelsQuery(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    failing: StrictQueryBool = False
+    attention: StrictQueryBool = False
+
+
+def _channels_gate(request: Request) -> None:
+    _gate(ChannelsQuery)(request)
+    values = ChannelsQuery.model_validate(dict(request.query_params))
+    if values.failing and values.attention:
+        raise RequestValidationError(
+            [{"loc": ("query",), "msg": "failing and attention are mutually exclusive", "type": "value_error"}]
+        )
+
+
+@router.get("/ops/channels", response_model=schemas.OpsChannelListOut)
+def get_ops_channels(
+    _: Annotated[None, Depends(_channels_gate)],
+    params: Annotated[ChannelsQuery, Query()],
+    conn: Annotated[psycopg.Connection[Any], Depends(get_conn)],
+) -> schemas.OpsChannelListOut | JSONResponse:
+    try:
+        conn.read_only = True
+        rows = list_ops_channels(conn, failing=params.failing, attention=params.attention)
+    except Exception:  # noqa: BLE001 - any database failure is unavailable
+        _log.exception("ops.channels database query failed")
+        return JSONResponse(status_code=503, content=UNAVAILABLE_BODY)
+    return schemas.OpsChannelListOut(
+        items=[
+            schemas.OpsChannelOut(
+                channel_id=row.channel_id,
+                title=row.title,
+                poll_failing_since=row.poll_failing_since,
+                poll_failures=row.poll_failures,
+                last_poll_err=row.last_poll_err,
+                feed_gap_detected_at=row.feed_gap_detected_at,
+                feed_gap_reason=row.feed_gap_reason,  # type: ignore[arg-type]
+            )
+            for row in rows
+        ]
+    )
 
 
 class JobsQuery(BaseModel):

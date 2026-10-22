@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
-import { OpsError, useOpsJobs, useQueueDepth, useRetryJob, type JobOut } from '../hooks/useOps'
+import { OpsError, useOpsChannels, useOpsJobs, useQueueDepth, useRetryJob, type JobOut, type OpsChannelOut } from '../hooks/useOps'
 import {
   collapseError,
   depthTable,
@@ -31,9 +31,11 @@ export function Ops() {
   }, [fix, setParams])
 
   const depth = useQueueDepth()
+  const channels = useOpsChannels()
   const jobs = useOpsJobs(filters, before)
   const [result, setResult] = useState<{ jobId: number; message: string } | null>(null)
   const depthId = useId()
+  const channelsId = useId()
   const jobsId = useId()
 
   const go = (f: OpsFilters, cursor: number | null) => {
@@ -57,6 +59,7 @@ export function Ops() {
           onClick={() => {
             setResult(null)
             void depth.refetch()
+            void channels.refetch()
             void jobs.refetch()
           }}
         >
@@ -103,6 +106,37 @@ export function Ops() {
               </tbody>
             </table>
           </>
+        )}
+      </section>
+
+      <section aria-labelledby={channelsId}>
+        <h2 id={channelsId}>Channels needing attention</h2>
+        {channels.isPending && <p role="status">Loading channels…</p>}
+        {channels.isError && (
+          <p role="alert">
+            {channels.error instanceof OpsError && channels.error.status === 503
+              ? 'The database is unavailable. Try again shortly.'
+              : 'Could not load channels'}{' '}
+            <button type="button" onClick={() => void channels.refetch()}>
+              Retry
+            </button>
+          </p>
+        )}
+        {channels.data !== undefined && channels.data.items.length === 0 && <p>No channels need attention</p>}
+        {channels.data !== undefined && channels.data.items.length > 0 && (
+          <div role="region" aria-label="Channels needing attention table" tabIndex={0}>
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Channel</th>
+                  <th scope="col">Conditions</th>
+                  <th scope="col">Detected</th>
+                  <th scope="col">Guidance</th>
+                </tr>
+              </thead>
+              <tbody>{channels.data.items.map((channel) => <ChannelRow key={channel.channel_id} channel={channel} />)}</tbody>
+            </table>
+          </div>
         )}
       </section>
 
@@ -180,6 +214,38 @@ export function Ops() {
         )}
       </section>
     </section>
+  )
+}
+
+const GAP_COPY = {
+  suspected: 'Possible feed gap awaiting reconciliation',
+  no_anchor: 'Feed gap could not be recovered: no safe anchor',
+  listing_window_exhausted: 'Feed gap may continue beyond the reconciliation window',
+} as const
+
+function ChannelRow({ channel }: { channel: OpsChannelOut }) {
+  const gap = channel.feed_gap_reason
+  return (
+    <tr>
+      <th scope="row">{channel.title ?? channel.channel_id}</th>
+      <td>
+        {channel.poll_failing_since !== null && <p>RSS polling failure ({channel.poll_failures})</p>}
+        {gap !== null && <p>{GAP_COPY[gap]}</p>}
+      </td>
+      <td>
+        {channel.poll_failing_since !== null && <time dateTime={channel.poll_failing_since}>{formatUtc(channel.poll_failing_since)}</time>}
+        {channel.poll_failing_since !== null && channel.feed_gap_detected_at !== null && ' · '}
+        {channel.feed_gap_detected_at !== null && <time dateTime={channel.feed_gap_detected_at}>{formatUtc(channel.feed_gap_detected_at)}</time>}
+      </td>
+      <td>
+        {gap !== null && (
+          <>
+            <p>Run a channel backfill to recover older uploads</p>
+            <code>POST /api/channels/{channel.channel_id}/backfill</code>
+          </>
+        )}
+      </td>
+    </tr>
   )
 }
 

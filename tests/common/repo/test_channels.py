@@ -8,6 +8,7 @@ from typing import Any
 import psycopg
 import pytest
 
+from common.repo import channels as channels_repo
 from common.repo.channels import (
     PollHealth,
     add_channel,
@@ -292,6 +293,113 @@ def test_list_active_channels_fills_the_failure_run(conn: psycopg.Connection) ->
 
     assert channel.poll_failures == 2
     assert channel.poll_failing_since is not None
+
+
+def _gap(conn: psycopg.Connection[Any], channel_id: str = "UC1") -> tuple[Any, Any]:
+    row = conn.execute(
+        "SELECT feed_gap_detected_at, feed_gap_reason FROM channels WHERE channel_id = %s",
+        (channel_id,),
+    ).fetchone()
+    assert row is not None
+    return row[0], row[1]
+
+
+def test_mark_suspected_sets_once_and_repeated_detection_preserves_timestamp(
+    conn: psycopg.Connection[Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("INFO", logger="common.repo.channels")
+    add_channel(conn, "UC1", "One")
+
+    first = channels_repo.mark_feed_gap_suspected(conn, "UC1", source="poll")
+    conn.commit()
+    second = channels_repo.mark_feed_gap_suspected(conn, "UC1", source="poll")
+
+    assert first is not None and second is not None
+    assert first.detected_at == second.detected_at
+    assert _gap(conn) == (first.detected_at, "suspected")
+    transitions = [r.msg for r in caplog.records if isinstance(r.msg, dict) and r.msg.get("event") == "channel.feed_gap_state_changed"]
+    assert transitions == [{
+        "channel_id": "UC1",
+        "previous_reason": None,
+        "reason": "suspected",
+        "source": "poll",
+        "event": "channel.feed_gap_state_changed",
+        "logger": "common.repo.channels",
+        "level": "info",
+        "timestamp": transitions[0]["timestamp"],
+    }]
+
+
+def test_classify_and_clear_only_change_an_existing_marker(
+    conn: psycopg.Connection[Any]
+) -> None:
+    add_channel(conn, "UC1", "One")
+    add_channel(conn, "UC2", "Two")
+    assert channels_repo.set_feed_gap_reason(conn, "UC1", "no_anchor", source="reconcile") is None
+    assert channels_repo.clear_feed_gap(conn, "UC1", source="reconcile") is None
+
+    marked = channels_repo.mark_feed_gap_suspected(conn, "UC2", source="poll")
+    assert marked is not None
+    classified = channels_repo.set_feed_gap_reason(conn, "UC2", "no_anchor", source="reconcile")
+    assert classified is not None
+    assert classified.detected_at == marked.detected_at
+    cleared = channels_repo.clear_feed_gap(conn, "UC2", source="reconcile")
+    assert cleared is not None
+    assert _gap(conn, "UC2") == (None, None)
+
+
+def test_same_reason_is_idempotent_and_emits_no_second_transition(
+    conn: psycopg.Connection[Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    add_channel(conn, "UC1", "One")
+    channels_repo.mark_feed_gap_suspected(conn, "UC1", source="poll")
+    caplog.clear()
+
+    unchanged = channels_repo.set_feed_gap_reason(conn, "UC1", "suspected", source="reconcile")
+
+    assert unchanged is not None
+    assert not [r for r in caplog.records if isinstance(r.msg, dict) and r.msg.get("event") == "channel.feed_gap_state_changed"]
+
+
+def test_ops_channels_filter_and_total_order(conn: psycopg.Connection[Any]) -> None:
+    for channel_id, title in (("UCfail", "Zulu"), ("UCgap2", "Bravo"), ("UCgap1", "Alpha"), ("UCok", None)):
+        add_channel(conn, channel_id, title)
+    conn.execute(
+        "UPDATE channels SET poll_failing_since = '2026-10-03T00:00:00Z', poll_failures = 2, last_poll_err = 'x'"
+        " WHERE channel_id = 'UCfail'"
+    )
+    conn.execute(
+        "UPDATE channels SET feed_gap_detected_at = '2026-10-02T00:00:00Z', feed_gap_reason = 'no_anchor'"
+        " WHERE channel_id = 'UCgap2'"
+    )
+    conn.execute(
+        "UPDATE channels SET feed_gap_detected_at = '2026-10-01T00:00:00Z', feed_gap_reason = 'suspected'"
+        " WHERE channel_id = 'UCgap1'"
+    )
+
+    attention = channels_repo.list_ops_channels(conn, failing=False, attention=True)
+    all_rows = channels_repo.list_ops_channels(conn, failing=False, attention=False)
+    failing = channels_repo.list_ops_channels(conn, failing=True, attention=False)
+
+    assert [row.channel_id for row in attention] == ["UCfail", "UCgap1", "UCgap2"]
+    assert [row.channel_id for row in all_rows] == ["UCfail", "UCgap1", "UCgap2", "UCok"]
+    assert [row.channel_id for row in failing] == ["UCfail"]
+
+
+def test_feed_gap_counts_is_zero_filled_from_one_aggregate(conn: psycopg.Connection[Any]) -> None:
+    assert "conn.execute" in __import__("inspect").getsource(channels_repo.feed_gap_counts)
+    for channel_id, reason in (("UC1", "suspected"), ("UC2", "suspected"), ("UC3", "no_anchor")):
+        add_channel(conn, channel_id, None)
+        conn.execute(
+            "UPDATE channels SET feed_gap_detected_at = now(), feed_gap_reason = %s WHERE channel_id = %s",
+            (reason, channel_id),
+        )
+
+    assert channels_repo.feed_gap_counts(conn) == {
+        "suspected": 2,
+        "no_anchor": 1,
+        "listing_window_exhausted": 0,
+    }
 
 
 # --- list_channels (issue #119) -------------------------------------------------

@@ -5,15 +5,17 @@ import {
   jobsQuery,
   isHealth,
   isJobList,
+  isOpsChannelList,
   retryMessage,
   retryPath,
   type HealthOut,
   type JobListOut,
+  type OpsChannelListOut,
   type OpsFilters,
   type RetryOutcome,
 } from '../lib/ops'
 
-export type { HealthOut, JobListOut, JobOut } from '../lib/ops'
+export type { HealthOut, JobListOut, JobOut, OpsChannelOut } from '../lib/ops'
 
 /** The queue depth is re-read this often while the Ops view is mounted. */
 export const QUEUE_DEPTH_POLL_MS = 15_000
@@ -40,6 +42,19 @@ export function useQueueDepth() {
       return body
     },
     refetchInterval: QUEUE_DEPTH_POLL_MS,
+  })
+}
+
+export function useOpsChannels() {
+  return useQuery({
+    queryKey: ['ops', 'channels', 'attention'],
+    queryFn: async ({ signal }): Promise<OpsChannelListOut> => {
+      const body: unknown = await api
+        .get('/ops/channels', { params: { query: { attention: true } }, signal })
+        .catch((error: unknown) => rethrowHttp(error, (_e, status) => new OpsError(status)))
+      if (!isOpsChannelList(body)) throw new Error('Unexpected response shape')
+      return body
+    },
   })
 }
 

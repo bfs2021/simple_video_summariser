@@ -211,20 +211,32 @@ def test_result_has_exactly_the_synchronous_routes_response_keys(
 
 
 @pytest.mark.usefixtures("small_caps")
-def test_12_new_videos_take_three_runs_of_5_5_2(
+def test_partial_slices_keep_the_gap_until_the_done_slice_clears_it(
     db: psycopg.Connection[Any], settings: Settings
 ) -> None:
+    db.execute(
+        "UPDATE channels SET feed_gap_detected_at = now(), feed_gap_reason = 'suspected' WHERE channel_id = %s",
+        (CHANNEL,),
+    )
     rid = _request(db)
     catalog = FakeCatalog(db, _entries(12))
     per_run: list[int] = []
     states: list[str] = []
+    gap_reasons: list[str | None] = []
     for _ in range(3):
         per_run.append(_run(db, catalog, settings))
         _drain(db)  # the -10 jobs drain between runs
         states.append(_row(db, rid).state)
+        gap_row = db.execute(
+            "SELECT feed_gap_reason FROM channels WHERE channel_id = %s", (CHANNEL,)
+        ).fetchone()
+        db.commit()
+        assert gap_row is not None
+        gap_reasons.append(gap_row[0])
 
     assert per_run == [5, 5, 2]
     assert states == ["running", "running", "done"]
+    assert gap_reasons == ["suspected", "suspected", None]
     row = _row(db, rid)
     assert row.enqueued == 12
     assert _count(db, "videos") == 12 and _count(db, "jobs") == 12
@@ -516,6 +528,10 @@ def test_a_request_cancelled_during_the_listing_stays_cancelled(
 ) -> None:
     from services.api.backfill import cancel_backfill
 
+    db.execute(
+        "UPDATE channels SET feed_gap_detected_at = now(), feed_gap_reason = 'suspected' WHERE channel_id = %s",
+        (CHANNEL,),
+    )
     rid = _request(db)
     catalog = FakeCatalog(db, _entries(3))
 
@@ -530,6 +546,9 @@ def test_a_request_cancelled_during_the_listing_stays_cancelled(
     row = _row(db, rid)
     assert (row.state, row.error_class) == ("failed", CANCELLED)
     assert row.enqueued == 0 and row.result is None
+    assert db.execute(
+        "SELECT feed_gap_reason FROM channels WHERE channel_id = %s", (CHANNEL,)
+    ).fetchone() == ("suspected",)
 
 
 def test_one_info_line_per_run_without_titles(

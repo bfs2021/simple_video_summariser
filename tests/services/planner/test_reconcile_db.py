@@ -279,11 +279,9 @@ def test_an_insert_that_fails_after_the_row_leaves_neither_row_nor_job(
     assert _jobs(conn) == []
 
 
-def test_a_failure_on_a_later_video_keeps_the_earlier_one_committed(
+def test_a_failure_on_a_later_video_rolls_back_all_channel_writes(
     conn: psycopg.Connection[Any],
 ) -> None:
-    # One transaction per video: e1 is durable even though e2's job write blows up and
-    # the channel as a whole is reported failed.
     _channel(conn)
     _known(conn, _e(3))
     real = _queue(conn)
@@ -298,12 +296,12 @@ def test_a_failure_on_a_later_video_keeps_the_earlier_one_committed(
     catalog.conn = conn
     result = reconcile_channels(conn, catalog, FailsOnSecond(), clock=lambda: 0.0)  # type: ignore[arg-type]
 
-    conn.rollback()  # whatever the pass left open must not be what makes e1 durable
-    assert result.channels_failed == 1 and result.videos_recovered == 1
+    conn.rollback()
+    assert result.channels_failed == 1 and result.videos_recovered == 0
     assert conn.execute(
         "SELECT video_id FROM videos WHERE origin = 'rss' AND published_at IS NULL"
-    ).fetchall() == [(_e(1).video_id,)]
-    assert [row[0] for row in _jobs(conn)] == [_e(1).video_id]
+    ).fetchall() == []
+    assert _jobs(conn) == []
 
 
 def test_recovering_a_video_leaves_the_channel_row_active(

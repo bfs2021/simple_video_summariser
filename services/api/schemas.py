@@ -338,6 +338,20 @@ def analysis_out(run: AnalysisRun) -> AnalysisOut:
     )
 
 
+class OpsChannelOut(BaseModel):
+    channel_id: str
+    title: str | None
+    poll_failing_since: UtcDatetime | None
+    poll_failures: int
+    last_poll_err: str | None
+    feed_gap_detected_at: UtcDatetime | None
+    feed_gap_reason: Literal["suspected", "no_anchor", "listing_window_exhausted"] | None
+
+
+class OpsChannelListOut(BaseModel):
+    items: list[OpsChannelOut]
+
+
 class JobOut(BaseModel):
     """One ``jobs`` row for the Ops view (#44). ``payload`` is never exposed."""
 

@@ -64,6 +64,8 @@ class FakeConn:
 
     def fetchone(self) -> tuple[Any, ...] | None:
         q = self._current
+        if "feed_gap_reason = 'suspected'" in q:
+            return (2, 1, 0)
         if "jsonb_typeof" in q:
             return (0.25,)
         if "SUM(cost_usd)" in q:
@@ -99,6 +101,10 @@ def test_metrics_answers_200_with_the_text_format_content_type(app: FastAPI) -> 
     body = response.text
     assert 'queue_depth{kind="ingest",state="pending"} 2' in body
     assert 'queue_depth{kind="other",state="pending"} 3' in body
+    assert 'feed_gap_channels{reason="suspected"} 2' in body
+    assert 'feed_gap_channels{reason="no_anchor"} 1' in body
+    assert 'feed_gap_channels{reason="listing_window_exhausted"} 0' in body
+    assert "channel_id" not in body
     assert 'job_duration_seconds_count{kind="analyze"} 1' in body
     assert "whisper_rtf 0.25\n" in body
     assert 'llm_tokens_total{model="evil\\"model\\nx",direction="output"} 20' in body
@@ -110,6 +116,7 @@ def test_metrics_answers_200_with_the_text_format_content_type(app: FastAPI) -> 
 
 _FAMILIES = (
     "queue_depth",
+    "feed_gap_channels",
     "job_duration_seconds",
     "whisper_rtf",
     "llm_tokens_total",
@@ -164,7 +171,7 @@ def test_one_statement_per_family_in_one_read_only_repeatable_read_transaction(
 
     _get(app)
 
-    assert len(conn.queries) == 9
+    assert len(conn.queries) == 10
     assert conn.read_only is True
     assert conn.isolation_level == psycopg.IsolationLevel.REPEATABLE_READ
     assert conn.rollbacks == 1
@@ -194,7 +201,7 @@ def test_the_backlog_uses_the_configured_prompt_version(
     ],
     ids=["down", "timeout", "erroring", "unexpected"],
 )
-@pytest.mark.parametrize("fail_on", [1, 5, 8])
+@pytest.mark.parametrize("fail_on", [1, 2, 6, 9])
 def test_a_database_failure_gives_a_fixed_503_and_no_partial_metrics(
     app: FastAPI, logs: LogSink, error: Exception, fail_on: int
 ) -> None:
