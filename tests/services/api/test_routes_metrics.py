@@ -171,7 +171,7 @@ def test_one_statement_per_family_in_one_read_only_repeatable_read_transaction(
 
     _get(app)
 
-    assert len(conn.queries) == 9
+    assert len(conn.queries) == 10
     assert conn.read_only is True
     assert conn.isolation_level == psycopg.IsolationLevel.REPEATABLE_READ
     assert conn.rollbacks == 1
