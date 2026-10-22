@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import os
+import select
+import shutil
 import signal
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -22,6 +25,39 @@ GOOD_ENV = (
     "SUMMARIZER=ollama\n"
 )
 
+EGRESS_HOSTS = (
+    "www.youtube.com",
+    "rr1---sn.example.googlevideo.com",
+    "huggingface.co",
+    "cdn-lfs.huggingface.co",
+    "pypi.org",
+    "files.pythonhosted.org",
+    "deb.debian.org",
+    "registry.npmjs.org",
+    "registry-1.docker.io",
+)
+
+STUB_KEYS = (
+    "STUB_COMPOSE_CONFIG",
+    "STUB_COMPOSE_CONFIG_RC",
+    "STUB_COMPOSE_VERSION",
+    "STUB_CONTAINER_OUT",
+    "STUB_CONTAINER_RC",
+    "STUB_DF_FREE_KB",
+    "STUB_DOCKER_GROUP",
+    "STUB_DOCKER_LOG",
+    "STUB_DOCKER_ROOT",
+    "STUB_DOCKER_SERVER_VERSION",
+    "STUB_HTTP_ERROR_HOST",
+    "STUB_NETWORK_CREATE_RC",
+    "STUB_NPROC",
+    "STUB_NTP",
+    "STUB_READY_FD",
+    "STUB_RELEASE_FD",
+    "STUB_SS",
+    "STUB_SYSTEMCTL",
+)
+
 PASS_STUBS = {
     "STUB_DOCKER_SERVER_VERSION": "29.1.2",
     "STUB_COMPOSE_VERSION": "2.40.3",
@@ -34,12 +70,8 @@ PASS_STUBS = {
     "STUB_NTP": "yes",
     "STUB_SS": "LISTEN 0 4096 172.17.0.1:11434 0.0.0.0:*",
     "STUB_DOCKER_GROUP": "docker:x:999:deploy",
-    "STUB_CONTAINER_OUT": (
-        "OLLAMA\t200\tqwen3.5:4b\n"
-        "EGRESS\twww.youtube.com\tOK\n"
-        "EGRESS\thuggingface.co\tOK\n"
-        "EGRESS\tpypi.org\tOK\n"
-    ),
+    "STUB_CONTAINER_OUT": "OLLAMA\t200\tqwen3.5:4b\n"
+    + "".join(f"EGRESS\t{host}\tOK\n" for host in EGRESS_HOSTS),
 }
 
 _DOCKER_STUB = r"""#!/usr/bin/env bash
@@ -59,10 +91,33 @@ case "$1 ${2:-}" in
   "network rm"*) exit 0 ;;
   "rm "*) exit 0 ;;
   "run "*)
-    if [ -n "${STUB_DOCKER_RUN_SIGNAL:-}" ]; then
-      kill -s "$STUB_DOCKER_RUN_SIGNAL" "$PREFLIGHT_SCRIPT_PID"
+    if [ -n "${STUB_READY_FD:-}" ]; then
+      printf 'ready\n' >&"$STUB_READY_FD"
+      read -r _ <&"$STUB_RELEASE_FD"
     fi
-    printf '%b' "${STUB_CONTAINER_OUT:-}"
+    if [ -n "${STUB_HTTP_ERROR_HOST:-}" ]; then
+      for arg in "$@"; do
+        case "$arg" in PREFLIGHT_*=*) export "$arg" ;; esac
+      done
+      probe="${!#}"
+      PREFLIGHT_PROBE="$probe" python -c 'import io,json,os,urllib.error,urllib.request
+class Response:
+ def __init__(self,url): self.status=200; self.url=url
+ def __enter__(self): return self
+ def __exit__(self,*args): return False
+ def read(self,*args): return b"{}"
+def urlopen(url,timeout):
+ if os.environ["STUB_HTTP_ERROR_HOST"] in url:
+  raise urllib.error.HTTPError(url,401,"unauthorized",{},io.BytesIO())
+ response=Response(url)
+ if "api/tags" in url:
+  response.read=lambda *args: json.dumps({"models":[{"model":"qwen3.5:4b"}]}).encode()
+ return response
+urllib.request.urlopen=urlopen
+exec(os.environ["PREFLIGHT_PROBE"])'
+    else
+      printf '%b' "${STUB_CONTAINER_OUT:-}"
+    fi
     exit "${STUB_CONTAINER_RC:-0}" ;;
   *) exit 99 ;;
 esac
@@ -100,18 +155,35 @@ class RunFn(Protocol):
         env_mode: int = ...,
         write_env: bool = ...,
         args: list[str] | None = ...,
+        interrupt: signal.Signals | None = ...,
     ) -> Result: ...
 
 
 @pytest.fixture
 def run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RunFn:
+    for key in STUB_KEYS + (
+        "ENV_FILE",
+        "PREFLIGHT_MEMINFO",
+        "MIN_FREE_GB",
+        "MIN_MEM_GB",
+        "MIN_DOCKER_VERSION",
+        "MIN_COMPOSE_VERSION",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
     bindir = tmp_path / "bin"
     bindir.mkdir()
     for name, body in _STUBS.items():
         path = bindir / name
         path.write_text(body)
         path.chmod(0o755)
-    monkeypatch.setenv("PATH", str(bindir), prepend=os.pathsep)
+    for name in ("awk", "bash", "cat", "cut", "grep", "sed", "stat", "tail", "tr"):
+        source = shutil.which(name)
+        assert source is not None
+        (bindir / name).symlink_to(source)
+    (bindir / "python").symlink_to(sys.executable)
+    monkeypatch.setenv("PATH", str(bindir))
+    monkeypatch.setenv("ENV_FILE", ".env")
 
     checkout = tmp_path / "checkout"
     checkout.mkdir()
@@ -126,7 +198,11 @@ def run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RunFn:
         env_mode: int = 0o600,
         write_env: bool = True,
         args: list[str] | None = None,
+        interrupt: signal.Signals | None = None,
     ) -> Result:
+        for key in STUB_KEYS:
+            monkeypatch.delenv(key, raising=False)
+        monkeypatch.setenv("ENV_FILE", ".env")
         merged = {**PASS_STUBS, **(stubs or {})}
         for key, value in merged.items():
             monkeypatch.setenv(key, value)
@@ -150,23 +226,52 @@ def run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RunFn:
         elif env_file.exists():
             env_file.unlink()
 
-        proc = subprocess.run(
-            ["bash", str(SCRIPT), *(args or [])],
-            cwd=checkout,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        command = [str(bindir / "bash"), str(SCRIPT), *(args or [])]
+        if interrupt is None:
+            completed = subprocess.run(
+                command,
+                cwd=checkout,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return_code = completed.returncode
+            stdout = completed.stdout
+            stderr = completed.stderr
+        else:
+            ready_read, ready_write = os.pipe()
+            release_read, release_write = os.pipe()
+            monkeypatch.setenv("STUB_READY_FD", str(ready_write))
+            monkeypatch.setenv("STUB_RELEASE_FD", str(release_read))
+            proc = subprocess.Popen(
+                command,
+                cwd=checkout,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                pass_fds=(ready_write, release_read),
+            )
+            os.close(ready_write)
+            os.close(release_read)
+            readable, _, _ = select.select([ready_read], [], [], 5)
+            assert readable, "docker run did not reach the blocking stub"
+            assert os.read(ready_read, 6) == b"ready\n"
+            proc.send_signal(interrupt)
+            os.close(release_write)
+            stdout, stderr = proc.communicate(timeout=5)
+            return_code = proc.returncode
+            os.close(ready_read)
+
         lines: dict[str, tuple[str, str]] = {}
-        for line in proc.stdout.splitlines():
+        for line in stdout.splitlines():
             parts = line.split(None, 1)
             if parts and parts[0] in {"PASS", "WARN", "FAIL"}:
                 check, _, detail = (parts[1] if len(parts) > 1 else "").partition(":")
                 lines[check.strip()] = (parts[0], detail.strip())
         return Result(
-            code=proc.returncode,
+            code=return_code,
             lines=lines,
-            raw=proc.stdout + proc.stderr,
+            raw=stdout + stderr,
             docker_calls=docker_log.read_text().splitlines(),
         )
 
@@ -204,6 +309,18 @@ def test_help_lists_all_checks_and_external_inputs(run: RunFn) -> None:
 
 def test_unknown_flag_is_usage_error(run: RunFn) -> None:
     assert run(args=["--nope"]).code == 2
+
+
+def test_each_run_overrides_ambient_env_file_and_stub_values(
+    run: RunFn, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    ambient = tmp_path / "ambient.env"
+    ambient.write_text("COMPOSE_FILE=wrong.yml\nPOSTGRES_PASSWORD=ambient\n")
+    monkeypatch.setenv("ENV_FILE", str(ambient))
+    monkeypatch.setenv("STUB_SYSTEMCTL", "disabled")
+    result = run()
+    assert result.status("env-file") == "PASS"
+    assert result.status("docker-boot") == "PASS"
 
 
 def test_all_pass_exits_zero_and_reports_thirteen_checks(run: RunFn) -> None:
@@ -340,6 +457,7 @@ def test_ollama_from_container(run: RunFn, container_output: str, expected: str)
         ("LISTEN 0 4096 172.17.0.1:11434 0.0.0.0:*", "PASS"),
         ("LISTEN 0 4096 0.0.0.0:11434 0.0.0.0:*", "WARN"),
         ("LISTEN 0 4096 [::]:11434 [::]:*", "WARN"),
+        ("LISTEN 0 4096 *:11434 *:*", "WARN"),
         ("", "FAIL"),
     ],
 )
@@ -347,15 +465,14 @@ def test_ollama_bind(run: RunFn, listening: str, expected: str) -> None:
     assert run(stubs={"STUB_SS": listening}).status("ollama-bind") == expected
 
 
-def test_egress_passes_for_required_hosts(run: RunFn) -> None:
+def test_egress_passes_for_all_documented_destinations(run: RunFn) -> None:
     result = run()
     assert result.status("egress") == "PASS"
-    assert "www.youtube.com" in result.lines["egress"][1]
-    assert "huggingface.co" in result.lines["egress"][1]
-    assert "pypi.org" in result.lines["egress"][1]
+    for host in EGRESS_HOSTS:
+        assert host in result.lines["egress"][1]
 
 
-@pytest.mark.parametrize("host", ["www.youtube.com", "huggingface.co", "pypi.org"])
+@pytest.mark.parametrize("host", EGRESS_HOSTS)
 def test_egress_failure_names_host(run: RunFn, host: str) -> None:
     output = PASS_STUBS["STUB_CONTAINER_OUT"].replace(f"EGRESS\t{host}\tOK", f"EGRESS\t{host}\tFAIL")
     result = run(stubs={"STUB_CONTAINER_OUT": output})
@@ -374,10 +491,20 @@ def test_anthropic_egress_is_conditional(run: RunFn) -> None:
     assert present.status("egress") == "PASS"
 
 
-def test_container_checks_use_one_network_and_one_container(run: RunFn) -> None:
+def test_http_error_proves_egress_reachability(run: RunFn) -> None:
+    env_text = GOOD_ENV.replace("SUMMARIZER=ollama", "SUMMARIZER=anthropic")
+    result = run(env_text=env_text, stubs={"STUB_HTTP_ERROR_HOST": "api.anthropic.com"})
+    assert result.status("egress") == "PASS", result.raw
+    assert "api.anthropic.com" in result.lines["egress"][1]
+
+
+def test_container_checks_use_one_network_and_one_container_without_pull(run: RunFn) -> None:
     result = run()
     assert sum(call.startswith("network create ") for call in result.docker_calls) == 1
-    assert sum(call.startswith("run ") for call in result.docker_calls) == 1
+    runs = [call for call in result.docker_calls if call.startswith("run ")]
+    assert len(runs) == 1
+    assert "--pull=never" in runs[0]
+    assert "--network ytdigest-preflight-net-" in runs[0]
 
 
 def test_docker_group_always_passes_and_lists_members(run: RunFn) -> None:
@@ -400,9 +527,11 @@ def test_cleanup_records_container_and_network_removal(run: RunFn, stubs: dict[s
     assert any(call.startswith("network rm ytdigest-preflight-net-") for call in calls)
 
 
-@pytest.mark.parametrize(("name", "number"), [("INT", signal.SIGINT), ("TERM", signal.SIGTERM)])
-def test_cleanup_runs_when_interrupted(run: RunFn, name: str, number: signal.Signals) -> None:
-    result = run(stubs={"STUB_DOCKER_RUN_SIGNAL": name})
+@pytest.mark.parametrize("number", [signal.SIGINT, signal.SIGTERM])
+def test_cleanup_runs_when_externally_interrupted_during_blocked_docker_run(
+    run: RunFn, number: signal.Signals
+) -> None:
+    result = run(interrupt=number)
     assert result.code == 128 + number
     assert any(call.startswith("rm -f ytdigest-preflight-") for call in result.docker_calls)
     assert any(call.startswith("network rm ytdigest-preflight-net-") for call in result.docker_calls)

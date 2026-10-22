@@ -246,7 +246,7 @@ check_ollama_bind() {
 	listeners="$(ss -ltnH 2>/dev/null | awk '$4 ~ /:11434$/ {print $4}')"
 	if [ -z "$listeners" ]; then
 		fail ollama-bind "nothing listens on port 11434"
-	elif grep -Eq '(^|\[)(0\.0\.0\.0|::)(\]|):11434$' <<<"$listeners"; then
+	elif grep -Eq '^(0\.0\.0\.0|\[::\]|\*):11434$' <<<"$listeners"; then
 		warn ollama-bind "wildcard listener; verify the runbook firewall rules"
 	else
 		pass ollama-bind "listener is not wildcard: $(tr '\n' ',' <<<"$listeners" | sed 's/,$//')"
@@ -260,28 +260,30 @@ run_container_checks() {
 	model="$(env_get OLLAMA_MODEL)"
 	model="${model:-qwen3.5:4b}"
 	summarizer="$(env_get SUMMARIZER)"
-	hosts="www.youtube.com,huggingface.co,pypi.org"
+	hosts="www.youtube.com,rr1---sn.example.googlevideo.com,huggingface.co,cdn-lfs.huggingface.co,pypi.org,files.pythonhosted.org,deb.debian.org,registry.npmjs.org,registry-1.docker.io"
 	[ "$summarizer" = anthropic ] && hosts="$hosts,api.anthropic.com"
 	if ! docker network create "$net" >/dev/null 2>&1; then
 		fail ollama-from-container "could not create throwaway network"
 		fail egress "could not create throwaway network"
 		return
 	fi
-	py='import json,os,urllib.request
+	py='import json,os,urllib.error,urllib.request
 model=os.environ["PREFLIGHT_OLLAMA_MODEL"]
 hosts=os.environ["PREFLIGHT_EGRESS_HOSTS"].split(",")
 try:
  with urllib.request.urlopen("http://host.docker.internal:11434/api/tags",timeout=10) as r:
-  data=json.load(r); print("OLLAMA\\t%s\\t%s"%(r.status,",".join(x.get("model","") for x in data.get("models",[]))))
+  data=json.load(r); print("OLLAMA\t%s\t%s"%(r.status,",".join(x.get("model","") for x in data.get("models",[]))))
 except Exception:
- print("OLLAMA\\tERR\\t")
+ print("OLLAMA\tERR\t")
 for host in hosts:
  try:
   with urllib.request.urlopen("https://"+host,timeout=10) as r: r.read(1)
-  print("EGRESS\\t%s\\tOK"%host)
+  print("EGRESS\t%s\tOK"%host)
+ except urllib.error.HTTPError:
+  print("EGRESS\t%s\tOK"%host)
  except Exception:
-  print("EGRESS\\t%s\\tFAIL"%host)'
-	container_output="$(PREFLIGHT_SCRIPT_PID="$$" docker run --rm --name "$cname" --network "$net" --add-host host.docker.internal:host-gateway -e "PREFLIGHT_OLLAMA_MODEL=$model" -e "PREFLIGHT_EGRESS_HOSTS=$hosts" python:3.14-slim python -c "$py" 2>/dev/null)" || true
+  print("EGRESS\t%s\tFAIL"%host)'
+	container_output="$(docker run --pull=never --rm --name "$cname" --network "$net" --add-host host.docker.internal:host-gateway -e "PREFLIGHT_OLLAMA_MODEL=$model" -e "PREFLIGHT_EGRESS_HOSTS=$hosts" python:3.14-slim python -c "$py" 2>/dev/null)" || true
 	container_ready=1
 }
 
@@ -305,7 +307,7 @@ check_ollama_from_container() {
 check_egress() {
 	local summarizer hosts host failures=""
 	summarizer="$(env_get SUMMARIZER)"
-	hosts="www.youtube.com huggingface.co pypi.org"
+	hosts="www.youtube.com rr1---sn.example.googlevideo.com huggingface.co cdn-lfs.huggingface.co pypi.org files.pythonhosted.org deb.debian.org registry.npmjs.org registry-1.docker.io"
 	[ "$summarizer" = anthropic ] && hosts="$hosts api.anthropic.com"
 	[ "$container_ready" = 1 ] || return
 	for host in $hosts; do
