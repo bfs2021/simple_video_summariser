@@ -180,7 +180,7 @@ Config = dict[str, dict[str, object]]
 SOURCE_DIRS = ("common", "adapters", "services")
 # The web files the dev overlay binds (read-only) into /home/node/app.
 WEB_SOURCE_FILES = (
-    "src", "index.html", "package.json", "package-lock.json", "tsconfig.json",
+    "src", "index.html", "index.css", "package.json", "package-lock.json", "tsconfig.json",
     "vite.config.ts",
 )  # fmt: skip
 BACKEND_SERVICES = ("api", "planner", "analyzer", "transcriber")
