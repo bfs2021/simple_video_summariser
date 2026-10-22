@@ -425,6 +425,17 @@ def test_env_file_rejects_invalid_settings(run: RunFn, env_text: str) -> None:
     assert run(env_text=env_text).status("env-file") == "FAIL"
 
 
+def test_env_file_emits_one_redacted_failure_after_validating_all_subconditions(run: RunFn) -> None:
+    env_text = "POSTGRES_PASSWORD=SECRET!\nTRANSCRIBER_CPUS=3.0\n"
+    result = run(env_text=env_text, env_mode=0o640)
+    lines = [line for line in result.raw.splitlines() if line.startswith("FAIL env-file:")]
+    assert len(lines) == 1
+    assert "mode" in lines[0]
+    assert "COMPOSE_FILE" in lines[0]
+    assert "POSTGRES_PASSWORD" in lines[0]
+    assert "SECRET" not in result.raw
+
+
 @pytest.mark.parametrize(
     ("config", "return_code", "expected"),
     [

@@ -206,26 +206,26 @@ check_env_file() {
 		fail env-file "$ENV_FILE not found"
 		return
 	fi
-	local mode password compose_file ok=1
+	local mode password compose_file reasons=""
 	mode="$(stat -c '%a' "$ENV_FILE" 2>/dev/null)"
 	if [ "$mode" != 600 ]; then
-		fail env-file "$ENV_FILE mode is ${mode:-unknown}, must be 600"
-		ok=0
+		reasons="$ENV_FILE mode is ${mode:-unknown}, must be 600"
 	fi
 	compose_file="$(env_get COMPOSE_FILE)"
 	if [ "$compose_file" != compose.yml ]; then
-		fail env-file "COMPOSE_FILE must be compose.yml"
-		ok=0
+		reasons="${reasons}${reasons:+; }COMPOSE_FILE must be compose.yml"
 	fi
 	password="$(env_get POSTGRES_PASSWORD)"
 	if [ -z "$password" ]; then
-		fail env-file "POSTGRES_PASSWORD is empty"
-		ok=0
+		reasons="${reasons}${reasons:+; }POSTGRES_PASSWORD is empty"
 	elif ! [[ $password =~ ^[A-Za-z0-9_-]+$ ]]; then
-		fail env-file "POSTGRES_PASSWORD contains invalid characters"
-		ok=0
+		reasons="${reasons}${reasons:+; }POSTGRES_PASSWORD contains invalid characters"
 	fi
-	[ "$ok" = 1 ] && pass env-file "mode 600 and production settings valid"
+	if [ -n "$reasons" ]; then
+		fail env-file "$reasons"
+	else
+		pass env-file "mode 600 and production settings valid"
+	fi
 }
 
 check_compose_config() {
