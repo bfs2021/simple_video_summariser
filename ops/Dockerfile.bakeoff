@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Harness interpreter: stdlib plus yt-dlp, the same pin as requirements.backend.txt.
 RUN python -m venv /opt/venv && \
-    /opt/venv/bin/pip install --only-binary :all: 'yt-dlp==2026.8.19'
+    /opt/venv/bin/pip install --only-binary :all: 'yt-dlp==2026.10.21'
 
 RUN useradd -r -u 10001 -m app && mkdir -p /work && chown app:app /work
 WORKDIR /app
