@@ -260,7 +260,7 @@ run_container_checks() {
 	model="$(env_get OLLAMA_MODEL)"
 	model="${model:-qwen3.5:4b}"
 	summarizer="$(env_get SUMMARIZER)"
-	hosts="www.youtube.com,rr1---sn.example.googlevideo.com,huggingface.co,cdn-lfs.huggingface.co,pypi.org,files.pythonhosted.org,deb.debian.org,registry.npmjs.org,registry-1.docker.io"
+	hosts="www.youtube.com,redirector.googlevideo.com,huggingface.co,cdn-lfs.huggingface.co,pypi.org,files.pythonhosted.org,deb.debian.org,registry.npmjs.org,registry-1.docker.io"
 	[ "$summarizer" = anthropic ] && hosts="$hosts,api.anthropic.com"
 	if ! docker network create "$net" >/dev/null 2>&1; then
 		fail ollama-from-container "could not create throwaway network"
@@ -307,7 +307,7 @@ check_ollama_from_container() {
 check_egress() {
 	local summarizer hosts host failures=""
 	summarizer="$(env_get SUMMARIZER)"
-	hosts="www.youtube.com rr1---sn.example.googlevideo.com huggingface.co cdn-lfs.huggingface.co pypi.org files.pythonhosted.org deb.debian.org registry.npmjs.org registry-1.docker.io"
+	hosts="www.youtube.com redirector.googlevideo.com huggingface.co cdn-lfs.huggingface.co pypi.org files.pythonhosted.org deb.debian.org registry.npmjs.org registry-1.docker.io"
 	[ "$summarizer" = anthropic ] && hosts="$hosts api.anthropic.com"
 	[ "$container_ready" = 1 ] || return
 	for host in $hosts; do

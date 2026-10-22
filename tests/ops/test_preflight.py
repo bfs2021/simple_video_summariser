@@ -27,7 +27,7 @@ GOOD_ENV = (
 
 EGRESS_HOSTS = (
     "www.youtube.com",
-    "rr1---sn.example.googlevideo.com",
+    "redirector.googlevideo.com",
     "huggingface.co",
     "cdn-lfs.huggingface.co",
     "pypi.org",
@@ -470,6 +470,13 @@ def test_egress_passes_for_all_documented_destinations(run: RunFn) -> None:
     assert result.status("egress") == "PASS"
     for host in EGRESS_HOSTS:
         assert host in result.lines["egress"][1]
+
+
+def test_googlevideo_probe_uses_stable_real_subdomain_in_container_invocation(run: RunFn) -> None:
+    result = run()
+    docker_run = next(call for call in result.docker_calls if call.startswith("run "))
+    assert "redirector.googlevideo.com" in docker_run
+    assert ".example.googlevideo.com" not in docker_run
 
 
 @pytest.mark.parametrize("host", EGRESS_HOSTS)
