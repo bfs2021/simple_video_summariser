@@ -25,14 +25,27 @@ from __future__ import annotations
 
 import math
 import unicodedata
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+
+from common.repo.planner_runs import PlannerTaskRun
 
 CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
 
 KINDS: tuple[str, ...] = ("ingest", "transcribe", "analyze")
 STATES: tuple[str, ...] = ("pending", "running", "done", "dead")
 OTHER = "other"
+PLANNER_TASKS: tuple[str, ...] = (
+    "reap",
+    "auto_caption_fallback",
+    "audio_retention",
+    "stale_analyze",
+    "reanalysis_sweep",
+    "poll_channels",
+    "reconcile_channels",
+    "channel_backfill",
+    "dead_letter_alerts",
+)
 
 #: Upper bounds in seconds, ``le`` of ``job_duration_seconds`` (``+Inf`` is implicit).
 DURATION_BUCKETS: tuple[int, ...] = (1, 5, 15, 60, 300, 900, 1800, 3600, 7200, 14400)
@@ -71,6 +84,7 @@ class MetricsSnapshot:
     speaker_coercions: int
     audio_bytes: int
     reanalysis_backlog: int
+    planner_task_runs: Sequence[PlannerTaskRun] = ()
 
 
 def sanitize_label_value(value: str) -> str:
@@ -196,6 +210,20 @@ def _token_samples(usage: Mapping[str, tuple[int, int]]) -> list[str]:
     return lines
 
 
+def _completed_planner_runs(runs: Sequence[PlannerTaskRun]) -> list[PlannerTaskRun]:
+    allowed = frozenset(PLANNER_TASKS)
+    return sorted(
+        (
+            run
+            for run in runs
+            if run.task_name in allowed
+            and run.last_finished_at is not None
+            and run.last_outcome in ("ok", "failed")
+        ),
+        key=lambda run: run.task_name,
+    )
+
+
 def render(snapshot: MetricsSnapshot) -> str:
     """The full ``/metrics`` body. Same snapshot, same bytes."""
     lines: list[str] = []
@@ -251,5 +279,40 @@ def render(snapshot: MetricsSnapshot) -> str:
         "gauge",
         "Videos with a transcript but no analysis at the configured PROMPT_VERSION.",
         [_sample("reanalysis_backlog_videos", (), snapshot.reanalysis_backlog)],
+    )
+    completed = _completed_planner_runs(snapshot.planner_task_runs)
+    reap = next((run for run in completed if run.task_name == "reap"), None)
+    lines += _family(
+        "reaped_jobs_total",
+        "counter",
+        "Stale running jobs returned to pending or moved to dead by completed reaper runs.",
+        [] if reap is None or reap.last_ok_at is None else [_sample("reaped_jobs_total", (), reap.cumulative_count)],
+    )
+    lines += _family(
+        "planner_task_last_run_timestamp_seconds",
+        "gauge",
+        "Unix timestamp when the planner task most recently completed, by task.",
+        [
+            _sample(
+                "planner_task_last_run_timestamp_seconds",
+                (("task", run.task_name),),
+                run.last_finished_at.timestamp(),
+            )
+            for run in completed
+            if run.last_finished_at is not None
+        ],
+    )
+    lines += _family(
+        "planner_task_last_success",
+        "gauge",
+        "Whether the planner task's most recently completed run succeeded (1) or failed (0).",
+        [
+            _sample(
+                "planner_task_last_success",
+                (("task", run.task_name),),
+                1 if run.last_outcome == "ok" else 0,
+            )
+            for run in completed
+        ],
     )
     return "\n".join(lines) + "\n"

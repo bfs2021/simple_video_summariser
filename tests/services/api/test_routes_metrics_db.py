@@ -9,15 +9,22 @@ from __future__ import annotations
 import re
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
-from common.config import get_settings
+from common.config import Settings, get_settings
 from services.api import routes_ops
 from services.api.main import create_app
+from services.planner.main import (
+    PostgresAdvisoryLocks,
+    PostgresRunRecorder,
+    build_registry,
+)
+from services.planner.scheduler import Scheduler
 from tests.services.api.conftest import LogSink
 
 pytestmark = pytest.mark.integration
@@ -167,6 +174,45 @@ def test_every_metric_is_derived_from_the_seeded_rows(
         assert marker not in body.replace("# ", ""), marker
     label_keys = set(re.findall(r"[{,]([a-z]+)=", body))
     assert label_keys == {"kind", "state", "model", "direction", "le"}
+
+
+def test_registered_reaper_run_is_persisted_and_scraped(
+    api: TestClient,
+    db: psycopg.Connection[Any],
+    head_dsn: str,
+    tmp_path: Path,
+) -> None:
+    db.execute("INSERT INTO videos (video_id) VALUES ('stale-job')")
+    db.execute(
+        "INSERT INTO jobs (video_id, kind, state, dedupe_key, attempts, locked_by, locked_at, heartbeat_at) "
+        "VALUES ('stale-job', 'ingest', 'running', 'default', 1, 'lost', now() - interval '10 minutes', "
+        "now() - interval '10 minutes')"
+    )
+    settings = Settings(DATABASE_URL=head_dsn, AUDIO_DIR=tmp_path, REAP_AFTER_SEC=300)  # type: ignore[arg-type]
+    connect = lambda: psycopg.connect(head_dsn)
+    reap_task = build_registry(settings, connect)[0]
+    locks = PostgresAdvisoryLocks(connect)
+    recorder = PostgresRunRecorder(connect)
+    scheduler = Scheduler(
+        [reap_task],
+        locks,
+        recorder=recorder,
+        sleep=lambda _seconds: None,
+        install_signal_handlers=False,
+    )
+    try:
+        assert scheduler.run_once() is True
+        first = api.get("/metrics").text
+        assert _sample(first, "reaped_jobs_total") == "1"
+        assert _sample(first, 'planner_task_last_success{task="reap"}') == "1"
+        float(_sample(first, 'planner_task_last_run_timestamp_seconds{task="reap"}'))
+
+        assert scheduler.run_once() is True
+        second = api.get("/metrics").text
+        assert _sample(second, "reaped_jobs_total") == "1"
+    finally:
+        recorder.close()
+        locks.close()
 
 
 def test_two_scrapes_of_an_unchanged_database_are_byte_identical(

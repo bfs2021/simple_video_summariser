@@ -74,7 +74,9 @@ def test_run_once_leaves_one_exact_row_per_task(parts, head_dsn: str) -> None:  
         rows = planner_runs.list_task_runs(conn)
     s = timedelta(seconds=1)
     assert rows == [
-        planner_runs.PlannerTaskRun("audio_retention", 60.0, T0, T0 + s, "ok", None, 3, T0 + s, None),
+        planner_runs.PlannerTaskRun(
+            "audio_retention", 60.0, T0, T0 + s, "ok", None, 3, T0 + s, None, 3
+        ),
         planner_runs.PlannerTaskRun(
             "poll_channels", 90.0, T0 + 2 * s, T0 + 3 * s, "ok", None, None, T0 + 3 * s, None
         ),

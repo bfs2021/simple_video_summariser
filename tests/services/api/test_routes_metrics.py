@@ -58,6 +58,8 @@ class FakeConn:
             return [("analyze", *(1,) * len(DURATION_BUCKETS), 1, 12.5)]
         if "GROUP BY model" in q:
             return [('evil"model\nx', 10, 20)]
+        if "FROM planner_task_runs" in q:
+            return []
         raise AssertionError(f"unexpected fetchall for {q!r}")
 
     def fetchone(self) -> tuple[Any, ...] | None:
@@ -115,6 +117,9 @@ _FAMILIES = (
     "speaker_coercions_total",
     "audio_bytes_used",
     "reanalysis_backlog_videos",
+    "reaped_jobs_total",
+    "planner_task_last_run_timestamp_seconds",
+    "planner_task_last_success",
 )
 
 
@@ -159,7 +164,7 @@ def test_one_statement_per_family_in_one_read_only_repeatable_read_transaction(
 
     _get(app)
 
-    assert len(conn.queries) == 8
+    assert len(conn.queries) == 9
     assert conn.read_only is True
     assert conn.isolation_level == psycopg.IsolationLevel.REPEATABLE_READ
     assert conn.rollbacks == 1

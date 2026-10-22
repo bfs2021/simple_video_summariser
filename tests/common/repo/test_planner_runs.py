@@ -83,6 +83,55 @@ def test_failed_then_ok_clears_the_error_and_moves_last_ok_at(conn: psycopg.Conn
     assert (row.last_error, row.last_ok_at, row.last_outcome) == (None, later, "ok")
 
 
+def test_successful_non_null_counts_accumulate_atomically(conn: psycopg.Connection) -> None:
+    planner_runs.record_finished(
+        conn, "reap", interval_sec=60, at=T0, outcome="ok", error=None, count=2
+    )
+    planner_runs.record_finished(
+        conn,
+        "reap",
+        interval_sec=60,
+        at=T0 + timedelta(minutes=1),
+        outcome="ok",
+        error=None,
+        count=3,
+    )
+
+    row = _one(conn, "reap")
+    assert row.last_count == 3
+    assert row.cumulative_count == 5
+
+
+def test_non_counted_records_leave_the_cumulative_count_unchanged(
+    conn: psycopg.Connection,
+) -> None:
+    planner_runs.record_finished(
+        conn, "reap", interval_sec=60, at=T0, outcome="ok", error=None, count=4
+    )
+    planner_runs.record_finished(
+        conn, "reap", interval_sec=60, at=T0, outcome="ok", error=None, count=0
+    )
+    planner_runs.record_finished(
+        conn, "reap", interval_sec=60, at=T0, outcome="ok", error=None, count=None
+    )
+    planner_runs.record_finished(
+        conn, "reap", interval_sec=60, at=T0, outcome="failed", error="E: x", count=None
+    )
+    planner_runs.record_started(conn, "reap", interval_sec=60, at=T0)
+    planner_runs.record_skipped_locked(conn, "reap", interval_sec=60, at=T0)
+
+    assert _one(conn, "reap").cumulative_count == 4
+
+
+def test_negative_count_is_rejected_before_persistence(conn: psycopg.Connection) -> None:
+    with pytest.raises(ValueError, match="non-negative"):
+        planner_runs.record_finished(
+            conn, "reap", interval_sec=60, at=T0, outcome="ok", error=None, count=-1
+        )
+
+    assert planner_runs.list_task_runs(conn) == []
+
+
 def test_skipped_locked_creates_a_row_and_touches_nothing_else(conn: psycopg.Connection) -> None:
     planner_runs.record_skipped_locked(conn, "a", interval_sec=60, at=T0)
     assert _one(conn, "a") == planner_runs.PlannerTaskRun(
