@@ -157,6 +157,19 @@ class FakeQueue:
     ) -> int | None:
         raise NotImplementedError("unused by worker tests")
 
+    def handoff(
+        self,
+        parent_job_id: int,
+        kind: str,
+        video_id: str,
+        *,
+        dedupe_key: str = "default",
+        payload: dict[str, Any] | None = None,
+        priority: int = 0,
+        run_after: datetime | None = None,
+    ) -> int | None:
+        raise NotImplementedError("unused by worker tests")
+
     def reap_stale(self, older_than_sec: int | None = None) -> int:
         raise NotImplementedError("unused by worker tests")
 

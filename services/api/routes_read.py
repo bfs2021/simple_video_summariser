@@ -175,6 +175,10 @@ class RenderQuery(BaseModel):
     analysis_id: QueryId | None = None
 
 
+VideoSort = Literal["title", "published", "status", "channel"]
+SortOrder = Literal["asc", "desc"]
+
+
 class VideoListQuery(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -182,15 +186,49 @@ class VideoListQuery(BaseModel):
     status: Literal["done", "processing", "unavailable", "failed", "idle"] | None = None
     published_after: QueryDatetime | None = None
     published_before: QueryDatetime | None = None
+    sort: list[VideoSort] | None = Field(
+        None,
+        max_length=4,
+        description="Repeated in precedence order; unique keys. Omitted alone defaults to published.",
+    )
+    order: list[SortOrder] | None = Field(
+        None,
+        max_length=4,
+        description="Paired by position with sort. Omitted alone defaults to desc for one key only.",
+    )
     offset: QueryInt = Field(0, ge=0, le=MAX_OFFSET)
     limit: QueryInt = Field(50, ge=1, le=200)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _lists(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        result = dict(value)
+        for key in ("sort", "order"):
+            item = result.get(key)
+            if item is not None and not isinstance(item, list):
+                result[key] = [item]
+        return result
+
     @model_validator(mode="after")
-    def _ordered_dates(self) -> VideoListQuery:
+    def _validate_query(self) -> VideoListQuery:
         after, before = self.published_after, self.published_before
         if after is not None and before is not None and after > before:
             raise ValueError("published_after must not be later than published_before")
+        sorts = self.sort or []
+        orders = self.order or []
+        if (len(sorts) > 1 or len(orders) > 1) and len(sorts) != len(orders):
+            raise ValueError("multi-key sort and order counts must match")
+        if len(set(sorts)) != len(sorts):
+            raise ValueError("sort keys must be unique")
         return self
+
+    @property
+    def sort_sequence(self) -> tuple[tuple[str, str], ...]:
+        sorts = self.sort or ["published"]
+        orders = self.order or ["desc"]
+        return tuple(zip(sorts, orders, strict=True))
 
 
 def _search_q(value: object) -> object:
@@ -245,7 +283,13 @@ def _gate(model: type[BaseModel]) -> Callable[[Request], None]:
 
     def gate(request: Request) -> None:
         try:
-            model.model_validate(dict(request.query_params))
+            raw: dict[str, Any] = dict(request.query_params)
+            if model is VideoListQuery:
+                for key in ("sort", "order"):
+                    values = request.query_params.getlist(key)
+                    if values:
+                        raw[key] = values
+            model.model_validate(raw)
         except ValidationError as exc:
             errors = exc.errors(include_input=False, include_context=False, include_url=False)
             raise RequestValidationError(
@@ -300,13 +344,14 @@ def get_videos(
     params: Annotated[VideoListQuery, Query()],
     conn: ReadConn,
 ) -> schemas.VideoList:
-    """The library, newest published first; ``total`` counts every match."""
+    """The filtered library in the requested multi-column order."""
     page = list_videos(
         conn,
         channel_id=params.channel,
         status=params.status,
         published_after=params.published_after,
         published_before=params.published_before,
+        sorts=params.sort_sequence,
         offset=params.offset,
         limit=params.limit,
     )

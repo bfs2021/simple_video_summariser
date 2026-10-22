@@ -249,9 +249,9 @@ def make_ingest_handler(
                 segments=segments,
                 engine_meta={"track": lang, "kind": kind},
             )
-            enqueue_analyze(queue, settings, video_id, priority=job.priority)
+            enqueue_analyze(queue, settings, job.id, video_id, priority=job.priority)
         elif path is TranscriptPath.HAVE_TRANSCRIPT:
-            enqueue_analyze(queue, settings, video_id, priority=job.priority)
+            enqueue_analyze(queue, settings, job.id, video_id, priority=job.priority)
         elif path is TranscriptPath.TRANSCRIBE:
             # duration_sec lets the worker derive this job's runtime limit (#66).
             payload: dict[str, Any] = {}
@@ -259,8 +259,12 @@ def make_ingest_handler(
                 payload["language"] = meta.language
             if meta.duration_sec:
                 payload["duration_sec"] = meta.duration_sec
-            job_id = queue.enqueue(
-                "transcribe", video_id, payload=payload or None, priority=job.priority
+            job_id = queue.handoff(
+                job.id,
+                "transcribe",
+                video_id,
+                payload=payload or None,
+                priority=job.priority,
             )
             if job_id is None:
                 ctx.logger.info("transcribe job already pending or running")

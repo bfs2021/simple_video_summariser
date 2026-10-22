@@ -14,6 +14,9 @@ import {
   STATUSES,
   toSearchParams,
   type LibraryState,
+  type SortKey,
+  type SortOrder,
+  type VideoSort,
   type VideoStatus,
 } from '../lib/library'
 
@@ -38,8 +41,25 @@ export function Library() {
   const q = useVideos(state, !reversed)
 
   const go = (patch: Partial<LibraryState>) => {
-    // Any filter change returns to page 1; a page change passes `page` itself.
     setParams(toSearchParams({ ...state, page: 1, ...patch }))
+  }
+
+  const sortBy = (sort: VideoSort) => {
+    const index = state.sorts.findIndex((pair) => pair.sort === sort)
+    if (index < 0) go({ sorts: [...state.sorts, { sort, order: defaultOrder(sort) }] })
+    else go({ sorts: state.sorts.map((pair, i) => (i === index ? { ...pair, order: opposite(pair.order) } : pair)) })
+  }
+
+  const moveSort = (index: number, delta: -1 | 1) => {
+    const sorts = [...state.sorts]
+    const other = index + delta
+    ;[sorts[index], sorts[other]] = [sorts[other] as SortKey, sorts[index] as SortKey]
+    go({ sorts })
+  }
+
+  const removeSort = (index: number) => {
+    const sorts = state.sorts.filter((_pair, i) => i !== index)
+    go({ sorts: sorts.length === 0 ? [{ sort: 'published', order: 'desc' }] : sorts })
   }
 
   const data = q.data
@@ -95,11 +115,62 @@ export function Library() {
           </select>
         </label>
         {hasFilters(state) && (
-          <button className="btn" type="button" onClick={() => setParams(new URLSearchParams())}>
+          <button
+            className="btn"
+            type="button"
+            onClick={() => setParams(toSearchParams({ ...state, channel: null, from: null, to: null, status: null, page: 1 }))}
+          >
             Clear all filters
           </button>
         )}
       </form>
+
+      <div className="card" role="group" aria-label="Sort order">
+        <strong>Sort order</strong>
+        <ol>
+          {state.sorts.map((pair, index) => (
+            <li key={pair.sort}>
+              {index + 1} {sortLabel(pair.sort)} {direction(pair.order)}{' '}
+              <button
+                className="btn"
+                type="button"
+                aria-label={`Move ${sortLabel(pair.sort)} earlier`}
+                disabled={index === 0}
+                onClick={() => moveSort(index, -1)}
+              >
+                Earlier
+              </button>{' '}
+              <button
+                className="btn"
+                type="button"
+                aria-label={`Move ${sortLabel(pair.sort)} later`}
+                disabled={index === state.sorts.length - 1}
+                onClick={() => moveSort(index, 1)}
+              >
+                Later
+              </button>{' '}
+              <button
+                className="btn"
+                type="button"
+                aria-label={`Remove ${sortLabel(pair.sort)} from sort order`}
+                onClick={() => removeSort(index)}
+              >
+                Remove
+              </button>
+            </li>
+          ))}
+        </ol>
+        {!isDefaultSort(state.sorts) && (
+          <button
+            className="btn"
+            type="button"
+            aria-label="Reset sort to Published descending"
+            onClick={() => go({ sorts: [{ sort: 'published', order: 'desc' }] })}
+          >
+            Reset sort
+          </button>
+        )}
+      </div>
 
       {reversed && (
         <p className="alert alert--danger" role="alert">
@@ -160,10 +231,10 @@ export function Library() {
               <table className="table">
                 <thead>
                   <tr>
-                    <th scope="col">Title</th>
-                    <th scope="col">Channel</th>
-                    <th scope="col">Published</th>
-                    <th scope="col">Status</th>
+                    <SortHeader label="Title" sort="title" state={state} onSort={sortBy} />
+                    <SortHeader label="Channel" sort="channel" state={state} onSort={sortBy} />
+                    <SortHeader label="Published" sort="published" state={state} onSort={sortBy} />
+                    <SortHeader label="Status" sort="status" state={state} onSort={sortBy} />
                   </tr>
                 </thead>
                 <tbody>
@@ -231,6 +302,52 @@ export function Library() {
     if (value === '') go({ [key]: null })
     else if (isValidDate(value)) go({ [key]: value })
   }
+}
+
+interface SortHeaderProps {
+  label: string
+  sort: VideoSort
+  state: Pick<LibraryState, 'sorts'>
+  onSort: (sort: VideoSort) => void
+}
+
+function SortHeader({ label, sort, state, onSort }: SortHeaderProps) {
+  const index = state.sorts.findIndex((pair) => pair.sort === sort)
+  const pair = index < 0 ? null : state.sorts[index] as SortKey
+  const action = pair === null ? defaultOrder(sort) : opposite(pair.order)
+  return (
+    <th scope="col" aria-sort={index === 0 && pair !== null ? direction(pair.order) : undefined}>
+      <button
+        className="btn"
+        type="button"
+        onClick={() => onSort(sort)}
+        aria-label={pair === null ? `Append ${label} ${direction(action)}` : `Toggle ${label} to ${direction(action)}`}
+      >
+        {label}
+        {pair !== null ? ` ${index + 1} ${direction(pair.order)}` : ''}
+      </button>
+    </th>
+  )
+}
+
+function sortLabel(sort: VideoSort): string {
+  return sort.charAt(0).toUpperCase() + sort.slice(1)
+}
+
+function isDefaultSort(sorts: readonly SortKey[]): boolean {
+  return sorts.length === 1 && sorts[0]?.sort === 'published' && sorts[0].order === 'desc'
+}
+
+function defaultOrder(sort: VideoSort): SortOrder {
+  return sort === 'published' ? 'desc' : 'asc'
+}
+
+function opposite(order: SortOrder): SortOrder {
+  return order === 'asc' ? 'desc' : 'asc'
+}
+
+function direction(order: SortOrder): 'ascending' | 'descending' {
+  return order === 'asc' ? 'ascending' : 'descending'
 }
 
 type StatusTone = 'success' | 'warning' | 'danger' | 'neutral'

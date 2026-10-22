@@ -181,6 +181,9 @@ class _LazyQueue:
     def enqueue(self, *args: Any, **kwargs: Any) -> int | None:
         raise NotImplementedError
 
+    def handoff(self, *args: Any, **kwargs: Any) -> int | None:
+        raise NotImplementedError
+
     def heartbeat(self, job_id: int, worker: str) -> bool:
         raise NotImplementedError
 

@@ -166,6 +166,58 @@ def test_mapping_table(postgres_dsn: str, monkeypatch: pytest.MonkeyPatch) -> No
 
 
 @integration
+@pytest.mark.parametrize("language", ["zh", "ja", "ko", "th"])
+def test_unspaced_languages_use_the_simple_configuration(
+    postgres_dsn: str, monkeypatch: pytest.MonkeyPatch, language: str
+) -> None:
+    command.upgrade(_config_for(postgres_dsn, monkeypatch), "head")
+    with psycopg.connect(postgres_dsn) as conn:
+        row = conn.execute(
+            "SELECT transcript_ts_config(%s) = 'pg_catalog.simple'::regconfig",
+            (language,),
+        ).fetchone()
+
+    assert row == (True,)
+
+
+@integration
+def test_simple_configuration_does_not_match_inside_an_unspaced_chinese_run(
+    postgres_dsn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    command.upgrade(_config_for(postgres_dsn, monkeypatch), "head")
+    with psycopg.connect(postgres_dsn) as conn:
+        row = conn.execute(
+            """
+            WITH document AS (
+                SELECT to_tsvector(transcript_ts_config('zh'), '我喜欢机器学习') AS vector
+            )
+            SELECT tsvector_to_array(vector),
+                   vector @@ websearch_to_tsquery(transcript_ts_config('zh'), '我喜欢机器学习'),
+                   vector @@ websearch_to_tsquery(transcript_ts_config('zh'), '机器学习')
+            FROM document
+            """
+        ).fetchone()
+
+    assert row == (["我喜欢机器学习"], True, False)
+
+
+@integration
+@pytest.mark.parametrize("text", ["我喜欢 机器学习", "我喜欢，机器学习"])
+def test_simple_configuration_matches_a_complete_chinese_token_after_a_boundary(
+    postgres_dsn: str, monkeypatch: pytest.MonkeyPatch, text: str
+) -> None:
+    command.upgrade(_config_for(postgres_dsn, monkeypatch), "head")
+    with psycopg.connect(postgres_dsn) as conn:
+        row = conn.execute(
+            "SELECT to_tsvector(transcript_ts_config('zh'), %s)"
+            " @@ websearch_to_tsquery(transcript_ts_config('zh'), '机器学习')",
+            (text,),
+        ).fetchone()
+
+    assert row == (True,)
+
+
+@integration
 def test_mapping_is_schema_qualified_immutable_parallel_safe_and_not_strict(
     postgres_dsn: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

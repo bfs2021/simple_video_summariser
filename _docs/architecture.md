@@ -304,6 +304,13 @@ and rate-limitable.
 Claim ordering is `priority DESC, run_after ASC`. This is what prevents a
 200-episode backfill from starving today's episodes (D9b).
 
+Pipeline handoff preserves the greater of the successor's supplied priority and
+the parent job's current persisted priority. Handoff and `POST /videos`
+reprioritization serialize on the video's row: resubmission raises pending jobs
+and running `ingest`/`transcribe` jobs, but never running `analyze`. Therefore a
+human bump reaches the next stage without durable per-video override state and
+without leaking into a later re-analysis sweep or unrelated pipeline run (#155).
+
 RSS-gap reconciliation (#93) queues at the Normal band with `origin = 'rss'`:
 a channel that uploads more than the ~15 feed entries between two polls loses
 videos the feed never showed, and those are forward-monitored content, not
@@ -445,7 +452,17 @@ CREATE INDEX transcripts_fts_idx ON transcripts USING GIN (fts);
 -- needs a new migration that also re-runs ALTER COLUMN fts SET EXPRESSION.
 -- transcript_ts_config(lang TEXT) RETURNS regconfig
 -- transcript_search_tsquery(q TEXT) RETURNS tsquery  -- OR over all those configs
+```
 
+`transcript_ts_config` uses a built-in PostgreSQL text-search configuration
+where one is mapped and `simple` otherwise. The `simple` configuration
+lowercases text but does not segment an unspaced run: the complete run is one
+lexeme. An exact whole-run or whole-token query can therefore match, but a query
+for text inside that run does not. Whitespace and punctuation can create token
+boundaries. This is a documented v1 limitation for unsupported languages; v1
+adds no segmenter or alternate index (#167).
+
+```sql
 -- source preference (D2): manual > whisper > auto
 CREATE FUNCTION transcript_rank(src TEXT) RETURNS INT IMMUTABLE LANGUAGE sql AS
 $$ SELECT CASE src WHEN 'youtube_manual' THEN 0
@@ -821,18 +838,34 @@ separated per D13.
 | `POST` | `/channels/{id}/backfill` | `{limit, dry_run}`; priority `-10` (D9b) |
 | `POST` | `/channels/{id}/backfill-requests` | `{limit <= 5000, dry_run}`; only records a request, the planner `channel_backfill` task runs it (#115); `409` while the channel has a pending or running one |
 | `GET` | `/channels/{id}/backfill-requests/{request_id}` | state, attempts, enqueued, timestamps and `result` (the shape of the synchronous response) (#115) |
-| `POST` | `/channels/{id}/backfill/cancel` | `{backfill_id}`; deletes that backfill's pending `ingest` jobs (#116) |
+| `POST` | `/channels/{id}/backfill/cancel` | `{backfill_id}`; ends the matching active request and deletes only its pending backfill-priority `ingest` jobs; a matching running `ingest` finishes normally and is excluded from `cancelled`, while already-created `transcribe` and `analyze` jobs are not cancelled (#116, #166) |
 | `POST` | `/videos/{id}/reanalyze` | force new `analyze` at current version |
-| `GET` | `/videos` | paginated library view; filters: channel, state, date |
+| `GET` | `/videos` | paginated library view; filters: channel, state, date; repeated paired `sort=title|published|status|channel`, `order=asc|desc` (up to four unique keys) |
 | `GET` | `/videos/{id}` | latest analysis + job state |
 | `GET` | `/videos/{id}/analyses` | all runs (Compare view, D7) |
 | `GET` | `/videos/{id}/transcript` | paginated segments |
 | `GET` | `/videos/{id}/render` | **server-side HTML render** (D12c) |
-| `GET` | `/search?q=` | FTS over `search_docs` (title, latest analysis, preferred transcript); `matched_in` and transcript `ts_headline` excerpts |
+| `GET` | `/search?q=` | FTS over `search_docs` (title, latest analysis, preferred transcript); `matched_in` and transcript `ts_headline` excerpts. Transcript search uses a mapped built-in PostgreSQL configuration or `simple`; with `simple`, exact whole runs/tokens can match, but text inside an unspaced run cannot unless whitespace or punctuation creates a token boundary (#167). |
 | `GET` | `/ops/jobs` | filter by state/kind — powers Ops view |
 | `POST` | `/ops/jobs/{id}/retry` | resurrect a dead job |
 | `GET` | `/healthz` | liveness + queue depth by kind/state |
 | `GET` | `/metrics` | Prometheus text format (optional) |
+
+`GET /videos` accepts repeated `sort` and `order` parameters paired by position,
+in primary-to-quaternary precedence order. Keys are unique and capped at the
+four columns; invalid, empty, wrong-case, duplicate, over-cap or mismatched
+multi-key sequences are `422` before database access. Scalar compatibility is
+unchanged: neither parameter means `published desc`, one `sort` alone uses
+`desc`, and one `order` alone uses `published`; omitted counterparts are not
+allowed for a multi-key sequence. Unknown unrelated parameters remain ignored.
+
+The server applies the requested sequence before offset pagination. Title and
+channel compare `lower(...) COLLATE "C"`; title, channel and publication NULLs
+are last in either direction. Status rank ascending is `idle`, `processing`,
+`done`, `unavailable`, `failed`, and descending reverses it. If `published`
+appears anywhere, `discovered_at DESC` follows all requested keys. Every mode
+ends with exactly one immutable `video_id ASC`; requested directions never
+reverse this final tie-break.
 
 Every route passes through `deps.require_auth` — a no-op returning `None` in
 v1, one implementation change away from enforcing a bearer token (D13).

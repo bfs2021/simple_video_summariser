@@ -115,12 +115,17 @@ export interface paths {
         put?: never;
         /**
          * Post Channel Backfill Cancel
-         * @description Cancel one real backfill's still-pending ``ingest`` jobs (#116).
+         * @description Cancel one backfill's pending work (#116, #166).
          *
-         *     Deletes only jobs that are ``pending``, ``ingest``, at ``PRIORITY_BACKFILL``,
-         *     tagged with ``backfill_id`` and belonging to this channel; running jobs,
-         *     follow-up jobs and jobs from RSS, ``POST /videos`` or another backfill are
-         *     untouched. An unknown ``backfill_id`` cancels nothing (200, ``cancelled: 0``).
+         *     Ends the matching active backfill request so the planner cannot enqueue
+         *     another slice. Deletes only jobs that are ``pending``, ``ingest``, at
+         *     ``PRIORITY_BACKFILL``, tagged with ``backfill_id`` and belonging to this
+         *     channel. A matching ``ingest`` already running finishes normally; it is
+         *     not included in ``cancelled`` or ``video_ids``, and its job row is unchanged.
+         *     Already-created ``transcribe`` and ``analyze`` jobs are not cancelled. Jobs
+         *     from RSS, ``POST /videos`` or another backfill are untouched. An unknown
+         *     ``backfill_id`` cancels nothing (200, ``cancelled: 0``).
+         *
          *     Each cancelled job's ``videos`` row is removed too, unless something else
          *     depends on it (a transcript, another job); those are ``videos_kept``. A kept
          *     video is no longer picked up by backfill, so re-submit it with
@@ -255,7 +260,7 @@ export interface paths {
         };
         /**
          * Get Videos
-         * @description The library, newest published first; ``total`` counts every match.
+         * @description The filtered library in the requested multi-column order.
          */
         get: operations["get_videos_videos_get"];
         put?: never;
@@ -1411,6 +1416,10 @@ export interface operations {
                 status?: ("done" | "processing" | "unavailable" | "failed" | "idle") | null;
                 published_after?: string | null;
                 published_before?: string | null;
+                /** @description Repeated in precedence order; unique keys. Omitted alone defaults to published. */
+                sort?: ("title" | "published" | "status" | "channel")[] | null;
+                /** @description Paired by position with sort. Omitted alone defaults to desc for one key only. */
+                order?: ("asc" | "desc")[] | null;
                 offset?: number;
                 limit?: number;
             };

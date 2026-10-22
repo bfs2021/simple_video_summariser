@@ -154,6 +154,146 @@ describe('request construction', () => {
   })
 })
 
+describe('sorting', () => {
+  it('marks only Published descending and gives every header an action name', async () => {
+    stubFetch(serverWith(2))
+    await mount()
+    const headers = screen.getAllByRole('columnheader')
+    expect(headers.map((header) => [header.textContent, header.getAttribute('aria-sort')])).toEqual([
+      ['Title', null],
+      ['Channel', null],
+      ['Published 1 descending', 'descending'],
+      ['Status', null],
+    ])
+    for (const name of [
+      'Append Title ascending',
+      'Append Channel ascending',
+      'Toggle Published to ascending',
+      'Append Status ascending',
+    ]) {
+      expect(screen.getByRole('button', { name }).classList.contains('btn')).toBe(true)
+    }
+  })
+
+  it.each([
+    ['Title', 'title', 'asc'],
+    ['Channel', 'channel', 'asc'],
+    ['Status', 'status', 'asc'],
+  ])('selects %s with its default direction, preserving filters and resetting page', async (label, sort, order) => {
+    stubFetch(serverWith(120))
+    const router = await mount('/?status=idle&page=2')
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: `Append ${label} ascending` }))
+    })
+    await settle()
+    expect(search(router)).toBe(`?status=idle&sort=published&order=desc&sort=${sort}&order=${order}`)
+    expect(last().searchParams.getAll('sort')).toEqual(['published', sort])
+    expect(last().searchParams.getAll('order')).toEqual(['desc', order])
+    expect(last().searchParams.get('offset')).toBe('0')
+  })
+
+  it('restores a deep link, toggles, resets a new column to its default, and follows Back and Forward', async () => {
+    stubFetch(serverWith(2))
+    const router = await mount('/?sort=title&order=asc')
+    expect(last().search).toBe('?sort=title&order=asc&limit=50&offset=0')
+    expect(screen.getByRole('columnheader', { name: 'Title 1 ascending' }).getAttribute('aria-sort')).toBe(
+      'ascending',
+    )
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Toggle Title to descending' }))
+    })
+    await settle()
+    expect(search(router)).toBe('?sort=title&order=desc')
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Reset sort to Published descending' }))
+    })
+    await settle()
+    expect(search(router)).toBe('')
+    expect(last().search).toBe('?limit=50&offset=0')
+    expect(screen.getByRole('columnheader', { name: 'Published 1 descending' }).getAttribute('aria-sort')).toBe(
+      'descending',
+    )
+
+    await act(async () => {
+      await router.navigate(-1)
+    })
+    await settle()
+    expect(search(router)).toBe('?sort=title&order=desc')
+    expect(screen.getByRole('columnheader', { name: 'Title 1 descending' }).getAttribute('aria-sort')).toBe(
+      'descending',
+    )
+
+    await act(async () => {
+      await router.navigate(1)
+    })
+    await settle()
+    expect(search(router)).toBe('')
+    expect(screen.getByRole('columnheader', { name: 'Published 1 descending' }).getAttribute('aria-sort')).toBe(
+      'descending',
+    )
+  })
+
+  it('appends, toggles, moves, removes, and resets visible sort precedence', async () => {
+    stubFetch(serverWith(120))
+    const router = await mount('/?sort=channel&order=asc&sort=published&order=desc&page=2')
+
+    const sortOrder = screen.getByRole('group', { name: 'Sort order' })
+    expect(sortOrder.textContent).toContain('1 Channel ascending')
+    expect(sortOrder.textContent).toContain('2 Published descending')
+    expect(screen.getByRole('columnheader', { name: 'Channel 1 ascending' }).getAttribute('aria-sort')).toBe('ascending')
+    expect(screen.getByRole('columnheader', { name: 'Published 2 descending' }).getAttribute('aria-sort')).toBeNull()
+    expect((screen.getByRole('button', { name: 'Move Channel earlier' }) as HTMLButtonElement).disabled).toBe(true)
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Append Status ascending' }))
+    })
+    await settle()
+    expect(search(router)).toBe('?sort=channel&order=asc&sort=published&order=desc&sort=status&order=asc')
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Append Title ascending' }))
+    })
+    await settle()
+    expect(search(router)).toBe(
+      '?sort=channel&order=asc&sort=published&order=desc&sort=status&order=asc&sort=title&order=asc',
+    )
+    expect(screen.queryByRole('button', { name: /^Append / })).toBeNull()
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Move Status earlier' }))
+    })
+    await settle()
+    expect(search(router)).toBe(
+      '?sort=channel&order=asc&sort=status&order=asc&sort=published&order=desc&sort=title&order=asc',
+    )
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Remove Channel from sort order' }))
+    })
+    await settle()
+    expect(search(router)).toBe('?sort=status&order=asc&sort=published&order=desc&sort=title&order=asc')
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Reset sort to Published descending' }))
+    })
+    await settle()
+    expect(search(router)).toBe('')
+  })
+
+  it('clear all filters preserves sorting and sorting alone does not show it', async () => {
+    stubFetch(serverWith(2))
+    const router = await mount('/?status=done&sort=channel&order=desc')
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Clear all filters' }))
+    })
+    await settle()
+    expect(search(router)).toBe('?sort=channel&order=desc')
+    expect(screen.queryByRole('button', { name: 'Clear all filters' })).toBeNull()
+  })
+})
+
 describe('rows', () => {
   it('shows title link, channel, UTC date and status', async () => {
     stubFetch(() => list(1, [vid(1, { published_at: '2026-09-01T02:00:00Z' })]))
@@ -168,7 +308,7 @@ describe('rows', () => {
     expect(screen.getAllByRole('columnheader').map((h) => h.textContent)).toEqual([
       'Title',
       'Channel',
-      'Published',
+      'Published 1 descending',
       'Status',
     ])
   })
@@ -253,9 +393,11 @@ describe('rows', () => {
     expect(screen.getAllByRole('row')).toHaveLength(4)
   })
 
-  it('keeps the order the server returned', async () => {
+  it('keeps adversarial server order under a non-default sort', async () => {
     stubFetch(() => list(3, [vid(3), vid(1), vid(2)]))
-    await mount()
+    await mount('/?sort=title&order=asc')
+    expect(last().searchParams.get('sort')).toBe('title')
+    expect(last().searchParams.get('order')).toBe('asc')
     const titles = screen.getAllByRole('link', { name: /^Title/ }).map((a) => a.textContent)
     expect(titles).toEqual(['Title 3', 'Title 1', 'Title 2'])
   })
@@ -408,7 +550,7 @@ describe('untrusted URL parameters', () => {
     stubFetch(serverWith(2))
     const m = 'MARKER'
     const router = await mount(
-      `/?channel=${m}&from=${m}&to=${m}&status=${m}&page=${m}&q=${m}&before=${m}&offset=${m}&limit=${m}`,
+      `/?channel=${m}&from=${m}&to=${m}&status=${m}&sort=${m}&order=${m}&page=${m}&q=${m}&before=${m}&offset=${m}&limit=${m}`,
     )
     expect(requests).toHaveLength(1)
     expect(last().search).toBe('?limit=50&offset=0')
@@ -417,7 +559,7 @@ describe('untrusted URL parameters', () => {
     expect(document.body.textContent).not.toContain(m)
     expect((screen.getByLabelText('From') as HTMLInputElement).value).toBe('')
     // Invalid known params are gone from the URL, replaced rather than pushed.
-    expect(search(router)).not.toMatch(/channel|from|to=|status|page/)
+    expect(search(router)).not.toMatch(/channel|from|to=|status|sort|order|page/)
     expect(router.state.historyAction).toBe('REPLACE')
   })
 
@@ -628,8 +770,10 @@ describe('polling', () => {
       // First two responses carry an active job, the third does not.
       return list(1, [vid(1, calls < 3 ? { status: 'processing', active_job: active } : {})])
     })
-    await mount()
+    await mount('/?sort=status&order=asc')
     expect(calls).toBe(1)
+    expect(requests.map((request) => request.searchParams.get('sort'))).toEqual(['status'])
+    expect(requests.map((request) => request.searchParams.get('order'))).toEqual(['asc'])
     await act(async () => {
       await vi.advanceTimersByTimeAsync(14_999)
     })
@@ -642,6 +786,12 @@ describe('polling', () => {
       await vi.advanceTimersByTimeAsync(15_000)
     })
     expect(calls).toBe(3)
+    expect(requests.map((request) => request.searchParams.get('sort'))).toEqual([
+      'status',
+      'status',
+      'status',
+    ])
+    expect(requests.map((request) => request.searchParams.get('order'))).toEqual(['asc', 'asc', 'asc'])
     expect(screen.getByText('Analysed')).toBeTruthy()
     await act(async () => {
       await vi.advanceTimersByTimeAsync(120_000)

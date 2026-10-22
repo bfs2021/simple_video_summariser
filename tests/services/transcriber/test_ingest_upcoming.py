@@ -76,7 +76,16 @@ class Rig:
             conn.commit()
 
     def run(self, video_id: str) -> None:
-        self.handler(make_job(video_id), self.ctx)
+        built = make_job(video_id)
+        parent_id = self.queue.enqueue("ingest", video_id, priority=built.priority)
+        assert parent_id is not None
+        self.conn.execute("UPDATE jobs SET state = 'running' WHERE id = %s", (parent_id,))
+        self.conn.commit()
+        try:
+            self.handler(replace(built, id=parent_id), self.ctx)
+        finally:
+            self.conn.execute("DELETE FROM jobs WHERE id = %s", (parent_id,))
+            self.conn.commit()
 
     def deferred_until(self, video_id: str) -> datetime:
         with pytest.raises(Defer) as info:

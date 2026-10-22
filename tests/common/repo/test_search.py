@@ -834,6 +834,15 @@ def test_english_stemming_still_works_and_simple_languages_match_exact_forms_onl
     assert sorted(_ids(_search(conn, "running"))) == ["en000000001", "pl000000001"]
 
 
+def test_an_interior_query_does_not_find_an_unspaced_chinese_transcript(
+    conn: psycopg.Connection[Any],
+) -> None:
+    _lang(conn, "zh000000001", "我喜欢机器学习", "zh")
+
+    assert _search(conn, "机器学习") == SearchPage((), False)
+    assert _ids(_search(conn, "我喜欢机器学习")) == ["zh000000001"]
+
+
 def test_german_stemming_applies_to_german_transcripts_only(
     conn: psycopg.Connection[Any],
 ) -> None:

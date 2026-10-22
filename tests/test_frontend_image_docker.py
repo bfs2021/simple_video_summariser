@@ -184,6 +184,9 @@ def test_nginx_is_the_1_27_line(image: str) -> None:
 
 
 def test_image_is_at_most_10_mb_larger_than_the_base(image: str) -> None:
+    pulled = _docker("pull", BASE, timeout=300)
+    assert pulled.returncode == 0, pulled.stderr
+
     def size(tag: str) -> int:
         return int(_docker("image", "inspect", "-f", "{{.Size}}", tag).stdout)
 
@@ -340,6 +343,15 @@ class Stack:
         assert created.returncode == 0, created.stderr
         assert _docker("cp", str(STUB), f"{name}:/stub_api.py").returncode == 0
         started = _docker("start", name)
+        assert started.returncode == 0, started.stderr
+        return name
+
+    def start_address_holder(self) -> str:
+        name = f"ytdigest-address-holder-{uuid.uuid4().hex[:8]}"
+        started = _docker(
+            "run", "-d", "--name", name, "--network", self.network,
+            STUB_IMAGE, "sleep", "300",
+        )  # fmt: skip
         assert started.returncode == 0, started.stderr
         return name
 
@@ -707,26 +719,25 @@ def test_nginx_follows_the_api_to_a_new_address(
 ) -> None:
     stack = make_stack()
     first = stack.start_api()
-    assert stack.wait_for_api(), stack.logs()
-    old_ip = stack.ip_of(first)
-    assert _docker("rm", "-f", first).returncode == 0
-    # Docker hands the freed address straight back to the next container, which
-    # would make this test assert nothing. Hold it with a throwaway container
-    # (no alias, so it never answers for `api`) until the replacement is up.
-    squatter = f"ytdigest-squat-{uuid.uuid4().hex[:8]}"
     try:
-        held = _docker(
-            "run", "-d", "--name", squatter, "--network", stack.network,
-            "--ip", old_ip, STUB_IMAGE, "sleep", "300",
-        )  # fmt: skip
-        if held.returncode != 0:
-            pytest.fail(f"could not occupy {old_ip}: {held.stderr}")
+        assert stack.wait_for_api(), stack.logs()
+        old_ip = stack.ip_of(first)
+
+        stopped = _docker("stop", first)
+        assert stopped.returncode == 0, stopped.stderr
+
+        def unavailable() -> bool:
+            try:
+                return stack.get("/api/healthz").status in (502, 504)
+            except OSError:
+                return False
+
+        assert _wait(unavailable, deadline=30), stack.logs()
+        holder = stack.start_address_holder()
+        assert stack.ip_of(holder) == old_ip
         second = stack.start_api()
         new_ip = stack.ip_of(second)
-        assert new_ip and new_ip != old_ip, (
-            f"replacement api got {new_ip}, the old address {old_ip}: this test "
-            "proves nothing about re-resolution"
-        )
+        assert new_ip and new_ip != old_ip
         assert stack.wait_for_api(deadline=30), stack.logs()
     finally:
-        _docker("rm", "-f", squatter)
+        _docker("rm", "-f", first)

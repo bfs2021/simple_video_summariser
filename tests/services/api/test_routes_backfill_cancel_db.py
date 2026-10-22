@@ -134,13 +134,18 @@ def test_only_qualifying_jobs_are_deleted_and_every_other_row_is_identical(
     ]
     before = {row[0]: row for row in _jobs(db)}
 
+    running_id = untouched[0]
+    running_video_id = before[running_id][1]
+
     body = _cancel(api)
 
     assert body["cancelled"] == 2
+    assert running_video_id not in body["video_ids"]
     after = {row[0]: row for row in _jobs(db)}
     assert set(before) - set(after) == set(qualifying)
     for job_id in untouched:
         assert after[job_id] == before[job_id]
+    assert running_video_id in _videos(db)
 
 
 def test_the_cancel_never_widens_beyond_the_channel_and_backfill_id(

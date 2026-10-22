@@ -200,7 +200,7 @@ def test_resubmitting_a_pending_lower_priority_ingest_raises_it_in_place(
     ]
 
 
-def test_resubmitting_a_running_ingest_leaves_its_priority(
+def test_resubmitting_a_running_ingest_raises_its_priority(
     api: TestClient, db: psycopg.Connection[Any]
 ) -> None:
     db.execute("INSERT INTO videos (video_id, origin) VALUES (%s, 'rss')", (VID,))
@@ -215,7 +215,7 @@ def test_resubmitting_a_running_ingest_leaves_its_priority(
         "state": "running",
         "created": False,
     }
-    assert db.execute("SELECT priority FROM jobs").fetchall() == [(PRIORITY_NORMAL,)]
+    assert db.execute("SELECT priority FROM jobs").fetchall() == [(PRIORITY_INTERACTIVE,)]
 
 
 def test_resubmitting_after_a_done_ingest_raises_the_pending_transcribe(

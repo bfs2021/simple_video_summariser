@@ -2348,7 +2348,7 @@
     },
     "/channels/{channel_id}/backfill/cancel": {
       "post": {
-        "description": "Cancel one real backfill's still-pending ``ingest`` jobs (#116).\n\nDeletes only jobs that are ``pending``, ``ingest``, at ``PRIORITY_BACKFILL``,\ntagged with ``backfill_id`` and belonging to this channel; running jobs,\nfollow-up jobs and jobs from RSS, ``POST /videos`` or another backfill are\nuntouched. An unknown ``backfill_id`` cancels nothing (200, ``cancelled: 0``).\nEach cancelled job's ``videos`` row is removed too, unless something else\ndepends on it (a transcript, another job); those are ``videos_kept``. A kept\nvideo is no longer picked up by backfill, so re-submit it with\n``POST /videos``.",
+        "description": "Cancel one backfill's pending work (#116, #166).\n\nEnds the matching active backfill request so the planner cannot enqueue\nanother slice. Deletes only jobs that are ``pending``, ``ingest``, at\n``PRIORITY_BACKFILL``, tagged with ``backfill_id`` and belonging to this\nchannel. A matching ``ingest`` already running finishes normally; it is\nnot included in ``cancelled`` or ``video_ids``, and its job row is unchanged.\nAlready-created ``transcribe`` and ``analyze`` jobs are not cancelled. Jobs\nfrom RSS, ``POST /videos`` or another backfill are untouched. An unknown\n``backfill_id`` cancels nothing (200, ``cancelled: 0``).\n\nEach cancelled job's ``videos`` row is removed too, unless something else\ndepends on it (a transcript, another job); those are ``videos_kept``. A kept\nvideo is no longer picked up by backfill, so re-submit it with\n``POST /videos``.",
         "operationId": "post_channel_backfill_cancel_channels__channel_id__backfill_cancel_post",
         "parameters": [
           {
@@ -2693,7 +2693,7 @@
     },
     "/videos": {
       "get": {
-        "description": "The library, newest published first; ``total`` counts every match.",
+        "description": "The filtered library in the requested multi-column order.",
         "operationId": "get_videos_videos_get",
         "parameters": [
           {
@@ -2767,6 +2767,60 @@
                 }
               ],
               "title": "Published Before"
+            }
+          },
+          {
+            "description": "Repeated in precedence order; unique keys. Omitted alone defaults to published.",
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "enum": [
+                      "title",
+                      "published",
+                      "status",
+                      "channel"
+                    ],
+                    "type": "string"
+                  },
+                  "maxItems": 4,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Repeated in precedence order; unique keys. Omitted alone defaults to published.",
+              "title": "Sort"
+            }
+          },
+          {
+            "description": "Paired by position with sort. Omitted alone defaults to desc for one key only.",
+            "in": "query",
+            "name": "order",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "enum": [
+                      "asc",
+                      "desc"
+                    ],
+                    "type": "string"
+                  },
+                  "maxItems": 4,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Paired by position with sort. Omitted alone defaults to desc for one key only.",
+              "title": "Order"
             }
           },
           {

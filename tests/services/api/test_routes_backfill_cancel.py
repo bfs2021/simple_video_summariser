@@ -223,6 +223,16 @@ def test_the_rate_limit_hook_covers_the_route(
     assert recorder.calls == []
 
 
+def test_openapi_documents_pending_only_cancellation(app: FastAPI) -> None:
+    operation = app.openapi()["paths"]["/channels/{channel_id}/backfill/cancel"]["post"]
+
+    description = operation["description"]
+    assert "active backfill request" in description
+    assert "already running" in description
+    assert "not included in ``cancelled``" in description
+    assert "``transcribe`` and ``analyze`` jobs are not cancelled" in description
+
+
 def test_the_backfill_route_is_not_shadowed_by_the_cancel_route(
     api: TestClient, recorder: Recorder
 ) -> None:

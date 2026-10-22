@@ -279,8 +279,9 @@ def submit_video(
     is), then the latest ``ingest`` job is returned if there is one, whatever
     its state; a finished job is not resubmitted (retry is #44). Then every
     ``pending`` job of the video below ``PRIORITY_INTERACTIVE`` is raised to
-    it (#103), whatever its kind; running jobs are never touched. Otherwise
-    one job is enqueued at ``PRIORITY_INTERACTIVE``. A concurrent submission that loses the enqueue
+    it (#103), whatever its kind; running ``ingest`` and ``transcribe`` jobs
+    are also raised so their successors inherit it (#155). Otherwise one job
+    is enqueued at ``PRIORITY_INTERACTIVE``. A concurrent submission that loses the enqueue
     race returns the winner's job.
     """
     with conn.transaction():
@@ -746,12 +747,17 @@ def post_channel_backfill_cancel(
     body: CancelBackfillRequest,
     conn: Annotated[psycopg.Connection[Any], Depends(get_conn)],
 ) -> CancelBackfillResponse:
-    """Cancel one real backfill's still-pending ``ingest`` jobs (#116).
+    """Cancel one backfill's pending work (#116, #166).
 
-    Deletes only jobs that are ``pending``, ``ingest``, at ``PRIORITY_BACKFILL``,
-    tagged with ``backfill_id`` and belonging to this channel; running jobs,
-    follow-up jobs and jobs from RSS, ``POST /videos`` or another backfill are
-    untouched. An unknown ``backfill_id`` cancels nothing (200, ``cancelled: 0``).
+    Ends the matching active backfill request so the planner cannot enqueue
+    another slice. Deletes only jobs that are ``pending``, ``ingest``, at
+    ``PRIORITY_BACKFILL``, tagged with ``backfill_id`` and belonging to this
+    channel. A matching ``ingest`` already running finishes normally; it is
+    not included in ``cancelled`` or ``video_ids``, and its job row is unchanged.
+    Already-created ``transcribe`` and ``analyze`` jobs are not cancelled. Jobs
+    from RSS, ``POST /videos`` or another backfill are untouched. An unknown
+    ``backfill_id`` cancels nothing (200, ``cancelled: 0``).
+
     Each cancelled job's ``videos`` row is removed too, unless something else
     depends on it (a transcript, another job); those are ``videos_kept``. A kept
     video is no longer picked up by backfill, so re-submit it with
