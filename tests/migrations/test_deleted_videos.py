@@ -30,23 +30,23 @@ def _table_exists(dsn: str) -> bool:
     return bool(row[0] == "deleted_videos")
 
 
-def test_0016_is_the_only_head_and_is_chained_to_0015() -> None:
+def test_0017_is_chained_to_0016_and_the_history_has_one_head() -> None:
     config = Config(str(REPO_ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
     script = ScriptDirectory.from_config(config)
 
-    revision = script.get_revision("0016")
+    revision = script.get_revision("0017")
 
     assert revision is not None
-    assert revision.down_revision == "0015"
-    assert script.get_heads() == ["0016"]
+    assert revision.down_revision == "0016"
+    assert len(script.get_heads()) == 1  # a later revision may sit on top of 0017
 
 
 def test_upgrade_creates_tombstones_and_downgrade_removes_only_them(
     postgres_dsn: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = _config_for(postgres_dsn, monkeypatch)
-    command.upgrade(config, "0015")
+    command.upgrade(config, "0016")
     with psycopg.connect(postgres_dsn) as conn:
         conn.execute("INSERT INTO channels (channel_id) VALUES ('UCpreserved')")
         conn.commit()
@@ -60,7 +60,7 @@ def test_upgrade_creates_tombstones_and_downgrade_removes_only_them(
         ).fetchone()
     assert row == ("dQw4w9WgXcQ", True)
 
-    command.downgrade(config, "0015")
+    command.downgrade(config, "0016")
     assert not _table_exists(postgres_dsn)
     with psycopg.connect(postgres_dsn) as conn:
         assert conn.execute(
