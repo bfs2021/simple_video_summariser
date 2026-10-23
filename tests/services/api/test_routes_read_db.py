@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from common.config import get_settings
 from common.db import create_pool
+from common.repo.jobs import write_progress
 from services.api import deps
 from services.api.main import create_app
 from tests.common.repo import read_seed as seed
@@ -268,6 +269,36 @@ def test_a_processing_video_detail(api: TestClient, db: psycopg.Connection[Any])
     assert body["status"] == "processing"
     assert body["active_job"] == {"id": job_id, "kind": "ingest", "state": "running"}
     assert (body["analysis"], body["transcript"]) == (None, None)
+    assert body["progress"] is None
+
+
+def test_a_transcribing_video_detail_carries_the_progress_of_its_transcribe_job(
+    api: TestClient, db: psycopg.Connection[Any]
+) -> None:
+    seed.video(db, VID)
+    job_id = seed.job(db, VID, "transcribe", "running", created=1)
+    db.execute("UPDATE jobs SET locked_by = 'w1' WHERE id = %s", (job_id,))
+    write_progress(
+        db,
+        job_id,
+        "w1",
+        {
+            "percent": 40,
+            "done_sec": 40.0,
+            "duration_sec": 100.0,
+            "elapsed_sec": 80.0,
+            "eta_sec": 120.0,
+            "estimated_sec": 100.0,
+            "estimate_source": "default",
+        },
+    )
+
+    body = api.get(f"/videos/{VID}").json()
+
+    assert body["progress"]["percent"] == 40
+    assert body["progress"]["eta_sec"] == 120.0
+    assert body["progress"]["estimate_source"] == "default"
+    assert body["progress"]["updated_at"] is not None
 
 
 def test_a_done_video_detail_has_the_transcript_and_latest_analysis(

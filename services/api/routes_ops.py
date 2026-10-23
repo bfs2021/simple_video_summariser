@@ -46,7 +46,12 @@ from common.repo.media import total_bytes
 from common.repo.planner_runs import list_task_runs
 from common.repo.transcripts import latest_whisper_rtf
 from services.api import schemas
-from services.api.deps import UNAVAILABLE_BODY, get_conn, rate_limit
+from services.api.deps import (
+    UNAVAILABLE_BODY,
+    get_conn,
+    rate_limit,
+    transcribe_rtf_history,
+)
 
 router = APIRouter()
 _log = structlog.get_logger(__name__)
@@ -250,13 +255,19 @@ def get_ops_jobs(
             before_id=params.before_id,
             limit=params.limit + 1,
         )
+        page = rows[: params.limit]
+        # One extra read, and only when a page shows a pending transcribe job to estimate.
+        history = (
+            transcribe_rtf_history(conn)
+            if any(r.kind == "transcribe" and r.state == "pending" for r in page)
+            else None
+        )
     except Exception:  # noqa: BLE001 - any database failure is "unavailable", never a 500
         _log.exception("ops.jobs database query failed")
         return JSONResponse(status_code=503, content=UNAVAILABLE_BODY)
     has_more = len(rows) > params.limit
-    page = rows[: params.limit]
     return schemas.JobListOut(
-        items=[schemas.job_out(row) for row in page],
+        items=[schemas.job_out(row, history) for row in page],
         next_before_id=page[-1].id if has_more else None,
     )
 

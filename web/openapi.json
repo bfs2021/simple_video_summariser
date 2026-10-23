@@ -1181,6 +1181,16 @@
             "title": "Priority",
             "type": "integer"
           },
+          "progress": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProgressOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "run_after": {
             "format": "date-time",
             "title": "Run After",
@@ -1221,7 +1231,8 @@
           "locked_by",
           "heartbeat_at",
           "finished_at",
-          "created_at"
+          "created_at",
+          "progress"
         ],
         "title": "JobOut",
         "type": "object"
@@ -1369,6 +1380,106 @@
           "feed_gap_reason"
         ],
         "title": "OpsChannelOut",
+        "type": "object"
+      },
+      "ProgressOut": {
+        "description": "Progress of a transcribe job (#245).\n\nA running job carries every figure. A pending one carries only the estimate\n(``estimated_sec``, ``eta_sec``, ``duration_sec``, ``estimate_source``); the\nrest are ``None``. ``estimate_source`` is ``\"default\"`` when there was no RTF\nhistory, so the UI can call the figure rough.",
+        "properties": {
+          "done_sec": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Done Sec"
+          },
+          "duration_sec": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Sec"
+          },
+          "elapsed_sec": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Elapsed Sec"
+          },
+          "estimate_source": {
+            "anyOf": [
+              {
+                "enum": [
+                  "history",
+                  "default"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimate Source"
+          },
+          "estimated_sec": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimated Sec"
+          },
+          "eta_sec": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Eta Sec"
+          },
+          "percent": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Percent"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "title": "ProgressOut",
         "type": "object"
       },
       "QuoteOut": {
@@ -1903,6 +2014,16 @@
             "title": "Origin",
             "type": "string"
           },
+          "progress": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProgressOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "published_at": {
             "anyOf": [
               {
@@ -1977,7 +2098,8 @@
           "last_failure",
           "latest_analysis_at",
           "transcript",
-          "analysis"
+          "analysis",
+          "progress"
         ],
         "title": "VideoDetail",
         "type": "object"

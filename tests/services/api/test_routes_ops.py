@@ -7,6 +7,7 @@ the bottom run both routes end to end against a seeded Postgres.
 
 from __future__ import annotations
 
+import json
 import threading
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -20,6 +21,7 @@ from fastapi.testclient import TestClient
 from common.config import get_settings
 from common.errors import ErrorClass
 from common.queue import PostgresQueue
+from common.repo.jobs import write_progress
 from services.api import deps
 from services.api.main import create_app
 from tests.services.api.conftest import LogSink
@@ -97,6 +99,8 @@ _COLUMNS = (
     "heartbeat_at",
     "finished_at",
     "created_at",
+    "progress",
+    "payload_duration_sec",
 )
 
 
@@ -121,6 +125,8 @@ def _job_row(**overrides: Any) -> tuple[Any, ...]:
         "heartbeat_at": None,
         "finished_at": None,
         "created_at": datetime(2026, 9, 1, 11, tzinfo=UTC),
+        "progress": None,
+        "payload_duration_sec": None,
     }
     values.update(overrides)
     return tuple(values[c] for c in _COLUMNS)
@@ -272,8 +278,10 @@ def test_item_shape_omits_payload_and_includes_every_declared_field(
         "heartbeat_at",
         "finished_at",
         "created_at",
+        "progress",
     }
     assert item["id"] == 7
+    assert item["progress"] is None
 
 
 def test_next_before_id_is_none_when_the_page_is_not_full(app: FastAPI) -> None:
@@ -706,3 +714,98 @@ def test_retry_racing_an_enqueue_leaves_exactly_one_active_job(
         " AND dedupe_key = 'default' AND state IN ('pending', 'running')"
     ).fetchone()
     assert active == (1,)
+
+
+_FIGURES: dict[str, Any] = {
+    "percent": 40,
+    "done_sec": 40.0,
+    "duration_sec": 100.0,
+    "elapsed_sec": 80.0,
+    "eta_sec": 120.0,
+    "estimated_sec": 100.0,
+    "estimate_source": "history",
+}
+
+
+@pytest.mark.integration
+def test_a_running_transcribe_job_carries_its_progress_end_to_end(
+    api: TestClient, db: psycopg.Connection[Any]
+) -> None:
+    job_id = _seed_job(db, video_id="v1", kind="transcribe", state="running", error_class=None)
+    db.execute("UPDATE jobs SET locked_by = 'w1' WHERE id = %s", (job_id,))
+    write_progress(db, job_id, "w1", _FIGURES)
+
+    (item,) = api.get("/ops/jobs").json()["items"]
+
+    progress = item["progress"]
+    assert {k: progress[k] for k in _FIGURES} == _FIGURES
+    assert progress["updated_at"].endswith("Z") or "+00:00" in progress["updated_at"]
+
+
+@pytest.mark.integration
+def test_a_pending_transcribe_job_shows_the_estimate_from_the_rtf_history(
+    api: TestClient, db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("WHISPER_MODEL", "tiny")
+    monkeypatch.setenv("WHISPER_COMPUTE", "int8")
+    get_settings.cache_clear()
+    db.execute("INSERT INTO videos (video_id) VALUES ('v1'), ('hist')")
+    db.execute(
+        "INSERT INTO transcripts (video_id, source, segments, full_text, engine_meta)"
+        " VALUES ('hist', 'whisper', '[]', '', %s::jsonb)",
+        (json.dumps({"model": "tiny", "compute_type": "int8", "rtf": 0.5}),),
+    )
+    job_id = _seed_job(db, video_id="v1", kind="transcribe", state="pending", error_class=None)
+    db.execute("UPDATE jobs SET payload = %s::jsonb WHERE id = %s", (json.dumps({"duration_sec": 200}), job_id))
+
+    (item,) = api.get("/ops/jobs").json()["items"]
+
+    assert item["progress"] == {
+        "percent": None,
+        "done_sec": None,
+        "duration_sec": 200.0,
+        "elapsed_sec": None,
+        "eta_sec": 100.0,
+        "estimated_sec": 100.0,
+        "estimate_source": "history",
+        "updated_at": None,
+    }
+
+
+@pytest.mark.integration
+def test_a_pending_transcribe_job_without_a_duration_has_no_progress(
+    api: TestClient, db: psycopg.Connection[Any]
+) -> None:
+    _seed_job(db, video_id="v1", kind="transcribe", state="pending", error_class=None)
+
+    (item,) = api.get("/ops/jobs").json()["items"]
+
+    assert item["progress"] is None
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("kind,state", [("ingest", "running"), ("analyze", "pending")])
+def test_other_kinds_never_carry_progress(
+    api: TestClient, db: psycopg.Connection[Any], kind: str, state: str
+) -> None:
+    job_id = _seed_job(db, video_id="v1", kind=kind, state=state, error_class=None)
+    db.execute(
+        "UPDATE jobs SET progress = %s::jsonb, payload = %s::jsonb WHERE id = %s",
+        (json.dumps(_FIGURES), json.dumps({"duration_sec": 200}), job_id),
+    )
+
+    (item,) = api.get("/ops/jobs").json()["items"]
+
+    assert item["progress"] is None
+
+
+@pytest.mark.integration
+def test_a_dead_transcribe_job_never_shows_progress(
+    api: TestClient, db: psycopg.Connection[Any]
+) -> None:
+    job_id = _seed_job(db, video_id="v1", kind="transcribe", state="dead")
+    db.execute("UPDATE jobs SET progress = %s::jsonb WHERE id = %s", (json.dumps(_FIGURES), job_id))
+
+    (item,) = api.get("/ops/jobs").json()["items"]
+
+    assert item["progress"] is None
