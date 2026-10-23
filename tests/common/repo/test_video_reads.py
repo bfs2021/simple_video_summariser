@@ -112,6 +112,22 @@ def test_no_jobs_means_no_active_job_and_no_failure(conn: psycopg.Connection[Any
     assert (detail.active_job, detail.last_failure, detail.latest_analysis_at) == (None, None, None)
 
 
+def test_has_transcript_is_true_only_for_a_video_with_a_transcript(
+    conn: psycopg.Connection[Any],
+) -> None:
+    seed.video(conn, "ht000000001")
+    seed.video(conn, "ht000000002")
+    seed.transcript(conn, "ht000000002")
+
+    by_id = {v.video_id: v for v in list_videos(conn).items}
+
+    assert by_id["ht000000001"].has_transcript is False
+    assert by_id["ht000000002"].has_transcript is True
+    detail = get_video(conn, "ht000000002")
+    assert detail is not None
+    assert detail.has_transcript is True
+
+
 def test_jobs_without_a_video_row_are_not_listed(conn: psycopg.Connection[Any]) -> None:
     seed.job(conn, "orphan00001", "ingest", "dead", created=1)
 

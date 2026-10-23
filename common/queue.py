@@ -520,7 +520,8 @@ class PostgresQueue:
                 worker,
                 """
                 UPDATE jobs SET state='done', finished_at=now(),
-                       locked_by=NULL, locked_at=NULL
+                       locked_by=NULL, locked_at=NULL,
+                       last_error=NULL, error_class=NULL
                 WHERE id=%(id)s AND locked_by=%(worker)s AND state='running'
                 """,
                 {},
