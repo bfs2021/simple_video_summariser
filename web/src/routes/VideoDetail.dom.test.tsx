@@ -227,6 +227,7 @@ describe('page states', () => {
     ['analyze', 'processing', 'running', 'Analysing'],
     ['embed', 'processing', 'running', 'Processing'],
     ['ingest', 'processing', 'pending', 'Queued: Fetching video details'],
+    ['transcribe', 'processing', 'pending', 'Queued: Transcribing'],
     ['analyze', 'processing', 'pending', 'Queued: Analysing'],
     ['weird', 'processing', 'pending', 'Queued: Processing'],
   ])('processing %s/%s shows "%s"', async (kind, status, state, text) => {

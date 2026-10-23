@@ -1012,7 +1012,13 @@ describe('accessibility', () => {
 
   it('uses no dangerouslySetInnerHTML in the view sources', async () => {
     const { readFileSync } = await import('node:fs')
-    for (const f of ['Library.tsx', '../hooks/useVideos.ts', '../lib/library.ts']) {
+    for (const f of [
+      'Library.tsx',
+      '../components/AddVideoForm.tsx',
+      '../hooks/useSubmitVideo.ts',
+      '../hooks/useVideos.ts',
+      '../lib/library.ts',
+    ]) {
       expect(readFileSync(new URL(f, import.meta.url), 'utf8')).not.toContain('dangerouslySetInnerHTML')
     }
   })
