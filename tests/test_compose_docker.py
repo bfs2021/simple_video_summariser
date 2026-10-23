@@ -137,7 +137,7 @@ def test_web_is_the_only_published_port_and_on_loopback(
     assert isinstance(ports, list) and len(ports) == 1
     assert ports[0]["host_ip"] == "127.0.0.1"
     assert str(ports[0]["published"]) == "8080"
-    assert ports[0]["target"] == 80
+    assert ports[0]["target"] == 8080
 
 
 def test_planner_has_one_replica_and_worker_healthcheck_keeps_its_dollars(
@@ -376,5 +376,5 @@ def test_prod_config_has_none_of_the_dev_overlay(
     ports = web["ports"]
     assert isinstance(ports, list) and len(ports) == 1
     assert (ports[0]["host_ip"], str(ports[0]["published"]), ports[0]["target"]) == (
-        "127.0.0.1", "8080", 80
+        "127.0.0.1", "8080", 8080
     )  # fmt: skip
