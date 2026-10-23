@@ -121,6 +121,7 @@ class VideoItem(VideoFields):
     active_job: ActiveJobOut | None
     last_failure: LastFailureOut | None
     latest_analysis_at: UtcDatetime | None
+    has_transcript: bool
 
 
 class VideoList(BaseModel):
@@ -344,6 +345,7 @@ def _video_fields(video: VideoSummary) -> dict[str, Any]:
             )
         ),
         "latest_analysis_at": video.latest_analysis_at,
+        "has_transcript": video.has_transcript,
     }
 
 

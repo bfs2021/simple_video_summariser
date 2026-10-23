@@ -81,7 +81,12 @@ def make_fake_model(
         instances: ClassVar[list[_FakeWhisperModel]] = []
 
         def __init__(
-            self, model_size_or_path: str, *, device: str, compute_type: str, cpu_threads: int
+            self,
+            model_size_or_path: str,
+            *,
+            device: str,
+            compute_type: str,
+            cpu_threads: int,
         ) -> None:
             if raise_on_init is not None:
                 raise raise_on_init
@@ -93,7 +98,12 @@ def make_fake_model(
             _FakeWhisperModel.instances.append(self)
 
         def transcribe(
-            self, audio_path: str, *, language: str | None, beam_size: int, vad_filter: bool
+            self,
+            audio_path: str,
+            *,
+            language: str | None,
+            beam_size: int,
+            vad_filter: bool,
         ) -> tuple[Iterator[FakeSegment], FakeInfo]:
             self.transcribe_calls.append(
                 {
@@ -105,7 +115,11 @@ def make_fake_model(
             )
             if raise_on_transcribe is not None:
                 raise raise_on_transcribe
-            iterator = segment_iterator() if segment_iterator is not None else iter(frozen_segments)
+            iterator = (
+                segment_iterator()
+                if segment_iterator is not None
+                else iter(frozen_segments)
+            )
             return iterator, FakeInfo(language=language or detected_language)
 
     return _FakeWhisperModel
@@ -132,7 +146,9 @@ AUDIO = AudioRef(rel_path="ab/abc12345678.opus", bytes=1234, duration_sec=10.0)
 
 
 def test_faster_whisper_transcriber_satisfies_the_transcriber_port() -> None:
-    transcriber: Transcriber = FasterWhisperTranscriber(model="tiny", compute_type="int8", threads=0)
+    transcriber: Transcriber = FasterWhisperTranscriber(
+        model="tiny", compute_type="int8", threads=0
+    )
     assert callable(transcriber.transcribe)
 
 
@@ -163,7 +179,9 @@ def test_defaults_come_from_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.engine_meta["threads"] == 4
 
 
-def test_explicit_constructor_args_override_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_explicit_constructor_args_override_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("WHISPER_MODEL", "large-v3")
     get_settings.cache_clear()
 
@@ -177,7 +195,9 @@ def test_explicit_constructor_args_override_settings(monkeypatch: pytest.MonkeyP
     assert instance.model_size_or_path == "tiny"
 
 
-def test_threads_zero_and_nonzero_pass_through_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_threads_zero_and_nonzero_pass_through_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     fake_cls: Any = make_fake_model()
     install_fake_module(monkeypatch, fake_cls)
     transcriber = FasterWhisperTranscriber(model="tiny", compute_type="int8", threads=0)
@@ -187,7 +207,9 @@ def test_threads_zero_and_nonzero_pass_through_unchanged(monkeypatch: pytest.Mon
     assert fake_cls.instances[0].cpu_threads == 0
 
 
-def test_a_nonzero_thread_count_passes_through_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_nonzero_thread_count_passes_through_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     fake_cls: Any = make_fake_model()
     install_fake_module(monkeypatch, fake_cls)
     transcriber = FasterWhisperTranscriber(model="tiny", compute_type="int8", threads=6)
@@ -210,7 +232,9 @@ def test_importing_the_module_and_constructing_do_not_need_faster_whisper(
     monkeypatch.setitem(sys.modules, "faster_whisper", None)
     module = importlib.reload(sys.modules[MODULE_NAME])
 
-    transcriber = module.FasterWhisperTranscriber(model="tiny", compute_type="int8", threads=0)
+    transcriber = module.FasterWhisperTranscriber(
+        model="tiny", compute_type="int8", threads=0
+    )
 
     assert transcriber is not None
 
@@ -263,7 +287,9 @@ def test_load_sec_is_zero_on_the_second_call(monkeypatch: pytest.MonkeyPatch) ->
 # --- decoding options (D3) -----------------------------------------------
 
 
-def test_decoding_uses_beam_size_5_and_vad_filter_true(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_decoding_uses_beam_size_5_and_vad_filter_true(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     fake_cls: Any = make_fake_model()
     install_fake_module(monkeypatch, fake_cls)
     transcriber = FasterWhisperTranscriber(model="tiny", compute_type="int8", threads=0)
@@ -278,7 +304,9 @@ def test_decoding_uses_beam_size_5_and_vad_filter_true(monkeypatch: pytest.Monke
 # --- results --------------------------------------------------------------
 
 
-def test_segments_are_trimmed_and_empty_ones_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_segments_are_trimmed_and_empty_ones_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     fake_cls: Any = make_fake_model(
         segments=[
             FakeSegment(start=0.0, end=1.0, text="  hello world  "),
@@ -296,7 +324,9 @@ def test_segments_are_trimmed_and_empty_ones_dropped(monkeypatch: pytest.MonkeyP
     assert [(s.start, s.end) for s in result.segments] == [(0.0, 1.0), (2.0, 3.0)]
 
 
-def test_language_defaults_to_the_detected_language(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_language_defaults_to_the_detected_language(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     fake_cls: Any = make_fake_model(language="es")
     install_fake_module(monkeypatch, fake_cls)
     transcriber = FasterWhisperTranscriber(model="tiny", compute_type="int8", threads=0)
@@ -305,6 +335,46 @@ def test_language_defaults_to_the_detected_language(monkeypatch: pytest.MonkeyPa
 
     assert result.language == "es"
     assert fake_cls.instances[0].transcribe_calls[0]["language"] is None
+
+
+@pytest.mark.parametrize(
+    ("given", "passed"),
+    [
+        ("en-US", "en"),  # the YouTube spelling that broke job 7
+        ("en_GB", "en"),
+        ("pt-BR", "pt"),
+        ("zh-Hans", "zh"),
+        ("FR", "fr"),
+        ("  de ", "de"),
+        ("iw", "he"),  # old ISO 639-1 codes YouTube still emits
+        ("jv", "jw"),  # Whisper spells Javanese "jw"
+    ],
+)
+def test_region_and_legacy_language_codes_are_reduced_to_a_whisper_code(
+    monkeypatch: pytest.MonkeyPatch, given: str, passed: str
+) -> None:
+    fake_cls: Any = make_fake_model(language="en")
+    install_fake_module(monkeypatch, fake_cls)
+    transcriber = FasterWhisperTranscriber(model="tiny", compute_type="int8", threads=1)
+
+    result = transcriber.transcribe(AUDIO, language=given)
+
+    assert fake_cls.instances[0].transcribe_calls[0]["language"] == passed
+    assert result.language == passed
+
+
+@pytest.mark.parametrize("given", ["", "   ", "xx", "und", "zxx", "-US", "klingon"])
+def test_a_language_whisper_does_not_know_falls_back_to_detection(
+    monkeypatch: pytest.MonkeyPatch, given: str
+) -> None:
+    fake_cls: Any = make_fake_model(language="es")
+    install_fake_module(monkeypatch, fake_cls)
+    transcriber = FasterWhisperTranscriber(model="tiny", compute_type="int8", threads=1)
+
+    result = transcriber.transcribe(AUDIO, language=given)
+
+    assert fake_cls.instances[0].transcribe_calls[0]["language"] is None
+    assert result.language == "es"
 
 
 def test_language_given_explicitly_is_used_and_passed_through(
@@ -445,7 +515,9 @@ def test_an_exception_from_on_progress_stops_transcription_and_propagates_unchan
 def test_a_network_failure_loading_the_model_raises_transient_network_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake_cls: Any = make_fake_model(raise_on_init=ConnectionError("network unreachable"))
+    fake_cls: Any = make_fake_model(
+        raise_on_init=ConnectionError("network unreachable")
+    )
     install_fake_module(monkeypatch, fake_cls)
     transcriber = FasterWhisperTranscriber(model="tiny", compute_type="int8", threads=0)
 
@@ -453,8 +525,12 @@ def test_a_network_failure_loading_the_model_raises_transient_network_error(
         transcriber.transcribe(AUDIO)
 
 
-def test_corrupt_audio_raises_tool_failure_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_cls: Any = make_fake_model(raise_on_transcribe=RuntimeError("moov atom not found"))
+def test_corrupt_audio_raises_tool_failure_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_cls: Any = make_fake_model(
+        raise_on_transcribe=RuntimeError("moov atom not found")
+    )
     install_fake_module(monkeypatch, fake_cls)
     transcriber = FasterWhisperTranscriber(model="tiny", compute_type="int8", threads=0)
 
@@ -477,7 +553,9 @@ def test_a_decode_error_mid_iteration_raises_tool_failure_error(
         transcriber.transcribe(AUDIO)
 
 
-def test_memory_error_from_model_construction_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_memory_error_from_model_construction_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     fake_cls: Any = make_fake_model(raise_on_init=MemoryError())
     install_fake_module(monkeypatch, fake_cls)
     transcriber = FasterWhisperTranscriber(model="tiny", compute_type="int8", threads=0)
@@ -486,7 +564,9 @@ def test_memory_error_from_model_construction_propagates(monkeypatch: pytest.Mon
         transcriber.transcribe(AUDIO)
 
 
-def test_memory_error_from_transcribe_call_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_memory_error_from_transcribe_call_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     fake_cls: Any = make_fake_model(raise_on_transcribe=MemoryError())
     install_fake_module(monkeypatch, fake_cls)
     transcriber = FasterWhisperTranscriber(model="tiny", compute_type="int8", threads=0)

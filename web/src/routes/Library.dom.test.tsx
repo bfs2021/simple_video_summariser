@@ -20,6 +20,7 @@ function vid(n: number, over: Partial<VideoItem> = {}): VideoItem {
     published_at: '2026-09-01T12:00:00Z',
     duration_sec: 60,
     latest_analysis_at: null,
+    has_transcript: false,
     origin: 'manual',
     unavailable: null,
     status: 'done',
@@ -164,6 +165,7 @@ describe('sorting', () => {
       ['Channel', null],
       ['Published 1 descending', 'descending'],
       ['Status', null],
+      ['Transcript', null],
     ])
     for (const name of [
       'Append Title ascending',
@@ -310,6 +312,7 @@ describe('rows', () => {
       'Channel',
       'Published 1 descending',
       'Status',
+      'Transcript',
     ])
   })
 
@@ -691,6 +694,23 @@ describe('pagination', () => {
   })
 })
 
+describe('transcript column', () => {
+  it('links a video that has a transcript and says "Not yet" for one that has not', async () => {
+    stubFetch(() =>
+      list(2, [
+        vid(1, { status: 'processing', has_transcript: true }),
+        vid(2, { status: 'processing', has_transcript: false }),
+      ]),
+    )
+    await mount()
+    const rows = screen.getAllByRole('row').slice(1)
+    const link = within(rows[0]).getByRole('link', { name: 'Transcript' })
+    expect(link.getAttribute('href')).toBe('/videos/v0000000001/transcript')
+    expect(within(rows[1]).queryByRole('link', { name: 'Transcript' })).toBeNull()
+    expect(within(rows[1]).getByText('Not yet')).toBeTruthy()
+  })
+})
+
 describe('states', () => {
   it('first visit shows a loading indicator, not the empty message', async () => {
     stubFetch(() => new Promise<Response>(() => {}))
@@ -838,7 +858,7 @@ describe('accessibility', () => {
     expect(screen.getByLabelText('To').tagName).toBe('INPUT')
     expect(screen.getByLabelText('Status').tagName).toBe('SELECT')
     expect(screen.getByRole('table')).toBeTruthy()
-    expect(screen.getAllByRole('columnheader')).toHaveLength(4)
+    expect(screen.getAllByRole('columnheader')).toHaveLength(5)
   })
 
   it('uses no dangerouslySetInnerHTML in the view sources', async () => {

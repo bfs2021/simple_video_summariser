@@ -1019,6 +1019,8 @@ export interface components {
             channel_title: string | null;
             /** Duration Sec */
             duration_sec: number | null;
+            /** Has Transcript */
+            has_transcript: boolean;
             last_failure: components["schemas"]["LastFailureOut"] | null;
             /** Latest Analysis At */
             latest_analysis_at: string | null;
@@ -1049,6 +1051,8 @@ export interface components {
             channel_title: string | null;
             /** Duration Sec */
             duration_sec: number | null;
+            /** Has Transcript */
+            has_transcript: boolean;
             last_failure: components["schemas"]["LastFailureOut"] | null;
             /** Latest Analysis At */
             latest_analysis_at: string | null;

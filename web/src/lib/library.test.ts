@@ -23,6 +23,7 @@ function item(over: Partial<VideoItem>): VideoItem {
     published_at: null,
     duration_sec: null,
     latest_analysis_at: null,
+    has_transcript: false,
     origin: 'manual',
     unavailable: null,
     status: 'idle',

@@ -90,6 +90,7 @@ def test_a_library_item_has_exactly_the_documented_fields(
             "last_failure": {"job_id": dead, "kind": "ingest", "error_class": "BUG",
                              "finished_at": "2026-01-01T00:02:00Z"},
             "latest_analysis_at": "2026-01-01T00:07:00Z",
+            "has_transcript": True,
         }
     ]
     assert "SECRET" not in response.text
