@@ -1479,6 +1479,16 @@
             "title": "Updated At"
           }
         },
+        "required": [
+          "percent",
+          "done_sec",
+          "duration_sec",
+          "elapsed_sec",
+          "eta_sec",
+          "estimated_sec",
+          "estimate_source",
+          "updated_at"
+        ],
         "title": "ProgressOut",
         "type": "object"
       },

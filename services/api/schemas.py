@@ -58,14 +58,14 @@ class ProgressOut(BaseModel):
     history, so the UI can call the figure rough.
     """
 
-    percent: int | None = None
-    done_sec: float | None = None
-    duration_sec: float | None = None
-    elapsed_sec: float | None = None
-    eta_sec: float | None = None
-    estimated_sec: float | None = None
-    estimate_source: Literal["history", "default"] | None = None
-    updated_at: UtcDatetime | None = None
+    percent: int | None
+    done_sec: float | None
+    duration_sec: float | None
+    elapsed_sec: float | None
+    eta_sec: float | None
+    estimated_sec: float | None
+    estimate_source: Literal["history", "default"] | None
+    updated_at: UtcDatetime | None
 
 
 def progress_out(row: JobRow, history: Sequence[float] | None = None) -> ProgressOut | None:
@@ -91,10 +91,14 @@ def progress_out(row: JobRow, history: Sequence[float] | None = None) -> Progres
         if estimate is None:
             return None
         return ProgressOut(
+            percent=None,
+            done_sec=None,
             duration_sec=row.payload_duration_sec,
+            elapsed_sec=None,
             eta_sec=round(estimate.estimated_sec, 1),
             estimated_sec=round(estimate.estimated_sec, 1),
             estimate_source=estimate.source,
+            updated_at=None,
         )
     return None
 

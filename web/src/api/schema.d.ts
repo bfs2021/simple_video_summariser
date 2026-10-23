@@ -864,21 +864,21 @@ export interface components {
          */
         ProgressOut: {
             /** Done Sec */
-            done_sec?: number | null;
+            done_sec: number | null;
             /** Duration Sec */
-            duration_sec?: number | null;
+            duration_sec: number | null;
             /** Elapsed Sec */
-            elapsed_sec?: number | null;
+            elapsed_sec: number | null;
             /** Estimate Source */
-            estimate_source?: ("history" | "default") | null;
+            estimate_source: ("history" | "default") | null;
             /** Estimated Sec */
-            estimated_sec?: number | null;
+            estimated_sec: number | null;
             /** Eta Sec */
-            eta_sec?: number | null;
+            eta_sec: number | null;
             /** Percent */
-            percent?: number | null;
+            percent: number | null;
             /** Updated At */
-            updated_at?: string | null;
+            updated_at: string | null;
         };
         /** QuoteOut */
         QuoteOut: {
