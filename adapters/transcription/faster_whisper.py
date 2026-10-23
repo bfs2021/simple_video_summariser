@@ -26,6 +26,129 @@ _VAD_FILTER = True
 
 _REQUIREMENTS_FILE = "requirements.whisper.txt"
 
+#: The codes Whisper accepts (faster-whisper rejects anything else, including
+#: region-tagged ones like ``en-US``).
+_WHISPER_LANGUAGES = frozenset(
+    [
+        "af",
+        "am",
+        "ar",
+        "as",
+        "az",
+        "ba",
+        "be",
+        "bg",
+        "bn",
+        "bo",
+        "br",
+        "bs",
+        "ca",
+        "cs",
+        "cy",
+        "da",
+        "de",
+        "el",
+        "en",
+        "es",
+        "et",
+        "eu",
+        "fa",
+        "fi",
+        "fo",
+        "fr",
+        "gl",
+        "gu",
+        "ha",
+        "haw",
+        "he",
+        "hi",
+        "hr",
+        "ht",
+        "hu",
+        "hy",
+        "id",
+        "is",
+        "it",
+        "ja",
+        "jw",
+        "ka",
+        "kk",
+        "km",
+        "kn",
+        "ko",
+        "la",
+        "lb",
+        "ln",
+        "lo",
+        "lt",
+        "lv",
+        "mg",
+        "mi",
+        "mk",
+        "ml",
+        "mn",
+        "mr",
+        "ms",
+        "mt",
+        "my",
+        "ne",
+        "nl",
+        "nn",
+        "no",
+        "oc",
+        "pa",
+        "pl",
+        "ps",
+        "pt",
+        "ro",
+        "ru",
+        "sa",
+        "sd",
+        "si",
+        "sk",
+        "sl",
+        "sn",
+        "so",
+        "sq",
+        "sr",
+        "su",
+        "sv",
+        "sw",
+        "ta",
+        "te",
+        "tg",
+        "th",
+        "tk",
+        "tl",
+        "tr",
+        "tt",
+        "uk",
+        "ur",
+        "uz",
+        "vi",
+        "yi",
+        "yo",
+        "zh",
+        "yue",
+    ]
+)
+
+#: Old ISO 639-1 codes YouTube still emits, and Javanese, which Whisper spells "jw".
+_LANGUAGE_ALIASES = {"iw": "he", "in": "id", "ji": "yi", "jv": "jw"}
+
+
+def whisper_language(code: str | None) -> str | None:
+    """Reduce a BCP-47 tag (``en-US``, ``pt_BR``, ``zh-Hans``) to a Whisper code.
+
+    ``None`` for an empty or unknown code, which makes Whisper detect the
+    language instead of failing the job.
+    """
+    if code is None:
+        return None
+    primary = code.strip().lower().replace("_", "-").split("-", 1)[0]
+    primary = _LANGUAGE_ALIASES.get(primary, primary)
+    return primary if primary in _WHISPER_LANGUAGES else None
+
 
 class FasterWhisperTranscriber:
     """``Transcriber`` backed by faster-whisper on CPU (architecture.md 3, 7.2)."""
@@ -42,7 +165,9 @@ class FasterWhisperTranscriber:
         if model is None or compute_type is None or threads is None:
             settings = get_settings()
             model = settings.WHISPER_MODEL if model is None else model
-            compute_type = settings.WHISPER_COMPUTE if compute_type is None else compute_type
+            compute_type = (
+                settings.WHISPER_COMPUTE if compute_type is None else compute_type
+            )
             threads = settings.WHISPER_THREADS if threads is None else threads
 
         self._model_name = model
@@ -59,6 +184,7 @@ class FasterWhisperTranscriber:
         on_progress: Callable[[float], None] | None = None,
     ) -> TranscriptResult:
         model, engine_version, load_sec = self._ensure_model()
+        language = whisper_language(language)
 
         audio_path = get_settings().AUDIO_DIR / audio.rel_path
 
@@ -99,7 +225,9 @@ class FasterWhisperTranscriber:
         }
 
         return TranscriptResult(
-            segments=tuple(segments), language=resolved_language, engine_meta=engine_meta
+            segments=tuple(segments),
+            language=resolved_language,
+            engine_meta=engine_meta,
         )
 
     def check_available(self) -> None:
