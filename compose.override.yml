@@ -14,9 +14,36 @@
 #     `audio` and `whisper-models` mounts from compose.yml.
 #   - api: `uvicorn --reload`, watching only the mounted source directories
 #     (uvicorn's own stat reloader; no extra package).
-#   - planner, analyzer, transcriber keep their compose.yml commands. After a
-#     source edit, run `docker compose restart <service>` (automatic restart
-#     is #142).
+#   - planner, analyzer, transcriber keep their compose.yml commands (no
+#     wrapper process, no shell) and restart on a source edit through Docker
+#     Compose Watch (`develop.watch`, `action: restart`; #142). Mechanism
+#     choice: Compose Watch is built into `docker compose`, so it adds no
+#     dependency, matching #59's no-extra-reloader-package decision (the
+#     file-watcher CLI option was rejected for that reason). `action: sync`
+#     is not used: the source mounts are read-only. Dev loop, either of:
+#       docker compose up -d --build   then, in its own terminal,
+#       docker compose watch --no-up
+#     or, in the foreground, `docker compose up --watch --build`. `-d` and
+#     `--watch` cannot be combined (Compose rejects it). Without watch,
+#     nothing restarts by itself and `docker compose restart <service>`
+#     still picks up an edit. `api` has no watch rule: uvicorn reloads it,
+#     and watching it too would restart it twice.
+#     Watch paths per worker: ./common, ./adapters and ONLY its own
+#     ./services/<worker> (never all of ./services, or an edit to
+#     services/api would restart the transcriber mid-job). Rule: if a worker
+#     starts importing another service package (for example services.planner
+#     importing services.analyzer), add that path to its watch list here.
+#     `**/__pycache__/**` and `**/*.pyc` are ignored, or host-side pytest and
+#     mypy would restart every worker.
+#     A job in flight when its worker restarts: the worker (SIGTERM) stops
+#     claiming and gives the handler WORKER_SHUTDOWN_GRACE_SEC (default 20 s)
+#     to finish, then sets ctx.cancelled. A handler that reaches
+#     check_cancelled() hands the job back without spending an attempt (#13);
+#     for `transcribe` the transcription starts again from the beginning on
+#     the next claim and the progress so far is lost. A handler still blocked
+#     past the 30 s stop_grace_period is SIGKILLed and the reaper recovers
+#     the job (#12). So do not edit worker code during a long dev
+#     transcription you want to keep; run plain `up -d` (no watch) instead.
 #   - migrate: bind-mounts ./migrations read-only so a new revision runs with
 #     `docker compose run --rm migrate` and no rebuild. Still only on demand.
 #   - web: the Vite dev server (HMR) from node:24-alpine instead of nginx, on
@@ -64,12 +91,22 @@ services:
       - ./common:/app/common:ro
       - ./adapters:/app/adapters:ro
       - ./services:/app/services:ro
+    develop:
+      watch:
+        - {action: restart, path: ./common, ignore: ["**/__pycache__/**", "**/*.pyc"]}
+        - {action: restart, path: ./adapters, ignore: ["**/__pycache__/**", "**/*.pyc"]}
+        - {action: restart, path: ./services/planner, ignore: ["**/__pycache__/**", "**/*.pyc"]}
 
   analyzer:
     volumes:
       - ./common:/app/common:ro
       - ./adapters:/app/adapters:ro
       - ./services:/app/services:ro
+    develop:
+      watch:
+        - {action: restart, path: ./common, ignore: ["**/__pycache__/**", "**/*.pyc"]}
+        - {action: restart, path: ./adapters, ignore: ["**/__pycache__/**", "**/*.pyc"]}
+        - {action: restart, path: ./services/analyzer, ignore: ["**/__pycache__/**", "**/*.pyc"]}
 
   transcriber:
     environment:
@@ -78,6 +115,11 @@ services:
       - ./common:/app/common:ro
       - ./adapters:/app/adapters:ro
       - ./services:/app/services:ro
+    develop:
+      watch:
+        - {action: restart, path: ./common, ignore: ["**/__pycache__/**", "**/*.pyc"]}
+        - {action: restart, path: ./adapters, ignore: ["**/__pycache__/**", "**/*.pyc"]}
+        - {action: restart, path: ./services/transcriber, ignore: ["**/__pycache__/**", "**/*.pyc"]}
 
   web:
     build: !reset null

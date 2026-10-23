@@ -1710,9 +1710,29 @@ Decided in #59, beyond the list above:
   mountpoint in the host tree as root. The `web` command starts as root only
   to give `/home/node/app` to `node`, then runs `npm ci` and the dev server as
   `node`. A new top-level file Vite needs must be added to the list.
-- The workers (`planner`, `analyzer`, `transcriber`) get the same mounts but
-  keep their commands; after an edit, `docker compose restart <service>`
-  picks it up. Restarting them automatically is #142.
+- The workers (`planner`, `analyzer`, `transcriber`) get the same mounts and
+  keep their commands (no wrapper, no shell). They restart on a source edit
+  through Docker Compose Watch (#142): `develop.watch` with `action: restart`
+  in `compose.override.yml` only. Compose Watch is built into `docker
+  compose`, so it adds no dependency, matching #59's "no `watchfiles`"
+  decision; `sync` is not used because the mounts are read-only. The dev loop
+  is `docker compose up -d --build` followed by `docker compose watch
+  --no-up` in its own terminal, or `docker compose up --watch --build` in the
+  foreground; `-d` and `--watch` cannot be combined. Without watch nothing
+  restarts by itself, and `docker compose restart <service>` still picks up
+  an edit. `api` has no rule (uvicorn reloads it). Each worker watches
+  `./common`, `./adapters` and only its own `./services/<worker>`, ignoring
+  `**/__pycache__/**` and `**/*.pyc` so host-side `pytest` restarts nothing.
+  Adding a cross-service import to a worker (for example `services.planner`
+  importing `services.analyzer`) means adding that path to its watch list.
+  A job in flight at restart: the worker stops claiming and gives the handler
+  `WORKER_SHUTDOWN_GRACE_SEC` (default 20 s) to finish, then sets
+  `ctx.cancelled`; a handler that reaches `check_cancelled()` hands the job
+  back without spending an attempt (#13). For `transcribe` the transcription
+  starts again from the beginning on the next claim and its progress is lost.
+  A handler blocked past the 30 s `stop_grace_period` is SIGKILLed and the
+  reaper recovers the job (#12). So do not edit worker code during a long dev
+  transcription you want to keep; run plain `up -d` (no watch) instead.
 
 Production deployment uses `docker compose -f compose.yml up -d` explicitly, so
 the override is never applied by accident.

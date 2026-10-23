@@ -291,6 +291,39 @@ def test_dev_config_api_runs_uvicorn_reload_workers_keep_commands(
     ]  # fmt: skip
 
 
+WATCHED_WORKERS = ("planner", "analyzer", "transcriber")
+
+
+def _watch_rules(service: dict[str, object]) -> list[dict[str, object]]:
+    develop = service["develop"]
+    assert isinstance(develop, dict)
+    rules = develop["watch"]
+    assert isinstance(rules, list)
+    return rules
+
+
+def test_dev_config_only_the_three_workers_have_a_watch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    services = _dev(monkeypatch, tmp_path)
+    assert {n for n, svc in services.items() if "develop" in svc} == set(WATCHED_WORKERS)
+    for name in ("api", "web", "migrate", "db"):
+        assert "develop" not in services[name], name
+
+
+@pytest.mark.parametrize("name", WATCHED_WORKERS)
+def test_dev_config_worker_watch_restarts_on_its_own_sources_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str
+) -> None:
+    rules = _watch_rules(_dev(monkeypatch, tmp_path)[name])
+    assert {r["action"] for r in rules} == {"restart"}
+    assert sorted(str(r["path"]) for r in rules) == sorted(
+        str(REPO_ROOT / p) for p in ("common", "adapters", f"services/{name}")
+    )
+    for rule in rules:
+        assert set(rule["ignore"]) >= {"**/__pycache__/**", "**/*.pyc"}  # type: ignore[call-overload]
+
+
 def test_dev_config_web_is_the_vite_dev_server_without_a_build(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -364,6 +397,7 @@ def test_prod_config_has_none_of_the_dev_overlay(
         "5173",
         "devhost",
         "API_PROXY_TARGET",
+        "develop",
     ):
         assert needle not in raw, needle
     assert '"published": "5432"' not in raw
