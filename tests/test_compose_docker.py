@@ -306,7 +306,9 @@ def test_dev_config_only_the_three_workers_have_a_watch(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     services = _dev(monkeypatch, tmp_path)
-    assert {n for n, svc in services.items() if "develop" in svc} == set(WATCHED_WORKERS)
+    assert {n for n, svc in services.items() if "develop" in svc} == set(
+        WATCHED_WORKERS
+    )
     for name in ("api", "web", "migrate", "db"):
         assert "develop" not in services[name], name
 
@@ -321,7 +323,11 @@ def test_dev_config_worker_watch_restarts_on_its_own_sources_only(
         str(REPO_ROOT / p) for p in ("common", "adapters", f"services/{name}")
     )
     for rule in rules:
-        assert set(rule["ignore"]) >= {"**/__pycache__/**", "**/*.pyc"}  # type: ignore[call-overload]
+        # The bare directory form matters: creating `__pycache__` is itself an
+        # event, which `**/__pycache__/**` alone does not ignore.
+        assert set(rule["ignore"]) >= {  # type: ignore[call-overload]
+            "**/__pycache__", "**/__pycache__/**", "**/*.pyc"
+        }  # fmt: skip
 
 
 def test_dev_config_web_is_the_vite_dev_server_without_a_build(

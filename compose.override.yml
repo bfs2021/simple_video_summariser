@@ -33,8 +33,9 @@
 #     services/api would restart the transcriber mid-job). Rule: if a worker
 #     starts importing another service package (for example services.planner
 #     importing services.analyzer), add that path to its watch list here.
-#     `**/__pycache__/**` and `**/*.pyc` are ignored, or host-side pytest and
-#     mypy would restart every worker.
+#     `**/__pycache__` (the directory itself: its creation is an event), `**/__pycache__/**` and
+#     `**/*.pyc` are ignored, or host-side pytest and mypy would restart
+#     every worker (reproduced: `python -m compileall` on a fresh checkout).
 #     A job in flight when its worker restarts: the worker (SIGTERM) stops
 #     claiming and gives the handler WORKER_SHUTDOWN_GRACE_SEC (default 20 s)
 #     to finish, then sets ctx.cancelled. A handler that reaches
@@ -93,9 +94,9 @@ services:
       - ./services:/app/services:ro
     develop:
       watch:
-        - {action: restart, path: ./common, ignore: ["**/__pycache__/**", "**/*.pyc"]}
-        - {action: restart, path: ./adapters, ignore: ["**/__pycache__/**", "**/*.pyc"]}
-        - {action: restart, path: ./services/planner, ignore: ["**/__pycache__/**", "**/*.pyc"]}
+        - {action: restart, path: ./common, ignore: ["**/__pycache__", "**/__pycache__/**", "**/*.pyc"]}
+        - {action: restart, path: ./adapters, ignore: ["**/__pycache__", "**/__pycache__/**", "**/*.pyc"]}
+        - {action: restart, path: ./services/planner, ignore: ["**/__pycache__", "**/__pycache__/**", "**/*.pyc"]}
 
   analyzer:
     volumes:
@@ -104,9 +105,9 @@ services:
       - ./services:/app/services:ro
     develop:
       watch:
-        - {action: restart, path: ./common, ignore: ["**/__pycache__/**", "**/*.pyc"]}
-        - {action: restart, path: ./adapters, ignore: ["**/__pycache__/**", "**/*.pyc"]}
-        - {action: restart, path: ./services/analyzer, ignore: ["**/__pycache__/**", "**/*.pyc"]}
+        - {action: restart, path: ./common, ignore: ["**/__pycache__", "**/__pycache__/**", "**/*.pyc"]}
+        - {action: restart, path: ./adapters, ignore: ["**/__pycache__", "**/__pycache__/**", "**/*.pyc"]}
+        - {action: restart, path: ./services/analyzer, ignore: ["**/__pycache__", "**/__pycache__/**", "**/*.pyc"]}
 
   transcriber:
     environment:
@@ -117,9 +118,9 @@ services:
       - ./services:/app/services:ro
     develop:
       watch:
-        - {action: restart, path: ./common, ignore: ["**/__pycache__/**", "**/*.pyc"]}
-        - {action: restart, path: ./adapters, ignore: ["**/__pycache__/**", "**/*.pyc"]}
-        - {action: restart, path: ./services/transcriber, ignore: ["**/__pycache__/**", "**/*.pyc"]}
+        - {action: restart, path: ./common, ignore: ["**/__pycache__", "**/__pycache__/**", "**/*.pyc"]}
+        - {action: restart, path: ./adapters, ignore: ["**/__pycache__", "**/__pycache__/**", "**/*.pyc"]}
+        - {action: restart, path: ./services/transcriber, ignore: ["**/__pycache__", "**/__pycache__/**", "**/*.pyc"]}
 
   web:
     build: !reset null

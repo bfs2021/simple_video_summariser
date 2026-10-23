@@ -1722,7 +1722,8 @@ Decided in #59, beyond the list above:
   restarts by itself, and `docker compose restart <service>` still picks up
   an edit. `api` has no rule (uvicorn reloads it). Each worker watches
   `./common`, `./adapters` and only its own `./services/<worker>`, ignoring
-  `**/__pycache__/**` and `**/*.pyc` so host-side `pytest` restarts nothing.
+  `**/__pycache__` (the directory itself), `**/__pycache__/**` and `**/*.pyc`,
+  so host-side `pytest` restarts nothing.
   Adding a cross-service import to a worker (for example `services.planner`
   importing `services.analyzer`) means adding that path to its watch list.
   A job in flight at restart: the worker stops claiming and gives the handler
