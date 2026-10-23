@@ -131,9 +131,12 @@ OWN_LOCATIONS = [h for h in _all_locations() if h not in PROXY_LOCATIONS]
 # ---- Dockerfile ----
 
 
-def test_stages_are_node_24_alpine_build_then_nginx_1_27_alpine() -> None:
+def test_stages_are_node_24_alpine_build_then_unprivileged_nginx_1_30_alpine() -> None:
     froms = [args for name, args in _steps() if name == "FROM"]
-    assert froms == ["node:24-alpine AS build", "nginx:1.27-alpine"]
+    assert froms == [
+        "node:24-alpine AS build",
+        "nginx/nginx-unprivileged:1.30-alpine",
+    ]
 
 
 def test_build_installs_with_npm_ci_and_no_escape_hatches() -> None:
@@ -219,10 +222,19 @@ def test_image_has_no_shell_form_entrypoint_or_cmd() -> None:
             assert args.startswith("["), f"shell-form {name} swallows SIGTERM"
 
 
-def test_dockerfile_never_sets_a_user() -> None:
-    # nginx:1.27-alpine must start as root to bind :80 and write its pid file.
-    # Unprivileged nginx is #140, not this issue.
-    assert all(name != "USER" for name, _ in _steps())
+def test_runtime_stage_ends_as_a_numeric_non_root_user() -> None:
+    # Root is allowed only for the build-time `rm -rf` of the base image's
+    # pages; the user the container starts as must be numeric and non-zero.
+    users = [args for name, args in _stages()[1] if name == "USER"]
+    assert users, "the runtime stage must declare a USER"
+    assert users[-1].isdigit() and int(users[-1]) != 0
+    steps = _stages()[1]
+    last_user = max(i for i, (n, _) in enumerate(steps) if n == "USER")
+    assert all(n != "RUN" for n, _ in steps[last_user:])
+
+
+def test_build_stage_declares_no_user() -> None:
+    assert all(name != "USER" for name, _ in _stages()[0])
 
 
 # ---- .dockerignore ----
@@ -273,9 +285,10 @@ def test_dockerignore_web_dist_is_appended_after_the_55_entries() -> None:
 # ---- nginx.conf: serving and caching ----
 
 
-def test_server_listens_on_80_and_roots_at_the_html_directory() -> None:
+def test_server_listens_on_8080_and_roots_at_the_html_directory() -> None:
     server = _server()
-    assert "listen 80;" in server
+    assert "listen 8080;" in server
+    assert not re.search(r"listen\s+(\S+:)?80\s*;", server)
     assert "root /usr/share/nginx/html;" in server
 
 

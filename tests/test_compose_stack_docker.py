@@ -239,8 +239,8 @@ def test_db_has_no_egress(stack: Stack) -> None:
 
 def test_web_cannot_reach_db_but_api_can(stack: Stack) -> None:
     # Positive control: nc must exist and succeed against something web can
-    # reach (itself on :80) before a failure toward db can mean "blocked".
-    control = stack.exec("web", "sh", "-c", "nc -z -w 3 127.0.0.1 80")
+    # reach (itself on :8080) before a failure toward db can mean "blocked".
+    control = stack.exec("web", "sh", "-c", "nc -z -w 3 127.0.0.1 8080")
     assert control.returncode == 0, f"nc is unusable in the web image: {control.stderr}"
     assert stack.exec("web", "sh", "-c", "nc -z -w 3 db 5432").returncode != 0
     api = stack.exec(

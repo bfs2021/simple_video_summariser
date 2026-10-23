@@ -307,7 +307,9 @@ docker compose config | grep -E 'type: bind|WHISPER_MODEL:\s*"?tiny"?' || echo "
 docker compose ps          # services healthy
 ```
 
-`web` is published on `127.0.0.1:8080` only; put it behind the host reverse
+`web` runs nginx as a non-root user (`nginx/nginx-unprivileged:1.30-alpine`)
+on container port 8080 and is published on `127.0.0.1:8080` only
+(`127.0.0.1:8080:8080`); put it behind the host reverse
 proxy (#141) for TLS. Updates are `git pull` of `master`, then
 `docker compose run --rm migrate` (if there is a new revision) and
 `docker compose -f compose.yml up -d --build`.

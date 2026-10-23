@@ -1230,11 +1230,19 @@ ARG VITE_API_BASE=/api
 RUN npm run build               # prebuild runs gen:api first → /src/dist
 
 # ---- runtime ----
-FROM nginx:1.27-alpine
+FROM nginx/nginx-unprivileged:1.30-alpine
+USER root                       # build-time cleanup only; nothing starts as root
 RUN rm -rf /usr/share/nginx/html/*   # the base image's own index.html, 50x.html
 COPY --from=build /src/dist /usr/share/nginx/html
 COPY ops/nginx.conf /etc/nginx/conf.d/default.conf
+USER 101                        # numeric non-root runtime user
 ```
+
+The runtime is the maintained nginx stable line (1.30) in its unprivileged
+variant (#140): nginx listens on container port **8080**, the pid file and
+temporary paths live under `/tmp`, and the container runs as uid 101, so it also
+starts with `--read-only --tmpfs /tmp`. The tag is pinned, not the digest
+(digest pinning is #241).
 
 **This is where D12's "no Node in production" becomes literal.** Node exists
 only in the `build` stage; the shipped image is nginx plus static files, ~30 MB,
@@ -1278,12 +1286,12 @@ map $request_uri $api_path {
 # through untouched).
 
 server {
-    listen 80;
+    listen 8080;
     root /usr/share/nginx/html;
     access_log /var/log/nginx/access.log ytdigest;
 
     # Deviation from 11.3: redirects nginx issues are relative, never naming
-    # the container's :80 (wrong behind the 127.0.0.1:8080 mapping and proxy).
+    # the container's :8080 (wrong behind the 127.0.0.1:8080 mapping and proxy).
     absolute_redirect off;
     # Deviation from 11.3: no version in the Server header or error pages.
     server_tokens off;
@@ -1456,7 +1464,7 @@ services:
   web:
     build: {context: ., dockerfile: ops/Dockerfile.frontend}
     image: ytdigest-web:latest
-    ports: ["127.0.0.1:8080:80"]      # loopback only (D13)
+    ports: ["127.0.0.1:8080:8080"]    # loopback only (D13)
     depends_on: {api: {condition: service_healthy}}
     networks: [edge]
     logging: *logging

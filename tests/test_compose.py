@@ -314,7 +314,7 @@ def test_ports_only_on_web_bound_to_loopback() -> None:
     for name in SERVICES:
         block = _block(name)
         if name == "web":
-            assert 'ports: ["127.0.0.1:8080:80"]' in block
+            assert 'ports: ["127.0.0.1:8080:8080"]' in block
         else:
             assert "ports:" not in block
     assert COMPOSE_YML.read_text().count("ports:") == 1

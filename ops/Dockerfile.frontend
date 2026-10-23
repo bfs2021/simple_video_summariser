@@ -20,13 +20,19 @@ ARG VITE_API_BASE=/api
 RUN npm run build
 
 # ---- runtime ----
-# 1.27 is the unmaintained line the spec names; moving off it, and running
-# nginx unprivileged (hence no USER here), is #140.
-FROM nginx:1.27-alpine
+# nginx's maintained stable line, in the unprivileged variant (#140): it listens
+# on 8080 and keeps the pid file and temp paths under /tmp, so it runs as a
+# non-root user with a read-only root filesystem. Pinned by tag, not digest
+# (digest pinning is #241).
+FROM nginx/nginx-unprivileged:1.30-alpine
+# Root only for the build-time cleanup below; the container starts as 101.
+USER root
 # The base image ships its own index.html and 50x.html; the served tree must
 # be exactly what the build produced.
 RUN rm -rf /usr/share/nginx/html/*
 COPY --from=build /src/dist /usr/share/nginx/html
 COPY ops/nginx.conf /etc/nginx/conf.d/default.conf
+# Numeric, so `docker run --user` checks and runAsNonRoot policies can verify it.
+USER 101
 # No HEALTHCHECK: compose owns it (#58). The base image's ENTRYPOINT and CMD
 # are exec form, so nginx is PID 1 and receives the stop signal directly.
