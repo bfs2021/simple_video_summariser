@@ -168,3 +168,35 @@ def test_insert_backfill_video_is_insert_catalog_video_with_the_backfill_origin(
     assert insert_backfill_video(conn, CatalogEntry("bf000000001", "t", 5), channel_id="UCb")
 
     assert _row(conn, "bf000000001") == ("UCb", "t", 5, "backfill", None, None, None)
+
+
+def test_tombstoned_ids_are_known_and_discovery_cannot_restore_them(
+    conn: psycopg.Connection,
+) -> None:
+    _channel(conn, "UCa", active=True)
+    ids = ["feed0000001", "cat00000001"]
+    with conn.cursor() as cur:
+        cur.executemany("INSERT INTO deleted_videos (video_id) VALUES (%s)", [(value,) for value in ids])
+
+    assert known_video_ids(conn, ids) == set(ids)
+    assert not insert_discovered_video(
+        conn, FeedEntry(ids[0], "UCa", "Feed", PUBLISHED), origin="rss"
+    )
+    assert not insert_catalog_video(
+        conn, CatalogEntry(ids[1], "Catalog", 5), channel_id="UCa", origin="backfill"
+    )
+    assert _row(conn, ids[0]) is None
+    assert _row(conn, ids[1]) is None
+
+
+def test_explicit_submission_atomically_clears_a_tombstone_and_restores_the_video(
+    conn: psycopg.Connection,
+) -> None:
+    conn.execute("INSERT INTO deleted_videos (video_id) VALUES ('adhoc000001')")
+
+    assert insert_submitted_video(conn, "adhoc000001")
+
+    assert _row(conn, "adhoc000001") == (None, None, None, "adhoc", None, None, None)
+    assert conn.execute(
+        "SELECT 1 FROM deleted_videos WHERE video_id = 'adhoc000001'"
+    ).fetchone() is None

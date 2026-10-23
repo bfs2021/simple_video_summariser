@@ -176,7 +176,8 @@ def insert_discovered_video(
     cur = conn.execute(
         """
         INSERT INTO videos (video_id, channel_id, title, published_at, origin, unavailable)
-        VALUES (%s, %s, %s, %s, %s, %s)
+        SELECT %s, %s, %s, %s, %s, %s
+        WHERE NOT EXISTS (SELECT 1 FROM deleted_videos WHERE video_id = %s)
         ON CONFLICT (video_id) DO NOTHING
         """,
         (
@@ -186,6 +187,7 @@ def insert_discovered_video(
             entry.published_at,
             origin,
             unavailable,
+            entry.video_id,
         ),
     )
     return cur.rowcount == 1
@@ -200,6 +202,7 @@ def insert_submitted_video(conn: psycopg.Connection[Any], video_id: str) -> bool
     submission) is left exactly as it is, including ``origin`` and
     ``discovered_at``. No ``channels`` row is created.
     """
+    conn.execute("DELETE FROM deleted_videos WHERE video_id = %s", (video_id,))
     cur = conn.execute(
         """
         INSERT INTO videos (video_id, origin)
@@ -271,8 +274,12 @@ def known_videos(
     if not video_ids:
         return {}
     rows = conn.execute(
-        "SELECT video_id, channel_id, published_at FROM videos WHERE video_id = ANY(%s)",
-        (list(video_ids),),
+        """
+        SELECT video_id, channel_id, published_at FROM videos WHERE video_id = ANY(%s)
+        UNION ALL
+        SELECT video_id, NULL, NULL FROM deleted_videos WHERE video_id = ANY(%s)
+        """,
+        (list(video_ids), list(video_ids)),
     ).fetchall()
     return {row[0]: KnownVideo(channel_id=row[1], published_at=row[2]) for row in rows}
 
@@ -309,11 +316,19 @@ def insert_catalog_video(
     row = conn.execute(
         """
         INSERT INTO videos (video_id, channel_id, title, duration_sec, origin)
-        VALUES (%s, %s, %s, %s, %s)
+        SELECT %s, %s, %s, %s, %s
+        WHERE NOT EXISTS (SELECT 1 FROM deleted_videos WHERE video_id = %s)
         ON CONFLICT (video_id) DO NOTHING
         RETURNING video_id
         """,
-        (entry.video_id, channel_id, clean_text(entry.title), entry.duration_sec, origin),
+        (
+            entry.video_id,
+            channel_id,
+            clean_text(entry.title),
+            entry.duration_sec,
+            origin,
+            entry.video_id,
+        ),
     ).fetchone()
     return row is not None
 
