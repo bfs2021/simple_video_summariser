@@ -272,6 +272,24 @@ the Anthropic adapter implements it. Its batches are recorded in `llm_batches`
 before the first poll; a retried job resumes them, and a cancelled job stops
 waiting within a second and leaves its batch running.
 
+`OrphanBatchCanceller` (#160) is a third optional extension, again only on the
+Anthropic adapter: `cancel_orphan_batch(batch_id)` sends one cancel and returns
+`"cancelled"`, `"not_cancellable"` or `"retry_later"` (401, 403, 429, 5xx or a
+transport failure); it never raises and touches no per-job state, so another
+thread may call it while a job runs. A job that ends `dead` (non-retryable
+error, max attempts, the reaper, the watchdog, a superseded job) or `done`
+without `clear()` can leave a row in `llm_batches` whose batch keeps running
+and billing. The analyzer, the only service holding `ANTHROPIC_API_KEY` (D6),
+runs the orphan pass (`services/analyzer/orphans.py`) in a daemon thread
+when its summarizer implements the protocol, also with `ANTHROPIC_BATCH=0`. The
+thread opens its own connection per pass and runs one pass at startup and then
+one every 600 s. A pass takes up to 20 rows of `dead` / `done` jobs, oldest
+first. A row older than 24 h is deleted with no API call, since Anthropic has
+expired the batch. For any other row it calls `cancel_orphan_batch`, and
+deletes the row on `cancelled` or `not_cancellable` and keeps it on
+`retry_later`. Rows of `pending` and `running` jobs are never touched, because
+resume depends on them. A retried dead job therefore resubmits its steps.
+
 `Summarizer` has three methods rather than one because D4b's roster pass and
 D9's reduce step are distinct LLM calls with distinct prompts and distinct
 failure modes. Collapsing them into one `summarize()` would hide that a roster
@@ -657,7 +675,9 @@ CREATE TABLE planner_task_runs (
 -- The Anthropic Message Batch each analyze step submitted, recorded before the
 -- first poll. A retried job resumes the batch when request_sha256 still matches,
 -- instead of submitting and paying for it again. Rows go when the analysis is
--- saved, or with the job (ON DELETE CASCADE). Migration 0013.
+-- saved, or with the job (ON DELETE CASCADE), or, for a dead / done job whose
+-- row survived, when the analyzer's orphan pass (#160) has cancelled its batch.
+-- Migration 0013.
 CREATE TABLE llm_batches (
     job_id         BIGINT NOT NULL REFERENCES jobs (id) ON DELETE CASCADE,
     step_key       TEXT NOT NULL,        -- 'roster', 'chunks', 'chunks:repair', 'reduce', 'chunk:<seq>', ...:repair

@@ -4,7 +4,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 
 @dataclass(frozen=True, slots=True)
@@ -416,6 +416,22 @@ class JobScopedSummarizer(Protocol):
     def begin_job(self, scope: JobScope) -> None: ...
 
     def end_job(self) -> None: ...
+
+
+#: What cancelling an orphaned batch came to (#160). ``cancelled`` and
+#: ``not_cancellable`` both mean the row can go; ``retry_later`` keeps it.
+type OrphanOutcome = Literal["cancelled", "not_cancellable", "retry_later"]
+
+
+@runtime_checkable
+class OrphanBatchCanceller(Protocol):
+    """A summarizer that can cancel a batch no job is waiting on (#160). Optional.
+
+    Must read and write no per-job state: it is called from another thread
+    while a job runs. Never raises.
+    """
+
+    def cancel_orphan_batch(self, batch_id: str) -> OrphanOutcome: ...
 
 
 # ActiveJob, JobFailure, VideoSummary, VideoPage, AnalysisRun, TranscriptInfo,
