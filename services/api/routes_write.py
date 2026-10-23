@@ -52,6 +52,7 @@ from common.repo.backfill_requests import create_request
 from common.repo.channels import channel_exists, fill_channel_title, register_channel
 from common.repo.deleted_videos import VideoNotFound, VideoRunning, delete_video
 from common.repo.jobs import active_job, latest_job
+from common.repo.media import UnsafeMediaPath, resolve_media_path
 from common.repo.transcripts import get_best_transcript
 from common.repo.videos import insert_submitted_video, video_exists
 from common.youtube_refs import (
@@ -79,7 +80,6 @@ from services.api.deps import (
     get_conn,
     rate_limit,
 )
-from services.planner.retention import UnsafeMediaPath, resolve_media_path
 
 _log = structlog.get_logger(__name__)
 

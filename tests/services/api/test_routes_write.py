@@ -27,8 +27,10 @@ from common.errors import (
     TransientNetworkError,
     UnavailableReason,
 )
+from common.models import FeedEntry
 from common.queue import PRIORITY_INTERACTIVE, PRIORITY_NORMAL, PostgresQueue
 from common.repo.channels import register_channel
+from common.repo.videos import insert_discovered_video
 from services.api.deps import get_channel_resolver
 from services.api.main import create_app
 from services.api.routes_write import submit_video
@@ -120,6 +122,58 @@ def _wait_until_blocked(db: psycopg.Connection[Any], app: str) -> None:
 
 
 # --- POST /videos -------------------------------------------------------------
+
+
+class FailingQueue(PostgresQueue):
+    def enqueue(self, *args: Any, **kwargs: Any) -> int | None:
+        raise psycopg.OperationalError("forced")
+
+
+def test_failed_explicit_restore_keeps_the_tombstone_and_commits_nothing(
+    dsn: str, db: psycopg.Connection[Any]
+) -> None:
+    db.execute("INSERT INTO deleted_videos (video_id) VALUES (%s)", (VID,))
+
+    with psycopg.connect(dsn) as conn, pytest.raises(psycopg.OperationalError):
+        submit_video(conn, VID, queue=FailingQueue(conn))
+
+    assert db.execute("SELECT video_id FROM deleted_videos").fetchall() == [(VID,)]
+    assert _videos(db) == []
+    assert _jobs(db) == []
+
+
+def test_explicit_restore_racing_discovery_is_the_only_tombstone_clearer(
+    dsn: str, db: psycopg.Connection[Any]
+) -> None:
+    db.execute("INSERT INTO channels (channel_id, active) VALUES ('UCa', true)")
+    db.execute("INSERT INTO deleted_videos (video_id) VALUES (%s)", (VID,))
+    entry = FeedEntry(VID, "UCa", "Feed", datetime(2026, 10, 23, tzinfo=UTC))
+    result: dict[str, bool] = {}
+
+    with psycopg.connect(dsn) as explicit, explicit.transaction():
+        restored = submit_video(explicit, VID, queue=PostgresQueue(explicit))
+
+        def discover() -> None:
+            with psycopg.connect(dsn) as conn:
+                result["inserted"] = insert_discovered_video(conn, entry, "rss")
+                conn.commit()
+
+        thread = threading.Thread(target=discover)
+        thread.start()
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+    assert not thread.is_alive()
+    assert restored.created
+    assert result["inserted"] is False
+    assert db.execute("SELECT count(*) FROM deleted_videos").fetchone() == (0,)
+    assert db.execute(
+        "SELECT origin FROM videos WHERE video_id = %s", (VID,)
+    ).fetchone() == ("adhoc",)
+    assert db.execute(
+        "SELECT count(*) FROM jobs WHERE video_id = %s AND kind = 'ingest' AND state IN ('pending', 'running')",
+        (VID,),
+    ).fetchone() == (1,)
 
 
 @pytest.mark.parametrize("ref", [VID, f"https://www.youtube.com/watch?v={VID}&t=5"])

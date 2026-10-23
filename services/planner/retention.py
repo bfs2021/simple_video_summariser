@@ -47,6 +47,7 @@ import psycopg
 import structlog
 
 from common.repo import media
+from common.repo.media import UnsafeMediaPath, resolve_media_path
 
 _log = structlog.get_logger(__name__)
 
@@ -82,43 +83,12 @@ class RetentionReport:
     free_bytes: int | None = None
 
 
-class UnsafeMediaPath(ValueError):
-    """A ``media.path`` that is absolute, contains ``..`` or resolves outside ``AUDIO_DIR``."""
-
-
 def max_bytes_from_gb(gb: float) -> int:
     """Convert ``AUDIO_MAX_GB`` to bytes, with 1 GB = 10^9 bytes (decimal, not GiB).
 
     ``20`` -> ``20_000_000_000`` and ``0.5`` -> ``500_000_000``.
     """
     return round(gb * 10**9)
-
-
-def resolve_media_path(audio_dir: Path, rel_path: str) -> Path:
-    """Return the path to unlink for ``rel_path``, or raise ``UnsafeMediaPath``.
-
-    ``rel_path`` (a ``media.path``) must be relative, free of ``..``, and
-    must resolve - following symlinks - to a location strictly inside
-    ``audio_dir``. The returned path is the resolved parent directory plus
-    the file's own name, so unlinking it removes a symlink itself rather than
-    what it points at. The file need not exist.
-    """
-    pure = PurePosixPath(rel_path)
-    if pure.is_absolute() or ".." in pure.parts:
-        raise UnsafeMediaPath(f"unsafe media path {rel_path!r}")
-    root = audio_dir.resolve()
-    target = root / pure
-    resolved = target.resolve()
-    if resolved == root or not resolved.is_relative_to(root):
-        raise UnsafeMediaPath(
-            f"media path {rel_path!r} resolves outside the audio directory"
-        )
-    parent = target.parent.resolve()
-    if not parent.is_relative_to(root):
-        raise UnsafeMediaPath(
-            f"media path {rel_path!r} resolves outside the audio directory"
-        )
-    return parent / target.name
 
 
 def min_free_bytes(total_bytes: int, *, min_free_gb: float, min_free_pct: float) -> int:

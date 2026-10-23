@@ -16,11 +16,31 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import psycopg
 
 _COLUMNS = "id, video_id, path, bytes, created_at, expires_at"
+
+
+class UnsafeMediaPath(ValueError):
+    pass
+
+
+def resolve_media_path(audio_dir: Path, rel_path: str) -> Path:
+    pure = PurePosixPath(rel_path)
+    if pure.is_absolute() or ".." in pure.parts:
+        raise UnsafeMediaPath(f"unsafe media path {rel_path!r}")
+    root = audio_dir.resolve()
+    target = root / pure
+    resolved = target.resolve()
+    if resolved == root or not resolved.is_relative_to(root):
+        raise UnsafeMediaPath(f"media path {rel_path!r} resolves outside the audio directory")
+    parent = target.parent.resolve()
+    if not parent.is_relative_to(root):
+        raise UnsafeMediaPath(f"media path {rel_path!r} resolves outside the audio directory")
+    return parent / target.name
 
 
 @dataclass(frozen=True, slots=True)
