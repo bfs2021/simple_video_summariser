@@ -50,6 +50,7 @@ from common.queue import (
 )
 from common.repo.backfill_requests import create_request
 from common.repo.channels import channel_exists, fill_channel_title, register_channel
+from common.repo.deleted_videos import VideoNotFound, VideoRunning, delete_video
 from common.repo.jobs import active_job, latest_job
 from common.repo.transcripts import get_best_transcript
 from common.repo.videos import insert_submitted_video, video_exists
@@ -72,11 +73,13 @@ from services.api.backfill import (
 )
 from services.api.deps import (
     ChannelResolver,
+    DatabaseUnavailable,
     get_catalog,
     get_channel_resolver,
     get_conn,
     rate_limit,
 )
+from services.planner.retention import UnsafeMediaPath, resolve_media_path
 
 _log = structlog.get_logger(__name__)
 
@@ -123,6 +126,7 @@ BACKFILL_REQUEST_ACTIVE = "a backfill request is already pending or running for 
 LISTING_UNAVAILABLE = "YouTube listing unavailable, try again later"
 LISTING_FAILED = "YouTube listing failed"
 VIDEO_NOT_FOUND = "video not found"
+VIDEO_RUNNING = "video is currently processing"
 NO_TRANSCRIPT = "no transcript yet"
 ANALYSIS_RUNNING = "an analysis is already running for this video"
 REANALYSIS_CONTENDED = "the analysis job kept changing, try again"
@@ -511,6 +515,41 @@ def _resolve_channel_name(resolve: ChannelResolver, ref: NameRef) -> ResolvedCha
         raise HTTPException(
             status.HTTP_502_BAD_GATEWAY, CHANNEL_LOOKUP_BROKEN
         ) from None
+
+
+@router.delete(
+    "/videos/{video_id:untrusted}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses={
+        404: {"description": "No such video"},
+        409: {"description": "The video has a running job"},
+        422: {"description": "Malformed video ID"},
+    },
+)
+def delete_stored_video(
+    video_id: Annotated[str, Depends(_reanalyze_video_id)],
+    conn: Annotated[psycopg.Connection[Any], Depends(get_conn)],
+) -> Response:
+    _require_idle(conn)
+    try:
+        deleted = delete_video(conn, video_id)
+    except VideoNotFound:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, VIDEO_NOT_FOUND) from None
+    except VideoRunning:
+        raise HTTPException(status.HTTP_409_CONFLICT, VIDEO_RUNNING) from None
+    except psycopg.OperationalError as exc:
+        raise DatabaseUnavailable from exc
+    audio_dir = get_settings().AUDIO_DIR
+    for rel_path in deleted.media_paths:
+        try:
+            resolve_media_path(audio_dir, rel_path).unlink(missing_ok=True)
+        except (OSError, UnsafeMediaPath) as exc:
+            _log.warning(
+                "video.delete.unlink_failed",
+                video_id=video_id,
+                error_class=type(exc).__name__,
+            )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 def _reanalyze_video_id(request: Request, video_id: str) -> str:
