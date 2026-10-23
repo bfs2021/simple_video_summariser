@@ -316,32 +316,46 @@ proxy (#141) for TLS. Updates are `git pull` of `master`, then
 
 ## Public access (Cloudflare Tunnel)
 
-Optional. `compose.tunnel.yml` adds a `cloudflared` container that dials out
-to Cloudflare and forwards to `web`; no inbound port opens and `web` stays on
-`127.0.0.1:8080`. The app has no login of its own, so **put a Cloudflare
-Access policy in front before sharing the hostname**.
+Optional. The tunnel is a **host systemd service** (`cloudflared.service`),
+not a compose service: `web` stays on `127.0.0.1:8080` and `cloudflared`
+dials out to Cloudflare and forwards to it. Nothing listens inbound. Do not
+also run a second connector for the same tunnel in a container.
 
-One-time, on a machine with `cloudflared tunnel login` done for the zone:
+The service runs `cloudflared --no-autoupdate --config /etc/cloudflared/config.yml
+tunnel run`. The config holds no secrets of its own; the credentials JSON
+sits next to it and is root-only:
+
+```yaml
+tunnel: <tunnel-id>
+credentials-file: /etc/cloudflared/<tunnel-id>.json
+
+ingress:
+  - hostname: dev-ytdigest.devopsdojo.click
+    service: http://127.0.0.1:8080
+  - service: http_status:404       # required catch-all
+```
+
+One-time setup, on a machine where `cloudflared tunnel login` was done for
+the zone:
 
 ```bash
 cloudflared tunnel create ytdigest
 cloudflared tunnel route dns <tunnel-id> dev-ytdigest.devopsdojo.click
+# route by ID: right after `create`, the name can briefly be "not found"
+sudo cp ~/.cloudflared/<tunnel-id>.json /etc/cloudflared/   # then write config.yml above
+sudo chmod 600 /etc/cloudflared/<tunnel-id>.json
+sudo systemctl enable --now cloudflared
 ```
 
-(Route by ID: right after `create`, the name can briefly be "not found".)
-Then in `.env` set `TUNNEL_ID` and `TUNNEL_CRED_CONTENTS` (the whole
-`~/.cloudflared/<id>.json` on one line, in single quotes); see
-`.env.example`. Start it:
+Check: `systemctl status cloudflared`, `cloudflared tunnel list` (the tunnel
+shows connections), then `curl -I https://dev-ytdigest.devopsdojo.click/`.
 
-```bash
-docker compose -f compose.yml -f compose.tunnel.yml up -d
-# dev: add -f compose.override.yml and set TUNNEL_URL=http://web:5173
-```
+The app has no login of its own, so **put a Cloudflare Access policy in front
+before sharing the hostname**. In the Zero Trust dashboard (not in this repo):
+Access -> Applications -> Add -> Self-hosted, domain
+`dev-ytdigest.devopsdojo.click`, policy "Allow" for your email with the
+one-time PIN login method. Until that exists the URL is open to anyone, and
+`POST /api/videos` spends transcription and LLM time.
 
-Access policy (Zero Trust dashboard, not in this repo): Access -> Applications
--> Add -> Self-hosted, domain `dev-ytdigest.devopsdojo.click`, policy
-"Allow" for your email with the one-time PIN login method. Until that exists
-the URL is open to anyone.
-
-Revoke: `cloudflared tunnel delete ytdigest` and remove the DNS record.
-
+Revoke: `sudo systemctl disable --now cloudflared`, then
+`cloudflared tunnel delete ytdigest` and remove the DNS record.
