@@ -65,6 +65,7 @@ function videoBody(
     last_failure: null,
     transcript: null,
     analysis: null,
+    progress: null,
   };
 }
 

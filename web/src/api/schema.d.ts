@@ -806,6 +806,7 @@ export interface components {
             locked_by: string | null;
             /** Priority */
             priority: number;
+            progress: components["schemas"]["ProgressOut"] | null;
             /**
              * Run After
              * Format: date-time
@@ -851,6 +852,33 @@ export interface components {
             poll_failures: number;
             /** Title */
             title: string | null;
+        };
+        /**
+         * ProgressOut
+         * @description Progress of a transcribe job (#245).
+         *
+         *     A running job carries every figure. A pending one carries only the estimate
+         *     (``estimated_sec``, ``eta_sec``, ``duration_sec``, ``estimate_source``); the
+         *     rest are ``None``. ``estimate_source`` is ``"default"`` when there was no RTF
+         *     history, so the UI can call the figure rough.
+         */
+        ProgressOut: {
+            /** Done Sec */
+            done_sec: number | null;
+            /** Duration Sec */
+            duration_sec: number | null;
+            /** Elapsed Sec */
+            elapsed_sec: number | null;
+            /** Estimate Source */
+            estimate_source: ("history" | "default") | null;
+            /** Estimated Sec */
+            estimated_sec: number | null;
+            /** Eta Sec */
+            eta_sec: number | null;
+            /** Percent */
+            percent: number | null;
+            /** Updated At */
+            updated_at: string | null;
         };
         /** QuoteOut */
         QuoteOut: {
@@ -998,6 +1026,7 @@ export interface components {
             latest_analysis_at: string | null;
             /** Origin */
             origin: string;
+            progress: components["schemas"]["ProgressOut"] | null;
             /** Published At */
             published_at: string | null;
             /**

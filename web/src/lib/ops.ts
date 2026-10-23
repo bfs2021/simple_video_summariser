@@ -291,7 +291,8 @@ function isJob(v: unknown): v is JobOut {
     isStringOrNull(v.error_class) &&
     isStringOrNull(v.last_error) &&
     isStringOrNull(v.finished_at) &&
-    typeof v.created_at === 'string'
+    typeof v.created_at === 'string' &&
+    (v.progress === undefined || v.progress === null || isObject(v.progress))
   )
 }
 

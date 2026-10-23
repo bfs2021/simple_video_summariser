@@ -39,6 +39,7 @@ from pydantic import (
 )
 from starlette.convertors import Convertor, register_url_convertor
 
+from common.models import VideoSummary
 from common.repo.analyses import (
     get_analysis,
     latest_analysis,
@@ -47,12 +48,17 @@ from common.repo.analyses import (
 )
 from common.repo.backfill_requests import get_request
 from common.repo.channels import get_channel_title, list_channels
+from common.repo.jobs import get_job
 from common.repo.search import search_transcripts
 from common.repo.transcripts import best_transcript_info, best_transcript_page
 from common.repo.videos import get_video, get_video_meta, list_videos, video_exists
 from common.youtube_refs import is_channel_id, is_video_id
 from services.api import schemas
-from services.api.deps import ReadDatabaseUnavailable, get_read_conn
+from services.api.deps import (
+    ReadDatabaseUnavailable,
+    get_read_conn,
+    transcribe_rtf_history,
+)
 from services.api.render import render_analysis_html
 
 
@@ -388,6 +394,20 @@ def get_backfill_request(
     return schemas.backfill_request_out(row)
 
 
+def _transcribe_progress(
+    conn: psycopg.Connection[Any], video: VideoSummary
+) -> schemas.ProgressOut | None:
+    """Progress of the video's active transcribe job (#245), else ``None``."""
+    active = video.active_job
+    if active is None or active.kind != "transcribe":
+        return None
+    row = get_job(conn, active.id)
+    if row is None:
+        return None
+    history = transcribe_rtf_history(conn) if row.state == "pending" else None
+    return schemas.progress_out(row, history)
+
+
 @router.get("/videos/{video_id}", response_model=schemas.VideoDetail)
 def get_video_detail(video_id: VideoId, conn: ReadConn) -> schemas.VideoDetail:
     """One video, its status, best transcript (D2) and latest analysis."""
@@ -395,7 +415,10 @@ def get_video_detail(video_id: VideoId, conn: ReadConn) -> schemas.VideoDetail:
     if video is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, VIDEO_NOT_FOUND)
     return schemas.video_detail(
-        video, best_transcript_info(conn, video_id), latest_analysis_run(conn, video_id)
+        video,
+        best_transcript_info(conn, video_id),
+        latest_analysis_run(conn, video_id),
+        _transcribe_progress(conn, video),
     )
 
 

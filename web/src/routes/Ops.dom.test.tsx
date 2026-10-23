@@ -1,4 +1,4 @@
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { focusManager, QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import { createMemoryRouter, RouterProvider } from 'react-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -27,6 +27,7 @@ function job(id: number, over: Partial<JobOut> = {}): JobOut {
     heartbeat_at: null,
     finished_at: '2026-10-01T23:30:00-07:00',
     created_at: '2026-09-30T08:05:00Z',
+    progress: null,
     ...over,
   }
 }
@@ -1030,5 +1031,150 @@ describe('accessibility and source', () => {
     expect(select('Kind').labels?.length).toBe(1)
     expect(select('Error class').labels?.length).toBe(1)
     expect(document.querySelector('[onclick], [tabindex]')).toBeNull()
+  })
+})
+
+describe('transcription progress (#245)', () => {
+  const NOW = Date.parse('2026-10-23T12:00:00Z')
+  const running = (id: number, over: Partial<JobOut> = {}) =>
+    job(id, {
+      kind: 'transcribe',
+      state: 'running',
+      error_class: null,
+      last_error: null,
+      finished_at: null,
+      progress: {
+        percent: 40,
+        done_sec: 400,
+        duration_sec: 1000,
+        elapsed_sec: 300,
+        eta_sec: 720,
+        estimated_sec: 600,
+        estimate_source: 'default',
+        updated_at: new Date(Date.now() - 5_000).toISOString(),
+      },
+      ...over,
+    })
+  const progressCell = (id: number) => {
+    const headers = Array.from(within(jobsTable()).getAllByRole('columnheader')).map((h) => h.textContent)
+    return rowFor(id).cells[headers.indexOf('Progress')] as HTMLTableCellElement
+  }
+
+  beforeEach(() => {
+    vi.setSystemTime(NOW)
+  })
+
+  it('has its own Progress column, filled only for transcribe jobs that are running or pending', async () => {
+    const pending = job(2, {
+      kind: 'transcribe',
+      state: 'pending',
+      progress: {
+        percent: null,
+        done_sec: null,
+        duration_sec: 1000,
+        elapsed_sec: null,
+        eta_sec: 600,
+        estimated_sec: 600,
+        estimate_source: 'history',
+        updated_at: null,
+      },
+    })
+    stubFetch(
+      api({
+        jobs: () =>
+          list([running(1), pending, job(3, { kind: 'ingest', state: 'running' }), running(4, { progress: null })]),
+      }),
+    )
+    await mount('/ops?state=running')
+
+    expect(within(jobsTable()).getByRole('columnheader', { name: 'Progress' })).toBeTruthy()
+    const first = progressCell(1)
+    expect(within(first).getByText('40%')).toBeTruthy()
+    expect(first.querySelector('progress')).not.toBeNull()
+    expect(within(first).getByText('Elapsed 5 min')).toBeTruthy()
+    expect(within(first).getByText('about 12 min left (rough)')).toBeTruthy()
+    expect(progressCell(2).textContent).toBe('estimated about 10 min')
+    expect(progressCell(3).textContent).toBe('')
+    expect(progressCell(4).textContent).toBe('')
+  })
+
+  it('refetches every 30 s while a transcribe job is running, and stops once none is', async () => {
+    let reply = list([running(1)])
+    stubFetch(api({ jobs: () => reply }))
+    await mount('/ops?state=running')
+    expect(jobGets()).toHaveLength(1)
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(29_999)
+    })
+    expect(jobGets()).toHaveLength(1)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1)
+    })
+    expect(jobGets()).toHaveLength(2)
+
+    reply = list([])
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000)
+    })
+    expect(jobGets()).toHaveLength(3)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(120_000)
+    })
+    expect(jobGets()).toHaveLength(3)
+  })
+
+  it('does not poll for pending, other-kind or finished jobs', async () => {
+    stubFetch(
+      api({
+        jobs: () =>
+          list([
+            job(1, { kind: 'transcribe', state: 'pending' }),
+            job(2, { kind: 'ingest', state: 'running' }),
+            job(3),
+          ]),
+      }),
+    )
+    await mount('/ops?state=running')
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(120_000)
+    })
+    expect(jobGets()).toHaveLength(1)
+  })
+
+  it('does not poll while the tab is in the background', async () => {
+    stubFetch(api({ jobs: () => list([running(1)]) }))
+    await mount('/ops?state=running')
+    focusManager.setFocused(false)
+    try {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(120_000)
+      })
+      expect(jobGets()).toHaveLength(1)
+    } finally {
+      focusManager.setFocused(undefined)
+    }
+  })
+
+  it('shows "no update for N min" once the figures are 90 s old, then drops it for fresh ones', async () => {
+    const fresh = running(1)
+    const stale = running(1, {
+      progress: { ...(fresh.progress as NonNullable<JobOut['progress']>), updated_at: new Date(NOW - 90_000).toISOString() },
+    })
+    let reply = list([stale])
+    stubFetch(api({ jobs: () => reply }))
+    await mount('/ops?state=running')
+    expect(within(progressCell(1)).getByRole('status').textContent).toBe('no update for 1 min')
+    expect(progressCell(1).textContent).not.toMatch(/left/)
+
+    reply = list([running(1)])
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000)
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50)
+    })
+    expect(within(progressCell(1)).queryByRole('status')).toBeNull()
+    expect(within(progressCell(1)).getByText(/left/)).toBeTruthy()
   })
 })

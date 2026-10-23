@@ -12,6 +12,7 @@ from typing import Any, Final
 
 import psycopg
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 from common.metrics import DURATION_BUCKETS, DurationHistogram
 
@@ -127,12 +128,26 @@ class JobRow:
     heartbeat_at: datetime | None
     finished_at: datetime | None
     created_at: datetime
+    #: ``jobs.progress`` (#245): live figures of a running transcribe job, else ``None``.
+    progress: dict[str, Any] | None
+    #: ``payload.duration_sec`` when it is a plausible number, else ``None`` (#245).
+    #: Lets the API estimate a pending transcribe job without exposing ``payload``.
+    payload_duration_sec: float | None
 
 
-_LIST_JOBS_SQL = """
-    SELECT j.id, j.video_id, v.title AS video_title, j.kind, j.dedupe_key,
-           j.state, j.priority, j.attempts, j.error_class, j.last_error,
-           j.run_after, j.locked_by, j.heartbeat_at, j.finished_at, j.created_at
+#: The columns ``JobRow`` is built from, shared by the list and the single-row read.
+_JOB_COLUMNS = """
+    j.id, j.video_id, v.title AS video_title, j.kind, j.dedupe_key,
+    j.state, j.priority, j.attempts, j.error_class, j.last_error,
+    j.run_after, j.locked_by, j.heartbeat_at, j.finished_at, j.created_at,
+    j.progress,
+    CASE WHEN jsonb_typeof(j.payload -> 'duration_sec') = 'number'
+          AND abs((j.payload ->> 'duration_sec')::numeric) < 1e9
+         THEN (j.payload ->> 'duration_sec')::float8
+    END AS payload_duration_sec"""
+
+_LIST_JOBS_SQL = f"""
+    SELECT {_JOB_COLUMNS}
     FROM jobs j
     LEFT JOIN videos v ON v.video_id = j.video_id
     WHERE (%(state)s::text IS NULL OR j.state = %(state)s)
@@ -194,10 +209,8 @@ def get_job(conn: psycopg.Connection[Any], job_id: int) -> JobRow | None:
     """
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            """
-            SELECT j.id, j.video_id, v.title AS video_title, j.kind, j.dedupe_key,
-                   j.state, j.priority, j.attempts, j.error_class, j.last_error,
-                   j.run_after, j.locked_by, j.heartbeat_at, j.finished_at, j.created_at
+            f"""
+            SELECT {_JOB_COLUMNS}
             FROM jobs j
             LEFT JOIN videos v ON v.video_id = j.video_id
             WHERE j.id = %s
@@ -206,6 +219,30 @@ def get_job(conn: psycopg.Connection[Any], job_id: int) -> JobRow | None:
         )
         row = cur.fetchone()
     return None if row is None else JobRow(**row)
+
+
+def write_progress(
+    conn: psycopg.Connection[Any], job_id: int, worker: str, figures: dict[str, Any]
+) -> bool:
+    """Store ``figures`` (+ the database's ``updated_at``) as a running job's progress (#245).
+
+    One small ``UPDATE`` of ``jobs.progress`` only: ``heartbeat_at`` is the queue's
+    business and is not touched. It locks just this job's row for the length of the
+    statement, and the claim only looks at ``pending`` rows, so it never blocks a
+    claim. Guarded by ``locked_by`` and ``state = 'running'`` like every outcome
+    write, so a job reaped and reclaimed meanwhile is left alone: returns whether a
+    row was written. Commits through its own transaction block.
+    """
+    with conn.transaction():
+        cur = conn.execute(
+            """
+            UPDATE jobs
+            SET progress = %(figures)s || jsonb_build_object('updated_at', now())
+            WHERE id = %(id)s AND state = 'running' AND locked_by = %(worker)s
+            """,
+            {"figures": Jsonb(figures), "id": job_id, "worker": worker},
+        )
+        return cur.rowcount > 0
 
 
 def duration_histograms(conn: psycopg.Connection[Any]) -> dict[str, DurationHistogram]:

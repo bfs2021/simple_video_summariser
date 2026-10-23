@@ -285,6 +285,8 @@ class Job:
     started_at: datetime | None = None
     #: When the planner announced this dead-letter to the operator (#67).
     alerted_at: datetime | None = None
+    #: Live figures of a running transcribe job (#245); cleared on every exit from ``running``.
+    progress: dict[str, Any] | None = None
 
 
 def _job_from_row(row: dict[str, Any]) -> Job:
@@ -490,7 +492,7 @@ class PostgresQueue:
                 worker,
                 """
                 UPDATE jobs SET state='pending', run_after=%(until)s,
-                       attempts=attempts-1, locked_by=NULL, locked_at=NULL
+                       attempts=attempts-1, locked_by=NULL, locked_at=NULL, progress=NULL
                 WHERE id=%(id)s AND locked_by=%(worker)s AND state='running'
                 """,
                 {"until": defer.until},
@@ -501,7 +503,7 @@ class PostgresQueue:
                 worker,
                 """
                 UPDATE jobs SET state='pending', run_after=now(),
-                       attempts=attempts-1, locked_by=NULL, locked_at=NULL
+                       attempts=attempts-1, locked_by=NULL, locked_at=NULL, progress=NULL
                 WHERE id=%(id)s AND locked_by=%(worker)s AND state='running'
                 """,
                 {},
@@ -520,7 +522,7 @@ class PostgresQueue:
                 worker,
                 """
                 UPDATE jobs SET state='done', finished_at=now(),
-                       locked_by=NULL, locked_at=NULL,
+                       locked_by=NULL, locked_at=NULL, progress=NULL,
                        last_error=NULL, error_class=NULL
                 WHERE id=%(id)s AND locked_by=%(worker)s AND state='running'
                 """,
@@ -570,7 +572,7 @@ class PostgresQueue:
                 worker,
                 """
                 UPDATE jobs SET state='dead', finished_at=now(),
-                       locked_by=NULL, locked_at=NULL,
+                       locked_by=NULL, locked_at=NULL, progress=NULL,
                        last_error=%(last_error)s, error_class=%(error_class)s
                 WHERE id=%(id)s AND locked_by=%(worker)s AND state='running'
                 """,
@@ -588,7 +590,7 @@ class PostgresQueue:
             """
             UPDATE jobs SET state='pending',
                    run_after = now() + (%(delay_sec)s * interval '1 second'),
-                   locked_by=NULL, locked_at=NULL,
+                   locked_by=NULL, locked_at=NULL, progress=NULL,
                    last_error=%(last_error)s, error_class=%(error_class)s
             WHERE id=%(id)s AND locked_by=%(worker)s AND state='running'
             """,
@@ -917,7 +919,7 @@ class PostgresQueue:
                                           %(max_backoff)s)
                                       * (1 + (random() * 2 - 1) * %(jitter)s))
                             END,
-                    locked_by = NULL, locked_at = NULL,
+                    locked_by = NULL, locked_at = NULL, progress = NULL,
                     last_error = %(last_error)s, error_class = NULL
                 FROM stale
                 WHERE j.id = stale.id AND j.state = 'running'

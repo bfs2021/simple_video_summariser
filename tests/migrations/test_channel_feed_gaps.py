@@ -23,7 +23,7 @@ def _config_for(dsn: str, monkeypatch: pytest.MonkeyPatch) -> Config:
     return config
 
 
-def test_0015_is_the_only_head_and_is_chained_to_0014() -> None:
+def test_0015_is_chained_to_0014_and_the_history_has_one_head() -> None:
     config = Config(str(REPO_ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
     script = ScriptDirectory.from_config(config)
@@ -32,7 +32,7 @@ def test_0015_is_the_only_head_and_is_chained_to_0014() -> None:
 
     assert revision is not None
     assert revision.down_revision == "0014"
-    assert script.get_heads() == ["0015"]
+    assert len(script.get_heads()) == 1  # a later revision may sit on top of 0015
 
 
 def _current_revision(dsn: str) -> str:

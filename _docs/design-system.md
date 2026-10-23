@@ -69,6 +69,7 @@ when styling arrives, or move them into the stylesheet unchanged.
 | `routes/Compare.tsx` | TL;DR `<p>` in each column | `whiteSpace: 'pre-line'` | Same, in the side-by-side view |
 | `components/Player.tsx` | YouTube `<iframe>` | `width: '100%', aspectRatio: '16 / 9'` | Fluid embed at the video's aspect ratio |
 | `routes/Ops.tsx` | expanded `last_error` `<pre>` | `whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxWidth: '100%', overflow: 'auto'` | 8 KiB tracebacks with long tokens must not widen the table |
+| `components/JobProgress.tsx` | the visually hidden `<span aria-live="polite">` | `position: 'absolute', width: '1px', height: '1px', overflow: 'hidden', clip: 'rect(0 0 0 0)', whiteSpace: 'nowrap'` | The standard screen-reader-only clip: the visible percent and ETA change every poll, only this copy is announced, at most once a minute |
 
 Inline styles are allowed by the production CSP (`style-src 'self' 'unsafe-inline'`).
 
@@ -139,7 +140,7 @@ In print (`@media print`), links take the text colour and lose their underline.
   grid, flex or gap anywhere in the SPA.
 - **Layout:** normal document flow. The only sized element is the player
   (100% wide, 16:9). There is no max width, so lines run the full window width.
-- **Responsive:** no media queries. Wide tables (Ops jobs: 9 columns; Compare:
+- **Responsive:** no media queries. Wide tables (Ops jobs: 10 columns; Compare:
   3 columns) can overflow on a phone. The styling issues own this.
 - **Dark mode:** none. There is no `color-scheme` meta or CSS property, so the
   page renders light even when the OS is dark. The printable page hard-codes
@@ -169,6 +170,7 @@ In print (`@media print`), links take the text colour and lose their underline.
 | `SearchForm`, `ResultItem`, `TimestampLink` | `Search.tsx` | `TimestampLink` is a `<Link aria-label="Open at M:SS"><time>`, the link form of a timestamp for pages with no player (#129 will take it over) |
 | `Picker`, `Notices`, `SideBySide`, `Aligned`, `Details` | `Compare.tsx` | Two-column comparison tables |
 | `Filters`, `JobRow` | `Ops.tsx` | Filter selects; row with inline retry confirmation |
+| `JobProgress` | `components/JobProgress.tsx` | Ops "Progress" column and the video page (#245). Transcribe jobs only: running shows `NN%`, a native `<progress>`, "Elapsed …" and "about N min left" (plus "(rough)" when the estimate rests on the default RTF); pending shows "estimated about N min"; every other kind and state renders nothing. If `updated_at` is 90 s old or more while running, the ETA is replaced by `<strong role="status">no update for N min</strong>` (bold text: no warning colour exists until #124) |
 | `Segments` | `Transcript.tsx` | Numbered `<ol start>` of segments with pagination |
 
 ### Native elements, and how they are used

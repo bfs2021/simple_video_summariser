@@ -621,7 +621,8 @@ CREATE TABLE jobs (
     finished_at  TIMESTAMPTZ,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     started_at   TIMESTAMPTZ,        -- latest claim (#60)
-    alerted_at   TIMESTAMPTZ         -- dead-letter announced to the operator (#67)
+    alerted_at   TIMESTAMPTZ,        -- dead-letter announced to the operator (#67)
+    progress     JSONB               -- live figures of a running transcribe job (#245)
 );
 
 CREATE UNIQUE INDEX jobs_active_uniq ON jobs (video_id, kind, dedupe_key)

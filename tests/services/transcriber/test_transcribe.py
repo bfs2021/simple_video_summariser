@@ -196,7 +196,7 @@ class Rig:
         built = replace(make_job(video_id, **job), kind="transcribe")
         parent_id = self.queue.inner.enqueue("transcribe", video_id, priority=built.priority)
         assert parent_id is not None
-        self.conn.execute("UPDATE jobs SET state = 'running' WHERE id = %s", (parent_id,))
+        self.conn.execute("UPDATE jobs SET state = 'running', locked_by = 'w' WHERE id = %s", (parent_id,))
         self.conn.commit()
         try:
             self.handler(replace(built, id=parent_id), self.ctx)
@@ -768,3 +768,58 @@ def test_a_transcribe_job_dead_letters_after_the_second_attempt(
     claim_and_run(rig)
 
     assert job_state(rig) == ("dead", 2)
+
+
+# --- progress and estimate (issue #245) ------------------------------------------------
+
+
+def _stored_progress(rig: Rig) -> Any:
+    """What another connection sees in ``jobs.progress`` right now (the one running job)."""
+    with psycopg.connect(rig.dsn) as other:
+        rows = other.execute("SELECT progress FROM jobs WHERE state = 'running'").fetchall()
+    assert len(rows) == 1
+    return rows[0][0]
+
+
+def _add_rtf_history(rig: Rig, rtf: float, *, model: str = "tiny", n: int = 1) -> None:
+    other = f"hist{n:07d}"
+    rig.add_video(other)
+    save_transcript(
+        rig.conn, other, "whisper", "en", "none", segs(),
+        {"model": model, "compute_type": "int8", "rtf": rtf},
+    )
+    rig.conn.commit()
+
+
+def test_the_estimate_is_stored_before_speech_to_text_from_the_rtf_history(
+    make_rig: Callable[..., Rig],
+) -> None:
+    seen: list[Any] = []
+    rig = make_rig(
+        audio=FakeAudio(duration=120.0),
+        WHISPER_MODEL="tiny",
+        WHISPER_COMPUTE="int8",
+    )
+    rig.transcriber.on_call = lambda _audio: seen.append(_stored_progress(rig))
+    _add_rtf_history(rig, 0.5, n=1)
+    _add_rtf_history(rig, 9.0, model="large-v3", n=2)  # another model: not in the median
+
+    rig.run(payload={"duration_sec": 100})
+
+    (progress,) = seen
+    assert progress["estimated_sec"] == 60.0  # the measured 120 s x 0.5, not metadata's 100
+    assert progress["estimate_source"] == "history"
+    assert (progress["done_sec"], progress["duration_sec"]) == (0.0, 120.0)
+
+
+def test_without_history_the_estimate_is_the_default_and_marked_so(
+    make_rig: Callable[..., Rig],
+) -> None:
+    seen: list[Any] = []
+    rig = make_rig(WHISPER_MODEL="tiny", WHISPER_COMPUTE="int8")
+    rig.transcriber.on_call = lambda _audio: seen.append(_stored_progress(rig))
+
+    rig.run()
+
+    assert seen[0]["estimate_source"] == "default"
+    assert seen[0]["estimated_sec"] > 0

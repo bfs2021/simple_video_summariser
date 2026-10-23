@@ -265,6 +265,36 @@ def median_whisper_rtf(conn: psycopg.Connection[Any]) -> tuple[float | None, int
     return statistics.median(values), len(values)
 
 
+def rtf_history(
+    conn: psycopg.Connection[Any], model: str, compute_type: str, limit: int
+) -> list[float]:
+    """``engine_meta.rtf`` of the newest ``limit`` whisper transcripts made with this
+    ``model`` and ``compute_type``, newest first (#245).
+
+    Only a positive finite JSON number counts. A read only: no lock, no write.
+    """
+    rows = conn.execute(
+        """
+        SELECT rtf FROM (
+            SELECT id, created_at,
+                   CASE WHEN jsonb_typeof(engine_meta) = 'object'
+                         AND engine_meta->>'model' = %(model)s
+                         AND engine_meta->>'compute_type' = %(compute)s
+                         AND jsonb_typeof(engine_meta->'rtf') = 'number'
+                        THEN (engine_meta->>'rtf')::numeric
+                   END AS rtf
+            FROM transcripts
+            WHERE source = 'whisper'
+        ) t
+        WHERE rtf > %(lo)s AND rtf < %(hi)s
+        ORDER BY created_at DESC, id DESC
+        LIMIT %(limit)s
+        """,
+        {"model": model, "compute": compute_type, "lo": _MIN_RTF, "hi": _MAX_RTF, "limit": limit},
+    ).fetchall()
+    return [float(row[0]) for row in rows]
+
+
 CHARS_SAMPLE_SIZE = 20
 
 

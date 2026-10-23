@@ -51,6 +51,7 @@ function video(over: Partial<VideoDetailOut> = {}): VideoDetailOut {
     last_failure: null,
     transcript: null,
     analysis: analysis(),
+    progress: null,
     ...over,
   }
 }
@@ -694,5 +695,59 @@ describe('link to the transcript (#51)', () => {
   it('has no link for a done video whose transcript is null', async () => {
     await mountWith(video({ transcript: null }))
     expect(screen.queryByRole('link', { name: 'Transcript' })).toBeNull()
+  })
+})
+
+describe('transcription progress (#245)', () => {
+  const transcribing = (over: Partial<VideoDetailOut> = {}) =>
+    video({
+      status: 'processing',
+      analysis: null,
+      active_job: { id: 5, kind: 'transcribe', state: 'running' },
+      progress: {
+        percent: 40,
+        done_sec: 400,
+        duration_sec: 1000,
+        elapsed_sec: 300,
+        eta_sec: 720,
+        estimated_sec: 600,
+        estimate_source: 'history',
+        updated_at: new Date(Date.now() - 5_000).toISOString(),
+      },
+      ...over,
+    })
+
+  it('shows the same figures as the Ops list for a video that is being transcribed', async () => {
+    await mountWith(transcribing())
+
+    expect(screen.getByText('Transcribing')).toBeTruthy()
+    expect(screen.getByText('40%')).toBeTruthy()
+    expect(document.querySelector('progress')).not.toBeNull()
+    expect(screen.getByText('Elapsed 5 min')).toBeTruthy()
+    expect(screen.getByText('about 12 min left')).toBeTruthy()
+  })
+
+  it('shows the estimate for a queued transcription and nothing for another job', async () => {
+    await mountWith(
+      transcribing({
+        active_job: { id: 5, kind: 'transcribe', state: 'pending' },
+        progress: {
+          percent: null,
+          done_sec: null,
+          duration_sec: 1000,
+          elapsed_sec: null,
+          eta_sec: 600,
+          estimated_sec: 600,
+          estimate_source: 'default',
+          updated_at: null,
+        },
+      }),
+    )
+    expect(screen.getByText('estimated about 10 min (rough)')).toBeTruthy()
+  })
+
+  it('shows no figures without progress', async () => {
+    await mountWith(transcribing({ progress: null }))
+    expect(document.querySelector('progress')).toBeNull()
   })
 })

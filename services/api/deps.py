@@ -26,6 +26,8 @@ from fastapi import Depends, Request
 
 from common.config import get_settings
 from common.models import CatalogSource
+from common.progress import HISTORY_SIZE
+from common.repo.transcripts import rtf_history
 
 if TYPE_CHECKING:
     from adapters.youtube.channel_resolver import ResolvedChannel
@@ -128,3 +130,13 @@ def get_channel_resolver() -> ChannelResolver:
     from adapters.youtube.channel_resolver import resolve_channel
 
     return resolve_channel
+
+
+def transcribe_rtf_history(conn: psycopg.Connection[Any]) -> list[float]:
+    """Recent ``rtf`` of finished transcripts made with the configured Whisper model (#245).
+
+    The basis of the estimate shown for a transcribe job that has not started.
+    The API reads the same ``WHISPER_*`` settings as the transcriber.
+    """
+    settings = get_settings()
+    return rtf_history(conn, settings.WHISPER_MODEL, settings.WHISPER_COMPUTE, HISTORY_SIZE)
