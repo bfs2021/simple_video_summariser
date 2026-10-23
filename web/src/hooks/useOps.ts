@@ -14,6 +14,7 @@ import {
   type OpsFilters,
   type RetryOutcome,
 } from '../lib/ops'
+import { PROGRESS_POLL_MS } from '../lib/progress'
 
 export type { HealthOut, JobListOut, JobOut, OpsChannelOut } from '../lib/ops'
 
@@ -58,7 +59,12 @@ export function useOpsChannels() {
   })
 }
 
-/** One page of GET /api/ops/jobs. The key carries every filter and the cursor. */
+/**
+ * One page of GET /api/ops/jobs. The key carries every filter and the cursor.
+ * While the page shows a running transcribe job it is refetched every 30 s (its
+ * progress is stored that often); with none it is not polled. A hidden tab is not
+ * polled either: TanStack pauses `refetchInterval` unless told otherwise.
+ */
 export function useOpsJobs(filters: OpsFilters, before: number | null) {
   return useQuery({
     queryKey: ['ops', 'jobs', filters.state, filters.kind, filters.errorClass, before],
@@ -70,6 +76,10 @@ export function useOpsJobs(filters: OpsFilters, before: number | null) {
       return body
     },
     placeholderData: keepPreviousData,
+    refetchInterval: (q) =>
+      q.state.data?.items.some((j) => j.kind === 'transcribe' && j.state === 'running')
+        ? PROGRESS_POLL_MS
+        : false,
   })
 }
 

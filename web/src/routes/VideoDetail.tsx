@@ -2,6 +2,7 @@ import { Fragment, useEffect } from 'react'
 import { Link, useParams } from 'react-router'
 import type { components } from '../api'
 import { AnalysisView } from '../components/AnalysisView'
+import { JobProgress } from '../components/JobProgress'
 import { Player } from '../components/Player'
 import { buildWatchUrl } from '../components/player/youtubeTransport'
 import { formatTimestamp } from '../components/Timestamp'
@@ -148,6 +149,11 @@ function VideoPage({ videoId }: { videoId: string }) {
       {video.unavailable !== null && analysis !== null && <p>{UNAVAILABLE_NOTE}</p>}
       {analysis !== null && video.active_job !== null && <p>Re-analysis in progress</p>}
       {analysis === null ? <p role="status">{pipelineStatus(video)}</p> : <AnalysisView analysis={analysis} />}
+      {video.active_job !== null && video.progress != null && (
+        <div>
+          <JobProgress kind={video.active_job.kind} state={video.active_job.state} progress={video.progress} />
+        </div>
+      )}
     </article>
   )
 }

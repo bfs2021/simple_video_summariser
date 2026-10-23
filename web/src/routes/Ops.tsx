@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
+import { JobProgress } from '../components/JobProgress'
 import { OpsError, useOpsChannels, useOpsJobs, useQueueDepth, useRetryJob, type JobOut, type OpsChannelOut } from '../hooks/useOps'
 import {
   collapseError,
@@ -178,6 +179,7 @@ export function Ops() {
                     <th scope="col">Video</th>
                     <th scope="col">Kind</th>
                     <th scope="col">State</th>
+                    <th scope="col">Progress</th>
                     <th scope="col">Attempts</th>
                     <th scope="col">Error class</th>
                     <th scope="col">Time</th>
@@ -362,6 +364,9 @@ function JobRow({
       </td>
       <td>{j.kind}</td>
       <td>{j.state}</td>
+      <td>
+        <JobProgress kind={j.kind} state={j.state} progress={j.progress ?? null} />
+      </td>
       <td>{j.attempts}</td>
       <td>
         <span>{cls.label}</span>

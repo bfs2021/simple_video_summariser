@@ -29,6 +29,7 @@ function video(id = ID): VideoDetailOut {
     last_failure: null,
     transcript: null,
     analysis: null,
+    progress: null,
   }
 }
 
