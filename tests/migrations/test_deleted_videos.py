@@ -27,7 +27,7 @@ def _table_exists(dsn: str) -> bool:
     with psycopg.connect(dsn) as conn:
         row = conn.execute("SELECT to_regclass('deleted_videos')").fetchone()
     assert row is not None
-    return row[0] == "deleted_videos"
+    return bool(row[0] == "deleted_videos")
 
 
 def test_0016_is_the_only_head_and_is_chained_to_0015() -> None:

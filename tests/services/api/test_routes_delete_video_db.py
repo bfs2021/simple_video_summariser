@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from common.config import get_settings
+from common.repo import deleted_videos
 from common.repo.deleted_videos import VideoRunning, delete_video
 from services.api import routes_write
 from services.api.main import create_app
@@ -106,22 +107,28 @@ def test_delete_removes_the_tree_jobs_and_batches_but_preserves_other_rows(
         "INSERT INTO media (video_id, path, bytes, expires_at) VALUES (%s, 'dq/audio.opus', 5, now())",
         (VID,),
     )
-    transcript_id = db.execute(
+    transcript = db.execute(
         "INSERT INTO transcripts (video_id, source, segments, full_text) VALUES (%s, 'whisper', '[]', 'x') RETURNING id",
         (VID,),
-    ).fetchone()[0]
+    ).fetchone()
+    assert transcript is not None
+    transcript_id = transcript[0]
     db.execute(
         "INSERT INTO transcript_chunks (transcript_id, seq, start_sec, end_sec, text, chunk_strategy) VALUES (%s, 0, 0, 1, 'x', 'time:1:0')",
         (transcript_id,),
     )
-    analysis_id = db.execute(
+    analysis = db.execute(
         "INSERT INTO analyses (video_id, transcript_id, chunk_strategy, model, prompt_version, tldr) VALUES (%s, %s, 'time:1:0', 'm', 'v1', 'x') RETURNING id",
         (VID, transcript_id),
-    ).fetchone()[0]
+    ).fetchone()
+    assert analysis is not None
+    analysis_id = analysis[0]
     db.execute("INSERT INTO topics (analysis_id, seq, title) VALUES (%s, 0, 't')", (analysis_id,))
     db.execute("INSERT INTO claims (analysis_id, text) VALUES (%s, 'c')", (analysis_id,))
     db.execute("INSERT INTO quotes (analysis_id, text) VALUES (%s, 'q')", (analysis_id,))
-    job_id = db.execute("SELECT id FROM jobs WHERE video_id = %s", (VID,)).fetchone()[0]
+    job = db.execute("SELECT id FROM jobs WHERE video_id = %s", (VID,)).fetchone()
+    assert job is not None
+    job_id = job[0]
     db.execute(
         "INSERT INTO llm_batches (job_id, step_key, batch_id, request_sha256) VALUES (%s, 'x', 'b', 'h')",
         (job_id,),
@@ -140,6 +147,13 @@ def test_delete_removes_the_tree_jobs_and_batches_but_preserves_other_rows(
         }.get(table, "1 = 1")), (VID,) if table in {"videos", "transcripts", "analyses", "media", "jobs"} else ()).fetchone() == (0,)
     assert db.execute("SELECT video_id FROM videos WHERE video_id = %s", (OTHER,)).fetchone() == (OTHER,)
     assert db.execute("SELECT * FROM channels WHERE channel_id = 'UCkeep'").fetchone() == channel_before
+    assert api.get(f"/videos/{VID}").status_code == 404
+    assert api.get(f"/videos/{VID}/transcript").status_code == 404
+    assert VID not in {item["video_id"] for item in api.get("/videos").json()["items"]}
+    assert VID not in {
+        item["video_id"] for item in api.get("/search", params={"q": "Title"}).json()["results"]
+    }
+    assert VID not in {item["video_id"] for item in api.get("/ops/jobs").json()["items"]}
 
 
 def test_database_failure_rolls_back_every_change_and_returns_write_503(
@@ -151,7 +165,7 @@ def test_database_failure_rolls_back_every_change_and_returns_write_503(
     before_video = db.execute("SELECT * FROM videos WHERE video_id = %s", (VID,)).fetchone()
     before_jobs = db.execute("SELECT * FROM jobs WHERE video_id = %s", (VID,)).fetchall()
 
-    real_delete = routes_write.delete_video
+    real_delete = deleted_videos.delete_video
 
     def fail(_conn: Any, _video_id: str) -> Any:
         def forced() -> None:
@@ -213,12 +227,36 @@ def test_delete_serializes_with_worker_claim_and_claim_wins(
         thread.join(timeout=10)
 
     assert not thread.is_alive()
-    assert isinstance(result["error"], routes_write.VideoRunning)
+    assert isinstance(result["error"], VideoRunning)
     assert db.execute("SELECT state FROM jobs WHERE video_id = %s", (VID,)).fetchone() == ("running",)
     assert db.execute("SELECT count(*) FROM deleted_videos").fetchone() == (0,)
 
 
-def test_unsafe_or_failed_unlink_does_not_change_committed_204(
+def test_unlink_failure_does_not_change_committed_204(
+    api: TestClient,
+    db: psycopg.Connection[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed_video(db)
+    db.execute(
+        "INSERT INTO media (video_id, path, bytes, expires_at) VALUES (%s, 'safe/audio.opus', 4, now())",
+        (VID,),
+    )
+
+    class FailingPath:
+        def unlink(self, *, missing_ok: bool) -> None:
+            raise PermissionError("forced")
+
+    monkeypatch.setattr(routes_write, "resolve_media_path", lambda *_args: FailingPath())
+
+    response = api.delete(f"/videos/{VID}")
+
+    assert response.status_code == 204
+    assert db.execute("SELECT video_id FROM deleted_videos").fetchall() == [(VID,)]
+    assert db.execute("SELECT count(*) FROM media WHERE video_id = %s", (VID,)).fetchone() == (0,)
+
+
+def test_unsafe_path_does_not_change_committed_204(
     api: TestClient,
     db: psycopg.Connection[Any],
     tmp_path: Path,

@@ -47,7 +47,9 @@ import psycopg
 import structlog
 
 from common.repo import media
-from common.repo.media import UnsafeMediaPath, resolve_media_path
+
+UnsafeMediaPath = media.UnsafeMediaPath
+resolve_media_path = media.resolve_media_path
 
 _log = structlog.get_logger(__name__)
 
