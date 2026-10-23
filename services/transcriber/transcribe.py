@@ -35,9 +35,10 @@ from common.chunking import chunk_strategy
 from common.config import Settings
 from common.errors import BugError, PermanentSourceError
 from common.models import AudioRef, AudioSource, Transcriber
+from common.progress import HISTORY_SIZE, estimate_effort
 from common.queue import Job, JobQueue
 from common.repo.media import delete_media, register_media
-from common.repo.transcripts import get_chunks, get_transcript, save_chunks
+from common.repo.transcripts import get_chunks, get_transcript, rtf_history, save_chunks
 from common.repo.videos import mark_unavailable, video_exists
 from common.worker import JobContext
 from services.transcriber.persist import (
@@ -45,6 +46,7 @@ from services.transcriber.persist import (
     enqueue_analyze,
     save_transcript_with_chunks,
 )
+from services.transcriber.progress import JobProgressWriter, ProgressTicker, ticking
 
 _PROGRESS_STEPS = 10
 #: Wall seconds after which a quiet transcription prints another line (issue #96).
@@ -106,6 +108,14 @@ def progress_reporter(
             ctx.progress("transcribe", done_sec, 0.0, done_sec=round(done_sec, 1))
 
     return on_progress
+
+
+def _payload_duration(job: Job) -> float | None:
+    """``payload["duration_sec"]`` (from the video's metadata) when it is a real number."""
+    value = job.payload.get("duration_sec")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if math.isfinite(value) else None
 
 
 def _language(job: Job, ctx: JobContext) -> str | None:
@@ -175,15 +185,27 @@ def make_transcribe_handler(
         if enqueue_analyze(queue, settings, job.id, job.video_id, priority=job.priority) is None:
             ctx.logger.info("analyze job already pending or running")
 
-    def process(conn: psycopg.Connection[Any], job: Job, ctx: JobContext, audio: AudioRef) -> None:
+    def process(
+        conn: psycopg.Connection[Any],
+        job: Job,
+        ctx: JobContext,
+        audio: AudioRef,
+        ticker: ProgressTicker,
+    ) -> None:
         register_media(conn, job.video_id, audio.rel_path, audio.bytes, settings.AUDIO_TTL_DAYS)
         conn.commit()  # before speech-to-text: retention must see this audio
         ctx.check_cancelled()
 
+        report = progress_reporter(ctx, audio.duration_sec, clock=clock)
+
+        def on_progress(done_sec: float) -> None:
+            report(done_sec)  # first: it is also the cancellation check
+            if math.isfinite(done_sec):
+                ticker.note(done_sec)
+
+        ticker.begin()
         result = transcriber.transcribe(
-            audio,
-            language=_language(job, ctx),
-            on_progress=progress_reporter(ctx, audio.duration_sec, clock=clock),
+            audio, language=_language(job, ctx), on_progress=on_progress
         )
 
         save_transcript_with_chunks(
@@ -217,23 +239,50 @@ def make_transcribe_handler(
             if ensure_chunks_and_hand_off(conn, job, ctx):
                 return
 
+            history = rtf_history(conn, settings.WHISPER_MODEL, settings.WHISPER_COMPUTE, HISTORY_SIZE)
+            conn.commit()
+            expected = _payload_duration(job)
+            ticker_writer = JobProgressWriter(connect, job)
+            ticker = ProgressTicker(
+                ticker_writer,
+                duration_sec=expected,
+                estimate=estimate_effort(expected, history),
+                clock=clock,
+            )
+            ticker.tick()  # the estimate is stored before any work starts
             try:
-                audio = audio_source.fetch_normalized(video_id, settings.AUDIO_DIR)
-            except PermanentSourceError as exc:
-                mark_unavailable(conn, video_id, exc.reason.value)
-                conn.commit()
-                raise
+                with ticking(ticker):
+                    transcribe_audio(conn, job, ctx, ticker, history)
+            finally:
+                ticker_writer.close()
 
-            try:
-                process(conn, job, ctx, audio)
-            except BaseException:
-                if not settings.AUDIO_KEEP:
-                    try:
-                        discard_audio(conn, job, ctx, audio)
-                    except Exception:
-                        ctx.logger.warning("could not discard audio after a failure", exc_info=True)
-                raise
+    def transcribe_audio(
+        conn: psycopg.Connection[Any],
+        job: Job,
+        ctx: JobContext,
+        ticker: ProgressTicker,
+        history: list[float],
+    ) -> None:
+        try:
+            audio = audio_source.fetch_normalized(job.video_id, settings.AUDIO_DIR)
+        except PermanentSourceError as exc:
+            mark_unavailable(conn, job.video_id, exc.reason.value)
+            conn.commit()
+            raise
+
+        # The measured length replaces the metadata's, and the estimate follows it.
+        ticker.set_target(audio.duration_sec, estimate_effort(audio.duration_sec, history))
+        ticker.tick()
+        try:
+            process(conn, job, ctx, audio, ticker)
+        except BaseException:
             if not settings.AUDIO_KEEP:
-                discard_audio(conn, job, ctx, audio)
+                try:
+                    discard_audio(conn, job, ctx, audio)
+                except Exception:
+                    ctx.logger.warning("could not discard audio after a failure", exc_info=True)
+            raise
+        if not settings.AUDIO_KEEP:
+            discard_audio(conn, job, ctx, audio)
 
     return handler
