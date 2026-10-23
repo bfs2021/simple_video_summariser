@@ -56,6 +56,7 @@ from common.models import (
     Chunk,
     ChunkAnalysis,
     JobScope,
+    OrphanOutcome,
     Roster,
     Usage,
     VideoMeta,
@@ -77,6 +78,8 @@ _MAX_DETAIL_CHARS = 200
 _MAX_RETRY_AFTER_DIGITS = 9
 
 _BATCH_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
+#: A cancel answered with one of these is worth repeating; any other 4xx is final (#160).
+_ORPHAN_RETRY_STATUSES = frozenset({401, 403, 429})
 _ERROR_TYPES_BUG = frozenset(
     {
         "invalid_request_error",
@@ -806,6 +809,38 @@ class AnthropicSummarizer:
                     "error": self._redact(f"{type(err).__name__}: {err}"),
                 },
             )
+
+    def cancel_orphan_batch(self, batch_id: str) -> OrphanOutcome:
+        """Cancel a batch no job waits on any more (#160). Never raises.
+
+        Reads and writes no per-job state (``_scope``, usage counters), so it is
+        safe to call from another thread while a job runs. Mapped by behaviour:
+        2xx is ``cancelled`` (also for a batch that had already ended); 401, 403,
+        429, 5xx and a transport failure are ``retry_later``; any other 4xx
+        (a batch the API no longer knows or refuses) is ``not_cancellable``.
+        """
+        if not isinstance(batch_id, str) or not _BATCH_ID.fullmatch(batch_id):
+            return "not_cancellable"  # never let a stored value reach the URL path
+        try:
+            response = self._send(
+                "POST", f"/v1/messages/batches/{batch_id}/cancel", b"{}", PLUMBING_TIMEOUT_SEC
+            )
+        except Exception as err:  # noqa: BLE001 - reported as retry_later, redacted
+            self._orphan_failed(batch_id, f"{type(err).__name__}: {err}")
+            return "retry_later"
+        status = response.status
+        if 200 <= status < 300:
+            return "cancelled"
+        if 400 <= status < 500 and status not in _ORPHAN_RETRY_STATUSES:
+            return "not_cancellable"
+        self._orphan_failed(batch_id, str(self._http_error(response)))
+        return "retry_later"
+
+    def _orphan_failed(self, batch_id: str, error: str) -> None:
+        _logger.warning(
+            "anthropic_orphan_cancel_failed",
+            extra={"batch_id": batch_id, "error": self._redact(error)[:_MAX_DETAIL_CHARS * 2]},
+        )
 
     def _batch_entries(self, batch_id: str, url: str) -> dict[str, dict[str, Any]]:
         """The result lines by custom_id; the first line for an id wins."""

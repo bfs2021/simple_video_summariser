@@ -20,7 +20,9 @@ the first job:
    the exit code or delays the worker for more than its timeout, because Ollama
    runs on the host and may start after the stack, and the job loop already
    retries ``LLM_UNAVAILABLE``. It needs no database connection;
-5. run the worker.
+5. with a summarizer that can cancel batches (``OrphanBatchCanceller``, #160),
+   start the orphan pass in a daemon thread (``services.analyzer.orphans``);
+6. run the worker.
 
 A database that is down at startup is handled like one that goes down mid-run:
 the connection is opened lazily by the worker's own claim loop, so the process
@@ -61,6 +63,7 @@ _install_early_handlers()
 
 import re
 import socket
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager, suppress
 from datetime import UTC, datetime, timedelta
@@ -76,9 +79,11 @@ from common.config import Settings, get_settings
 from common.db import connect as default_connect
 from common.errors import BugError, Defer
 from common.logging import configure_logging
+from common.models import OrphanBatchCanceller
 from common.queue import Job, JobQueue, PostgresQueue, analyze_dedupe_key
 from common.shutdown import SignalLatch
 from common.worker import JobContext, Worker
+from services.analyzer import orphans
 from services.analyzer.handler import make_analyze_handler
 
 _log = structlog.get_logger(__name__)
@@ -88,6 +93,9 @@ EXIT_CONFIG = 2
 
 #: How long a job whose ``dedupe_key`` this process is not configured for waits.
 MISMATCH_DEFER = timedelta(minutes=15)
+
+#: How long ``main`` waits for the orphan thread after the worker stopped (#160).
+ORPHAN_JOIN_SEC = 5.0
 
 #: ``<part>:<part>``: exactly what ``analyze_dedupe_key`` can produce (non-empty
 #: parts, one colon), and no whitespace, which no configured value contains.
@@ -236,6 +244,7 @@ def main(
     summarizer_factory: Callable[[Settings], Any] = build_summarizer,
     handler_factory: HandlerFactory = make_analyze_handler,
     worker_options: Mapping[str, Any] | None = None,
+    orphan_options: Mapping[str, Any] | None = None,
     max_iterations: int | None = None,
     probe_transport: GetTransport | None = None,
 ) -> int:
@@ -243,8 +252,9 @@ def main(
 
     The keyword arguments are the test seams: ``settings``, the database
     ``connect``, the summarizer and handler factories, extra ``Worker``
-    options (``poll_sec``, ``sleep``, ``liveness_path`` ...), a bound on the
-    claim loop and the HTTP round-trip of the Ollama startup probe.
+    options (``poll_sec``, ``sleep``, ``liveness_path`` ...), the orphan pass
+    options (``interval_sec``, ``limit``, ``expired_after``, ``connect``,
+    ``store_factory``, ``join_sec``; #160), a bound on the claim loop and the HTTP round-trip of the Ollama startup probe.
 
     A SIGTERM/SIGINT received while starting up (see ``common.shutdown``, #108)
     makes this return 0 at the next startup step, without claiming a job.
@@ -258,6 +268,7 @@ def main(
             summarizer_factory=summarizer_factory,
             handler_factory=handler_factory,
             worker_options=worker_options,
+            orphan_options=orphan_options,
             max_iterations=max_iterations,
             probe_transport=probe_transport,
         )
@@ -273,6 +284,7 @@ def _run(
     summarizer_factory: Callable[[Settings], Any],
     handler_factory: HandlerFactory,
     worker_options: Mapping[str, Any] | None,
+    orphan_options: Mapping[str, Any] | None,
     max_iterations: int | None,
     probe_transport: GetTransport | None,
 ) -> int:
@@ -343,13 +355,29 @@ def _run(
         dedupe_key=dedupe_key,
         **(worker_options or {}),
     )
+    orphan_stop = threading.Event()
+    orphan_thread: threading.Thread | None = None
+    orphan_join_sec = ORPHAN_JOIN_SEC
     # Late-bound: resolved when a signal arrives, not when attached.
-    latch.attach(lambda: worker.request_shutdown())
+    def request_shutdown() -> None:
+        orphan_stop.set()
+        worker.request_shutdown()
+
+    latch.attach(request_shutdown)
     try:
         if latch.requested:
             return 0
+        if isinstance(summarizer, OrphanBatchCanceller):
+            # Also with ANTHROPIC_BATCH=0: rows from earlier batch-mode runs still need cleaning.
+            options = dict(orphan_options or {})
+            orphan_join_sec = options.pop("join_sec", ORPHAN_JOIN_SEC)
+            orphan_connect = options.pop("connect", open_connection)
+            orphan_thread = orphans.start_orphan_thread(orphan_connect, summarizer, orphan_stop, **options)
         worker.run(max_iterations=max_iterations)
     finally:
+        orphan_stop.set()
+        if orphan_thread is not None:
+            orphan_thread.join(orphan_join_sec)
         claim_queue.close()
     return 0
 

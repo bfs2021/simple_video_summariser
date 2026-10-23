@@ -6,6 +6,8 @@ open across a poll.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 import psycopg
@@ -64,6 +66,65 @@ def delete_checkpoint(conn: psycopg.Connection[Any], job_id: int, step_key: str)
 def delete_job_checkpoints(conn: psycopg.Connection[Any], job_id: int) -> None:
     with conn.transaction():
         conn.execute("DELETE FROM llm_batches WHERE job_id = %s", (job_id,))
+
+
+@dataclass(frozen=True, slots=True)
+class OrphanBatch:
+    """A row whose job is over (#160). ``expired``: older than ``expired_after``, by the DB clock."""
+
+    job_id: int
+    step_key: str
+    batch_id: str
+    expired: bool
+
+
+def list_orphans(
+    conn: psycopg.Connection[Any], *, limit: int, expired_after: timedelta
+) -> list[OrphanBatch]:
+    """Rows of ``dead`` / ``done`` jobs, oldest ``submitted_at`` first, at most ``limit``.
+
+    Rows of ``pending`` and ``running`` jobs are never returned: #89's resume
+    depends on them.
+    """
+    with conn.transaction():
+        rows = conn.execute(
+            """
+            SELECT b.job_id, b.step_key, b.batch_id, b.submitted_at < now() - %s
+            FROM llm_batches b
+            JOIN jobs j ON j.id = b.job_id
+            WHERE j.state IN ('dead', 'done')
+            ORDER BY b.submitted_at, b.job_id, b.step_key
+            LIMIT %s
+            """,
+            (expired_after, limit),
+        ).fetchall()
+    return [OrphanBatch(job_id, step_key, batch_id, bool(expired)) for job_id, step_key, batch_id, expired in rows]
+
+
+def delete_orphan(
+    conn: psycopg.Connection[Any], job_id: int, step_key: str, batch_id: str
+) -> bool:
+    """Delete one orphan row, only while its job is still ``dead`` or ``done``.
+
+    One statement: the job's state is re-checked (and share-locked, so a
+    concurrent ``retry_dead`` waits) in the same ``DELETE``. Returns whether a
+    row went.
+    """
+    with conn.transaction():
+        row = conn.execute(
+            """
+            DELETE FROM llm_batches b
+            WHERE b.job_id = %s AND b.step_key = %s AND b.batch_id = %s
+              AND EXISTS (
+                SELECT 1 FROM jobs j
+                WHERE j.id = b.job_id AND j.state IN ('dead', 'done')
+                FOR SHARE OF j
+              )
+            RETURNING 1
+            """,
+            (job_id, step_key, batch_id),
+        ).fetchone()
+    return row is not None
 
 
 def _checkpoint(row: Any) -> BatchCheckpoint:
