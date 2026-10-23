@@ -311,3 +311,37 @@ docker compose ps          # services healthy
 proxy (#141) for TLS. Updates are `git pull` of `master`, then
 `docker compose run --rm migrate` (if there is a new revision) and
 `docker compose -f compose.yml up -d --build`.
+
+---
+
+## Public access (Cloudflare Tunnel)
+
+Optional. `compose.tunnel.yml` adds a `cloudflared` container that dials out
+to Cloudflare and forwards to `web`; no inbound port opens and `web` stays on
+`127.0.0.1:8080`. The app has no login of its own, so **put a Cloudflare
+Access policy in front before sharing the hostname**.
+
+One-time, on a machine with `cloudflared tunnel login` done for the zone:
+
+```bash
+cloudflared tunnel create ytdigest
+cloudflared tunnel route dns <tunnel-id> dev-ytdigest.devopsdojo.click
+```
+
+(Route by ID: right after `create`, the name can briefly be "not found".)
+Then in `.env` set `TUNNEL_ID` and `TUNNEL_CRED_CONTENTS` (the whole
+`~/.cloudflared/<id>.json` on one line, in single quotes); see
+`.env.example`. Start it:
+
+```bash
+docker compose -f compose.yml -f compose.tunnel.yml up -d
+# dev: add -f compose.override.yml and set TUNNEL_URL=http://web:5173
+```
+
+Access policy (Zero Trust dashboard, not in this repo): Access -> Applications
+-> Add -> Self-hosted, domain `dev-ytdigest.devopsdojo.click`, policy
+"Allow" for your email with the one-time PIN login method. Until that exists
+the URL is open to anyone.
+
+Revoke: `cloudflared tunnel delete ytdigest` and remove the DNS record.
+
