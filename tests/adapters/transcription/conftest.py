@@ -20,7 +20,9 @@ from __future__ import annotations
 import pytest
 
 
-def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
     markexpr = config.getoption("markexpr") or ""
     if "whisper" in markexpr:
         return  # e.g. `-m whisper` or `-m "whisper and not slow"`: let it through
