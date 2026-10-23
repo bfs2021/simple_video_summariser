@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import { Link, useSearchParams } from 'react-router'
+import { AddVideoForm } from '../components/AddVideoForm'
 import { ApiError, useVideos } from '../hooks/useVideos'
 import {
   hasFilters,
@@ -79,6 +80,8 @@ export function Library() {
   return (
     <section className="page">
       <h1>Library</h1>
+
+      <AddVideoForm />
 
       <form className="card filters" onSubmit={(e) => e.preventDefault()}>
         <label className="field">

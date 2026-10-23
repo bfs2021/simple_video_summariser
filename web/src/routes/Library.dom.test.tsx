@@ -98,6 +98,155 @@ beforeEach(() => {
 const search = (r: { state: { location: { search: string } } }) => r.state.location.search
 const last = () => requests[requests.length - 1] as URL
 
+describe('single-video submission', () => {
+  type SubmissionResponder = () => Response | Promise<Response>
+  let posts: Array<{ url: URL; init: RequestInit }>
+
+  function stubSubmission(respond: SubmissionResponder) {
+    requests = []
+    posts = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init: RequestInit = {}) => {
+        const url = new URL(String(input), 'http://localhost')
+        if (init.method === 'POST') {
+          posts.push({ url, init })
+          return Promise.resolve(respond())
+        }
+        requests.push(url)
+        return Promise.resolve(json(list(1, [vid(1)])))
+      }),
+    )
+  }
+
+  async function submit(value: string) {
+    const input = screen.getByRole('textbox', { name: 'YouTube video URL or ID' }) as HTMLInputElement
+    fireEvent.change(input, { target: { value } })
+    fireEvent.submit(input.closest('form') as HTMLFormElement)
+    await settle()
+    return input
+  }
+
+  it('renders the submission form above the video results', async () => {
+    stubFetch(serverWith(1))
+    await mount()
+    const input = screen.getByRole('textbox', { name: 'YouTube video URL or ID' })
+    const button = screen.getByRole('button', { name: 'Add video' })
+    const table = screen.getByRole('table')
+    expect(input.closest('form')).toContain(button)
+    expect(button.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('submits with the form keyboard path and trims only outer whitespace', async () => {
+    stubSubmission(() => json({ created: true, video_id: 'Ab_-123xyZ0', job_id: 7, state: 'pending' }, 202))
+    await mount()
+    await submit('  https://youtu.be/Ab_-123xyZ0?T=Mixed  ')
+    expect(posts).toHaveLength(1)
+    expect(posts[0]?.url.pathname).toBe('/api/videos')
+    expect(posts[0]?.init.method).toBe('POST')
+    expect(JSON.parse(String(posts[0]?.init.body))).toEqual({ url: 'https://youtu.be/Ab_-123xyZ0?T=Mixed' })
+    expect(screen.getByText('Queued')).toBeTruthy()
+    expect(screen.getByRole('link', { name: 'Ab_-123xyZ0' }).getAttribute('href')).toBe('/videos/Ab_-123xyZ0')
+  })
+
+  it('shows an existing submission and state without treating it as an error', async () => {
+    stubSubmission(() => json({ created: false, video_id: 'dQw4w9WgXcQ', job_id: 8, state: 'running' }))
+    await mount()
+    const input = await submit('dQw4w9WgXcQ')
+    expect(screen.getByText('Already added')).toBeTruthy()
+    expect(screen.getByText('running')).toBeTruthy()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(input.value).toBe('')
+  })
+
+  it.each([
+    [422, 'url must be a YouTube video ID or video URL'],
+    [429, 'Too many requests. Wait a moment and try again.'],
+    [503, 'The service is unavailable. Try again shortly.'],
+    [500, 'Could not add the video. Try again.'],
+  ])('maps HTTP %i to fixed feedback and retains the input', async (status, message) => {
+    stubSubmission(() => json({ detail: 'SECRET server text' }, status))
+    await mount()
+    const input = await submit(' keep-me ')
+    const alert = screen.getByRole('alert')
+    expect(alert.textContent).toBe(message)
+    expect(input.value).toBe(' keep-me ')
+    expect(document.body.textContent).not.toContain('SECRET')
+    if (status === 422) {
+      expect(input.getAttribute('aria-invalid')).toBe('true')
+      expect(input.getAttribute('aria-describedby')).toBe(alert.id)
+    }
+  })
+
+  it.each([
+    ['a malformed success', () => json({ created: true, video_id: 3, state: 'pending' })],
+    ['a network failure', () => Promise.reject(new TypeError('SECRET network exception'))],
+  ])('shows safe feedback for %s and retains focus and input', async (_name, respond) => {
+    stubSubmission(respond)
+    await mount()
+    const input = screen.getByRole('textbox', { name: 'YouTube video URL or ID' }) as HTMLInputElement
+    input.focus()
+    await submit('keep-me')
+    expect(screen.getByRole('alert').textContent).toBe(
+      _name === 'a network failure'
+        ? 'Could not add the video. Check your connection and try again.'
+        : 'Could not add the video. Try again.',
+    )
+    expect(input.value).toBe('keep-me')
+    expect(document.activeElement).toBe(input)
+    expect(document.body.textContent).not.toContain('SECRET')
+  })
+
+  it('shows safe outcome text without a link for an invalid returned video id', async () => {
+    stubSubmission(() => json({ created: true, video_id: '<bad-id>', job_id: 9, state: 'pending' }, 202))
+    await mount()
+    await submit('valid server input')
+    expect(screen.getByText('Queued')).toBeTruthy()
+    expect(screen.queryByRole('link', { name: '<bad-id>' })).toBeNull()
+    expect(document.querySelector('bad-id')).toBeNull()
+  })
+
+  it('clears feedback on edit and invalidates videos and ops after success', async () => {
+    stubSubmission(() => json({ created: true, video_id: 'dQw4w9WgXcQ', job_id: 7, state: 'pending' }, 202))
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const invalidate = vi.spyOn(client, 'invalidateQueries')
+    const router = createMemoryRouter([{ path: '/', element: <Library /> }], { initialEntries: ['/'] })
+    render(
+      <QueryClientProvider client={client}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>,
+    )
+    await settle()
+    const input = await submit('dQw4w9WgXcQ')
+    expect(input.value).toBe('')
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['videos'] })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['ops'] })
+    fireEvent.change(input, { target: { value: 'next' } })
+    expect(screen.queryByText('Queued')).toBeNull()
+  })
+
+  it('allows only one unresolved submission despite repeated submit and click events', async () => {
+    let release: (response: Response) => void = () => {}
+    stubSubmission(() => new Promise<Response>((resolve) => { release = resolve }))
+    await mount()
+    const input = screen.getByRole('textbox', { name: 'YouTube video URL or ID' }) as HTMLInputElement
+    fireEvent.change(input, { target: { value: 'dQw4w9WgXcQ' } })
+    const form = input.closest('form') as HTMLFormElement
+    const button = screen.getByRole('button', { name: 'Add video' }) as HTMLButtonElement
+    fireEvent.submit(form)
+    fireEvent.submit(form)
+    fireEvent.click(button)
+    await settle()
+    expect(posts).toHaveLength(1)
+    expect(button.disabled).toBe(true)
+    expect(button.textContent).not.toBe('Add video')
+    await act(async () => {
+      release(json({ created: true, video_id: 'dQw4w9WgXcQ', job_id: 7, state: 'pending' }, 202))
+      await vi.advanceTimersByTimeAsync(0)
+    })
+  })
+})
+
 describe('request construction', () => {
   it('fetches same-origin /api/videos with limit and offset only when nothing is set', async () => {
     stubFetch(serverWith(3))
@@ -863,7 +1012,13 @@ describe('accessibility', () => {
 
   it('uses no dangerouslySetInnerHTML in the view sources', async () => {
     const { readFileSync } = await import('node:fs')
-    for (const f of ['Library.tsx', '../hooks/useVideos.ts', '../lib/library.ts']) {
+    for (const f of [
+      'Library.tsx',
+      '../components/AddVideoForm.tsx',
+      '../hooks/useSubmitVideo.ts',
+      '../hooks/useVideos.ts',
+      '../lib/library.ts',
+    ]) {
       expect(readFileSync(new URL(f, import.meta.url), 'utf8')).not.toContain('dangerouslySetInnerHTML')
     }
   })
