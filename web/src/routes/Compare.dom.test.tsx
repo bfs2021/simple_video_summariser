@@ -55,6 +55,7 @@ function video(over: Partial<VideoDetailOut> = {}): VideoDetailOut {
     published_at: '2026-09-30T23:30:00-07:00',
     duration_sec: 3723,
     latest_analysis_at: null,
+    has_transcript: false,
     origin: 'manual',
     unavailable: null,
     status: 'done',

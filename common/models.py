@@ -460,6 +460,7 @@ class VideoSummary:
     active_job: ActiveJob | None
     last_failure: JobFailure | None
     latest_analysis_at: datetime | None
+    has_transcript: bool = False
 
 
 @dataclass(frozen=True, slots=True)

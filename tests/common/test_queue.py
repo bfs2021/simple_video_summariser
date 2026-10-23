@@ -388,6 +388,26 @@ def test_clean_exit_marks_the_job_done_and_clears_ownership(
     assert row["locked_by"] is None
 
 
+def test_a_clean_run_after_a_failed_attempt_clears_the_old_error(
+    queue: PostgresQueue, conn: psycopg.Connection[Any]
+) -> None:
+    job_id = queue.enqueue("ingest", "v1")
+    assert job_id is not None
+    with queue.claim(["ingest"], worker="w1") as job:
+        assert job is not None
+        raise TransientNetworkError("dns lookup failed")
+    assert _row(conn, job_id)["last_error"] is not None
+    _set(conn, job_id, run_after=datetime.now(UTC) - timedelta(seconds=1))
+
+    with queue.claim(["ingest"], worker="w1") as job:
+        assert job is not None
+
+    row = _row(conn, job_id)
+    assert row["state"] == "done"
+    assert row["last_error"] is None
+    assert row["error_class"] is None
+
+
 # ---------------------------------------------------------------------------
 # outcome: exception -> classify decides
 # ---------------------------------------------------------------------------

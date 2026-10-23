@@ -1877,6 +1877,10 @@
             ],
             "title": "Duration Sec"
           },
+          "has_transcript": {
+            "title": "Has Transcript",
+            "type": "boolean"
+          },
           "last_failure": {
             "anyOf": [
               {
@@ -1976,6 +1980,7 @@
           "active_job",
           "last_failure",
           "latest_analysis_at",
+          "has_transcript",
           "transcript",
           "analysis"
         ],
@@ -2026,6 +2031,10 @@
               }
             ],
             "title": "Duration Sec"
+          },
+          "has_transcript": {
+            "title": "Has Transcript",
+            "type": "boolean"
           },
           "last_failure": {
             "anyOf": [
@@ -2115,7 +2124,8 @@
           "status",
           "active_job",
           "last_failure",
-          "latest_analysis_at"
+          "latest_analysis_at",
+          "has_transcript"
         ],
         "title": "VideoItem",
         "type": "object"

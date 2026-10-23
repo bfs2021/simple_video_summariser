@@ -370,7 +370,8 @@ _VIDEO_READ = """
            lf.id AS lf_id, lf.kind AS lf_kind, lf.error_class AS lf_error_class,
            lf.finished_at AS lf_finished_at,
            la.created_at AS latest_analysis_at,
-           v.discovered_at
+           v.discovered_at,
+           EXISTS (SELECT 1 FROM transcripts t WHERE t.video_id = v.video_id) AS has_transcript
     FROM videos v
     LEFT JOIN channels c ON c.channel_id = v.channel_id
     LEFT JOIN LATERAL (
@@ -466,7 +467,7 @@ def _summary(row: Sequence[Any]) -> VideoSummary:
     (
         video_id, title, channel_id, channel_title, published_at, duration_sec, origin,
         unavailable, status, aj_id, aj_kind, aj_state, lf_id, lf_kind, lf_class,
-        lf_finished, latest_analysis_at, _discovered_at,
+        lf_finished, latest_analysis_at, _discovered_at, has_transcript,
     ) = row
     return VideoSummary(
         video_id=video_id,
@@ -483,5 +484,6 @@ def _summary(row: Sequence[Any]) -> VideoSummary:
             None if lf_id is None else JobFailure(int(lf_id), lf_kind, lf_class, lf_finished)
         ),
         latest_analysis_at=latest_analysis_at,
+        has_transcript=has_transcript,
     )
 

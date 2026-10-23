@@ -22,6 +22,7 @@ function video(id = ID): VideoDetailOut {
     published_at: null,
     duration_sec: null,
     latest_analysis_at: null,
+    has_transcript: false,
     origin: 'manual',
     unavailable: null,
     status: 'idle',

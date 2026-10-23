@@ -235,6 +235,7 @@ export function Library() {
                     <SortHeader label="Channel" sort="channel" state={state} onSort={sortBy} />
                     <SortHeader label="Published" sort="published" state={state} onSort={sortBy} />
                     <SortHeader label="Status" sort="status" state={state} onSort={sortBy} />
+                    <th scope="col">Transcript</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -266,6 +267,13 @@ export function Library() {
                               </>
                             )}
                           </span>
+                        </td>
+                        <td>
+                          {v.has_transcript ? (
+                            <Link to={`/videos/${v.video_id}/transcript`}>Transcript</Link>
+                          ) : (
+                            <span className="muted">Not yet</span>
+                          )}
                         </td>
                       </tr>
                     )
