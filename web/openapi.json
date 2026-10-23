@@ -3214,6 +3214,35 @@
       }
     },
     "/videos/{video_id}": {
+      "delete": {
+        "operationId": "delete_stored_video_videos__video_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "video_id",
+            "required": true,
+            "schema": {
+              "title": "Video Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "No such video"
+          },
+          "409": {
+            "description": "The video has a running job"
+          },
+          "422": {
+            "description": "Malformed video ID"
+          }
+        },
+        "summary": "Delete Stored Video"
+      },
       "get": {
         "description": "One video, its status, best transcript (D2) and latest analysis.",
         "operationId": "get_video_detail_videos__video_id__get",

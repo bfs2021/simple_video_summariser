@@ -10,7 +10,10 @@ from services.api import openapi_export
 
 COMMITTED = Path(__file__).resolve().parents[3] / "web" / "openapi.json"
 REGEN = "python -m services.api.openapi_export && (cd web && npm run gen:api)"
-HTML_ROUTES = {("get", "/videos/{video_id}/render")}
+NON_JSON_ROUTES = {
+    ("delete", "/videos/{video_id}"),
+    ("get", "/videos/{video_id}/render"),
+}
 METHODS = {"get", "put", "post", "delete", "patch", "options", "head"}
 
 
@@ -65,7 +68,7 @@ def test_every_json_operation_declares_a_success_response_schema() -> None:
     offenders: list[str] = []
     for path, item in openapi_export.build_schema()["paths"].items():
         for method, operation in item.items():
-            if method not in METHODS or (method, path) in HTML_ROUTES:
+            if method not in METHODS or (method, path) in NON_JSON_ROUTES:
                 continue
             codes = _success_codes(operation)
             if not codes:
@@ -84,7 +87,7 @@ def test_every_json_operation_declares_a_success_response_schema() -> None:
 
 def test_html_route_declares_text_html_not_json() -> None:
     paths = openapi_export.build_schema()["paths"]
-    for method, path in HTML_ROUTES:
+    for method, path in {("get", "/videos/{video_id}/render")}:
         operation = paths[path][method]
         codes = _success_codes(operation)
         assert codes == ["200"]

@@ -218,6 +218,18 @@ def test_rate_limit_applies_to_the_write_router_only(
         assert client.get("/healthz").status_code == 200
 
 
+def test_delete_video_inherits_auth_and_write_rate_limit(logs: LogSink) -> None:
+    app = api_main.create_app()
+    app.dependency_overrides[deps.require_auth] = _deny
+    with TestClient(app) as client:
+        assert client.delete("/videos/dQw4w9WgXcQ").status_code == 401
+
+    app = api_main.create_app()
+    app.dependency_overrides[deps.rate_limit] = _too_many
+    with TestClient(app) as client:
+        assert client.delete("/videos/dQw4w9WgXcQ").status_code == 429
+
+
 def test_write_router_declares_rate_limit() -> None:
     assert any(
         d.dependency is deps.rate_limit for d in routes_write.router.dependencies
